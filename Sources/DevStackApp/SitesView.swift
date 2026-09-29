@@ -114,13 +114,18 @@ private struct SiteEditor: View {
                 TextField("Name", text: $editor.site.name)
                 TextField("Hostname", text: $editor.site.hostname)
                     .textContentType(.URL)
+                if HostnameValidator.shadowsPublicDomain(editor.site.hostname) {
+                    Label("This hostname is not in the reserved .test domain; its /etc/hosts entry can shadow the real domain.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
                 LabeledContent("Document root") {
                     HStack {
                         TextField("Folder", text: $editor.site.documentRoot)
                         Button("Choose…", action: chooseFolder)
                     }
                 }
-                Picker("PHP", selection: $editor.site.phpRuntimeID) {
+                Picker("PHP", selection: phpRuntimeBinding) {
                     Text("PHP 8.5.11").tag("php-8.5")
                     Text("PHP 7.4.33 — Legacy/EOL").tag("php-7.4")
                 }
@@ -163,6 +168,25 @@ private struct SiteEditor: View {
         }
         .padding(24)
         .frame(width: 620, height: 600)
+        .alert("PHP 7.4 is end-of-life", isPresented: $editor.isConfirmingLegacyRuntime) {
+            Button("Use PHP 7.4", role: .destructive) { editor.site.phpRuntimeID = "php-7.4" }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("PHP 7.4 no longer receives security fixes. Use it only for legacy compatibility and keep the site off untrusted networks.")
+        }
+    }
+
+    private var phpRuntimeBinding: Binding<String> {
+        Binding(
+            get: { editor.site.phpRuntimeID },
+            set: { newValue in
+                if newValue == "php-7.4", editor.site.phpRuntimeID != "php-7.4" {
+                    editor.isConfirmingLegacyRuntime = true
+                } else {
+                    editor.site.phpRuntimeID = newValue
+                }
+            }
+        )
     }
 
     private func chooseFolder() {
@@ -181,6 +205,7 @@ private final class SiteEditorState: ObservableObject {
     @Published var site: SiteDefinition
     @Published var errorMessage: String?
     @Published var isSaving = false
+    @Published var isConfirmingLegacyRuntime = false
 
     init(site: SiteDefinition) {
         self.site = site
