@@ -49,6 +49,7 @@ struct PHPView: View {
 
 struct DatabaseView: View {
     @EnvironmentObject private var model: AppModel
+    @StateObject private var viewState = DatabaseViewState()
 
     var body: some View {
         Form {
@@ -81,6 +82,31 @@ struct DatabaseView: View {
                     .foregroundStyle(.orange)
             }
 
+            Section("Backup and restore") {
+                Button("Export All Databases…", systemImage: "square.and.arrow.up", action: exportDatabase)
+                    .disabled(model.isBusy)
+                Button("Import SQL File…", systemImage: "arrow.down.doc", action: chooseImportFile)
+                    .disabled(model.isBusy)
+                Button("Reset \(model.configuration.selectedDatabase.displayName)…", systemImage: "trash", role: .destructive) {
+                    viewState.isConfirmingReset = true
+                }
+                .disabled(model.isBusy)
+                if let backup = model.lastDatabaseBackup {
+                    LabeledContent("Last backup") {
+                        Text(backup.path)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                }
+                Button("Reveal Backups", systemImage: "folder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([model.paths.backups])
+                }
+                Text("Import and reset write a timestamped backup, either a SQL export or the archived data directory, before changing data.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 Button("Open phpMyAdmin", systemImage: "safari") {
                     model.openURL("https://phpmyadmin.devstack.test")
@@ -89,6 +115,42 @@ struct DatabaseView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Database")
+        .alert("Import SQL file?", isPresented: $viewState.isConfirmingImport, presenting: viewState.pendingImport) { url in
+            Button("Import", role: .destructive) {
+                viewState.pendingImport = nil
+                Task { await model.importDatabase(from: url) }
+            }
+            Button("Cancel", role: .cancel) { viewState.pendingImport = nil }
+        } message: { url in
+            Text("A timestamped backup is written to Backups before \(url.lastPathComponent) is imported. Existing databases can be overwritten.")
+        }
+        .alert("Reset \(model.configuration.selectedDatabase.displayName)?", isPresented: $viewState.isConfirmingReset) {
+            Button("Reset and Backup First", role: .destructive) { Task { await model.resetDatabase() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("DevStack backs up the current databases, stops the engine, archives its data directory, and initializes a clean engine with root/root.")
+        }
+    }
+
+    private func exportDatabase() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = model.databaseBackupFilename()
+        panel.canCreateDirectories = true
+        if panel.runModal() == .OK, let url = panel.url {
+            Task { await model.exportDatabase(to: url) }
+        }
+    }
+
+    private func chooseImportFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.data]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "Choose a .sql file to import into \(model.configuration.selectedDatabase.displayName)."
+        if panel.runModal() == .OK, let url = panel.url {
+            viewState.pendingImport = url
+            viewState.isConfirmingImport = true
+        }
     }
 
     private var databaseBinding: Binding<DatabaseEngine> {
@@ -97,6 +159,13 @@ struct DatabaseView: View {
             set: { model.selectedDatabaseBinding = $0 }
         )
     }
+}
+
+@MainActor
+private final class DatabaseViewState: ObservableObject {
+    @Published var isConfirmingImport = false
+    @Published var isConfirmingReset = false
+    @Published var pendingImport: URL?
 }
 
 struct MailpitView: View {

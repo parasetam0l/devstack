@@ -133,6 +133,21 @@ enum DevStackCoreChecks {
             date: Date(timeIntervalSince1970: 0)
         )
         try expect(backupName == "mysql-8.4-all-databases-19700101-000000.sql", "Database backup naming is not deterministic")
+        try expect(
+            databaseManager.archiveDataDirectoryName(engine: .mysql57, date: Date(timeIntervalSince1970: 0)) == "mysql-5.7-data-19700101-000000",
+            "Database data archive naming is not deterministic"
+        )
+        do {
+            _ = try databaseManager.archiveDataDirectory(.mysql84)
+            throw CheckFailure(description: "Missing database data directory was archived")
+        } catch DatabaseManagerError.dataDirectoryMissing {
+            // Expected.
+        }
+        let liveDataDirectory = databaseManager.dataDirectoryURL(.mysql57)
+        try FileManager.default.createDirectory(at: liveDataDirectory.appendingPathComponent("mysql"), withIntermediateDirectories: true)
+        let archivedDataDirectory = try databaseManager.archiveDataDirectory(.mysql57, date: Date(timeIntervalSince1970: 0))
+        try expect(FileManager.default.fileExists(atPath: archivedDataDirectory.appendingPathComponent("mysql").path), "Database data directory was not archived")
+        try expect(!FileManager.default.fileExists(atPath: liveDataDirectory.path), "Archived database data directory was not moved")
 
         let payloadRoot = temporary.appendingPathComponent("runtime-pack", isDirectory: true)
         try FileManager.default.createDirectory(at: payloadRoot, withIntermediateDirectories: true)

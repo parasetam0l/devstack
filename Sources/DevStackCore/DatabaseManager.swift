@@ -3,11 +3,13 @@ import Foundation
 public enum DatabaseManagerError: LocalizedError, Sendable {
     case unsafeDatabaseName(String)
     case sourceFileMissing(String)
+    case dataDirectoryMissing(String)
 
     public var errorDescription: String? {
         switch self {
         case .unsafeDatabaseName(let name): "Invalid database name: \(name)"
         case .sourceFileMissing(let path): "SQL source file does not exist: \(path)"
+        case .dataDirectoryMissing(let path): "Database data directory does not exist: \(path)"
         }
     }
 }
@@ -94,12 +96,39 @@ public struct DatabaseManager: Sendable {
     }
 
     public func backupFilename(engine: DatabaseEngine, database: String?, date: Date = Date()) -> String {
+        let scope = database ?? "all-databases"
+        return "\(engine.rawValue)-\(scope)-\(timestamp(date)).sql"
+    }
+
+    public func archiveDataDirectoryName(engine: DatabaseEngine, date: Date = Date()) -> String {
+        "\(engine.rawValue)-data-\(timestamp(date))"
+    }
+
+    public func dataDirectoryURL(_ engine: DatabaseEngine) -> URL {
+        dataDirectory(for: engine)
+    }
+
+    @discardableResult
+    public func archiveDataDirectory(_ engine: DatabaseEngine, date: Date = Date(), fileManager: FileManager = .default) throws -> URL {
+        let source = dataDirectory(for: engine)
+        guard fileManager.fileExists(atPath: source.path) else {
+            throw DatabaseManagerError.dataDirectoryMissing(source.path)
+        }
+        try fileManager.createDirectory(at: paths.backups, withIntermediateDirectories: true)
+        let destination = paths.backups.appendingPathComponent(archiveDataDirectoryName(engine: engine, date: date), isDirectory: true)
+        guard !fileManager.fileExists(atPath: destination.path) else {
+            throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: destination.path])
+        }
+        try fileManager.moveItem(at: source, to: destination)
+        return destination
+    }
+
+    private func timestamp(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let scope = database ?? "all-databases"
-        return "\(engine.rawValue)-\(scope)-\(formatter.string(from: date)).sql"
+        return formatter.string(from: date)
     }
 
     private func client(_ engine: DatabaseEngine, name: String) -> URL {

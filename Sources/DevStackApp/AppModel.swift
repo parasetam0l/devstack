@@ -50,6 +50,7 @@ final class AppModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var helperInstalled = false
     @Published var helperStatus: PrivilegedHelperStatus?
+    @Published var lastDatabaseBackup: URL?
 
     let paths: DevStackPaths
     private let store: AppConfigurationStore
@@ -163,10 +164,9 @@ final class AppModel: ObservableObject {
             try validateRequiredRuntimes()
             try await prepareCertificatesAndPrivilegedState()
             try await startMailpit()
-            let database = DatabaseManager(paths: paths, runtimeRoot: paths.builtInRuntimes)
-            let initializedDatabase = try database.initializeIfNeeded(configuration.selectedDatabase)
+            let initializedDatabase = try databaseManager.initializeIfNeeded(configuration.selectedDatabase)
             try await startDatabase(configuration.selectedDatabase)
-            if initializedDatabase { try database.configureDevelopmentRootPassword(configuration.selectedDatabase) }
+            if initializedDatabase { try databaseManager.configureDevelopmentRootPassword(configuration.selectedDatabase) }
             let phpRuntimes = Set(configuration.sites.map(\.phpRuntimeID)).union(["php-8.5"])
             for runtimeID in phpRuntimes.sorted() { try await startPHP(runtimeID: runtimeID) }
             try verifyLegacyDatabaseCompatibilityIfNeeded()
@@ -296,6 +296,62 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func databaseBackupFilename() -> String {
+        databaseManager.backupFilename(engine: configuration.selectedDatabase, database: nil)
+    }
+
+    func exportDatabase(to destination: URL) async {
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            await refreshServiceStates()
+            let engine = configuration.selectedDatabase
+            try requireRunningDatabase(engine)
+            lastDatabaseBackup = try databaseManager.exportSQL(engine, destination: destination)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func importDatabase(from source: URL) async {
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            await refreshServiceStates()
+            let engine = configuration.selectedDatabase
+            try requireRunningDatabase(engine)
+            lastDatabaseBackup = try databaseManager.exportSQL(engine)
+            try databaseManager.importSQL(engine, source: source)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func resetDatabase() async {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
+        let engine = configuration.selectedDatabase
+        let kind: ServiceKind = engine == .mysql57 ? .mysql57 : .mysql84
+        do {
+            await refreshServiceStates()
+            if serviceStates.first(where: { $0.service == kind })?.phase == .running {
+                lastDatabaseBackup = try databaseManager.exportSQL(engine)
+            }
+            await supervisor.stop(kind)
+            if FileManager.default.fileExists(atPath: databaseManager.dataDirectoryURL(engine).path) {
+                let archived = try databaseManager.archiveDataDirectory(engine)
+                if lastDatabaseBackup == nil { lastDatabaseBackup = archived }
+            }
+            let initialized = try databaseManager.initializeIfNeeded(engine)
+            if initialized { try databaseManager.configureDevelopmentRootPassword(engine) }
+            try await startDatabase(engine)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        await refreshServiceStates()
+    }
+
     func openManagedShell() {
         do {
             let php = paths.builtInRuntimes.appendingPathComponent("php-8.5/bin")
@@ -326,6 +382,17 @@ final class AppModel: ObservableObject {
 
     private func persistConfiguration() async {
         do { try await store.save(configuration) } catch { errorMessage = error.localizedDescription }
+    }
+
+    private var databaseManager: DatabaseManager {
+        DatabaseManager(paths: paths, runtimeRoot: paths.builtInRuntimes)
+    }
+
+    private func requireRunningDatabase(_ engine: DatabaseEngine) throws {
+        let kind: ServiceKind = engine == .mysql57 ? .mysql57 : .mysql84
+        guard serviceStates.first(where: { $0.service == kind })?.phase == .running else {
+            throw CocoaError(.executableNotLoadable, userInfo: [NSLocalizedDescriptionKey: "Start \(engine.displayName) before exporting, importing, or resetting the database."])
+        }
     }
 
     private func generateConfiguration() throws {
