@@ -554,7 +554,15 @@ final class AppModel: ObservableObject {
 
     private func loadRuntimeLock() throws -> [RuntimeManifest] {
         guard let url = Bundle.module.url(forResource: "runtime-lock", withExtension: "json") else { return [] }
-        return try JSONDecoder().decode(RuntimeLock.self, from: Data(contentsOf: url)).runtimes
+        var manifests = try JSONDecoder().decode(RuntimeLock.self, from: Data(contentsOf: url)).runtimes
+        for id in configuration.importedRuntimeIDs {
+            let manifestURL = paths.importedRuntimes.appendingPathComponent(id).appendingPathComponent("manifest.json")
+            guard let data = try? Data(contentsOf: manifestURL),
+                  let pack = try? JSONDecoder().decode(RuntimePackManifest.self, from: data) else { continue }
+            manifests.removeAll { $0.id == pack.runtime.id }
+            manifests.append(pack.runtime)
+        }
+        return manifests
     }
 
     private func loadTrustedRuntimeKeys() throws -> [String: Data] {
