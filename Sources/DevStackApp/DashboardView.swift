@@ -50,6 +50,20 @@ struct DashboardView: View {
                     .padding(.vertical, 4)
                 }
 
+                if !model.runtimeManifests.isEmpty {
+                    GroupBox("Runtimes") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(model.runtimeManifests) { manifest in
+                                RuntimeProvenanceRow(
+                                    manifest: manifest,
+                                    imported: model.configuration.importedRuntimeIDs.contains(manifest.id)
+                                )
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
                 if model.configuration.sites.isEmpty {
                     ContentUnavailableView {
                         Label("No sites yet", systemImage: "network")
@@ -69,6 +83,92 @@ struct DashboardView: View {
                 await model.refreshServiceStates()
                 try? await Task.sleep(for: .seconds(2))
             }
+        }
+    }
+}
+
+private struct RuntimeProvenanceRow: View {
+    let manifest: RuntimeManifest
+    let imported: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Text("\(manifest.kind.displayName) \(manifest.version)")
+                    .font(.headline)
+                Text(manifest.supportState.label(for: manifest))
+                    .font(.caption2.bold())
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(manifest.supportState.color.opacity(0.18), in: Capsule())
+                    .foregroundStyle(manifest.supportState.color)
+                if imported {
+                    Text("Imported")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(manifest.architecture) · macOS \(manifest.minimumMacOS)+")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            Text(provenance)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+        .padding(8)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var provenance: String {
+        var parts = [
+            "Source \(manifest.source.url.host() ?? manifest.source.url.absoluteString)",
+            "SHA-256 \(manifest.source.sha256.prefix(12))…",
+            "License \(manifest.license)"
+        ]
+        if let abi = manifest.abi { parts.append("ABI \(abi)") }
+        if let build = manifest.build {
+            parts.append("Build \(build.buildSystem)")
+            if !build.flags.isEmpty { parts.append(build.flags.joined(separator: " ")) }
+            if let gate = build.feasibilityGate { parts.append("Gate: \(gate)") }
+        }
+        return parts.joined(separator: " · ")
+    }
+}
+
+private extension RuntimeKind {
+    var displayName: String {
+        switch self {
+        case .apache: "Apache"
+        case .php: "PHP"
+        case .mysql: "MySQL"
+        case .mailpit: "Mailpit"
+        case .phpMyAdmin: "phpMyAdmin"
+        case .composer: "Composer"
+        case .openssl: "OpenSSL"
+        case .phpExtension: "PHP extension"
+        case .library: "Library"
+        }
+    }
+}
+
+private extension RuntimeSupportState {
+    func label(for manifest: RuntimeManifest) -> String {
+        switch self {
+        case .supported: "Supported"
+        case .legacy: "Legacy"
+        case .endOfLife: "EOL"
+        case .conditional: manifest.build?.feasibilityGate != nil ? "EOL · Gate pending" : "Conditional"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .supported: .green
+        case .legacy: .orange
+        case .endOfLife: .red
+        case .conditional: .orange
         }
     }
 }
