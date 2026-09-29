@@ -16,6 +16,19 @@ private struct DependencyLockCheck: Decodable {
     var sources: [DependencySourceCheck]
 }
 
+private struct BuildToolsLockCheck: Decodable {
+    var schemaVersion: Int
+    var tools: [BuildToolCheck]
+}
+
+private struct BuildToolCheck: Decodable {
+    var id: String
+    var version: String
+    var kind: String
+    var url: URL
+    var sha256: String
+}
+
 private struct DependencySourceCheck: Decodable {
     var id: String
     var version: String
@@ -49,6 +62,14 @@ enum DevStackCoreChecks {
         try expect(dependencyLock.sources.allSatisfy { $0.sha256.count == 64 }, "Dependency source checksum is malformed")
         try expect(dependencyLock.sources.allSatisfy { $0.url.scheme == "https" }, "Dependency source is not HTTPS")
         try expect(dependencyLock.sources.allSatisfy { !$0.version.isEmpty && !$0.license.isEmpty && !$0.targets.isEmpty }, "Dependency source metadata is incomplete")
+
+        let buildToolsLockURL = repositoryRoot.appendingPathComponent("Dependencies/build-tools-lock.json")
+        let buildToolsLock = try JSONDecoder().decode(BuildToolsLockCheck.self, from: Data(contentsOf: buildToolsLockURL))
+        try expect(buildToolsLock.schemaVersion == 1, "Unsupported build-tools lock schema")
+        try expect(Set(buildToolsLock.tools.map(\.id)).count == buildToolsLock.tools.count, "Build-tools lock contains duplicate IDs")
+        try expect(buildToolsLock.tools.allSatisfy { $0.sha256.count == 64 }, "Build-tool checksum is malformed")
+        try expect(buildToolsLock.tools.allSatisfy { $0.url.scheme == "https" }, "Build-tool source is not HTTPS")
+        try expect(buildToolsLock.tools.allSatisfy { !$0.version.isEmpty && !$0.kind.isEmpty }, "Build-tool metadata is incomplete")
 
         try expect(
             HostnameValidator.validate(" Example.TEST. ") == "example.test",
