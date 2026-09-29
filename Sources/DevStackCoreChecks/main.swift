@@ -83,6 +83,19 @@ enum DevStackCoreChecks {
             arguments: ["devstack"]
         )
         try expect(command.standardOutput == "devstack", "Command output capture failed")
+        let standardInput = try ProcessRunner().runChecked(
+            executable: URL(fileURLWithPath: "/bin/cat"),
+            standardInput: Data("database-import".utf8)
+        )
+        try expect(standardInput.standardOutput == "database-import", "Command standard input failed")
+
+        let databaseManager = DatabaseManager(paths: paths, runtimeRoot: paths.builtInRuntimes)
+        let backupName = databaseManager.backupFilename(
+            engine: .mysql84,
+            database: nil,
+            date: Date(timeIntervalSince1970: 0)
+        )
+        try expect(backupName == "mysql-8.4-all-databases-19700101-000000.sql", "Database backup naming is not deterministic")
 
         let payloadRoot = temporary.appendingPathComponent("runtime-pack", isDirectory: true)
         try FileManager.default.createDirectory(at: payloadRoot, withIntermediateDirectories: true)

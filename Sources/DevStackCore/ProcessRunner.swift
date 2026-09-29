@@ -33,6 +33,7 @@ public struct ProcessRunner: Sendable {
     public func run(
         executable: URL,
         arguments: [String] = [],
+        standardInput: Data? = nil,
         environment: [String: String] = [:],
         currentDirectory: URL? = nil,
         timeout: TimeInterval = 60
@@ -59,6 +60,14 @@ public struct ProcessRunner: Sendable {
         process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
         process.standardOutput = stdout
         process.standardError = stderr
+        var inputHandle: FileHandle?
+        if let standardInput {
+            let inputURL = tempDirectory.appendingPathComponent("stdin")
+            try standardInput.write(to: inputURL, options: .withoutOverwriting)
+            inputHandle = try FileHandle(forReadingFrom: inputURL)
+            process.standardInput = inputHandle
+        }
+        defer { try? inputHandle?.close() }
         try process.run()
 
         let deadline = Date().addingTimeInterval(timeout)
@@ -85,15 +94,15 @@ public struct ProcessRunner: Sendable {
     public func runChecked(
         executable: URL,
         arguments: [String] = [],
+        standardInput: Data? = nil,
         environment: [String: String] = [:],
         currentDirectory: URL? = nil,
         timeout: TimeInterval = 60
     ) throws -> CommandResult {
-        let result = try run(executable: executable, arguments: arguments, environment: environment, currentDirectory: currentDirectory, timeout: timeout)
+        let result = try run(executable: executable, arguments: arguments, standardInput: standardInput, environment: environment, currentDirectory: currentDirectory, timeout: timeout)
         guard result.exitCode == 0 else {
             throw CommandExecutionError.nonZeroExit(executable: executable.path, result: result)
         }
         return result
     }
 }
-
