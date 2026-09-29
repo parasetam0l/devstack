@@ -236,6 +236,14 @@ struct SettingsView: View {
                     Text(model.helperInstalled ? "Installed" : "Not installed")
                         .foregroundStyle(model.helperInstalled ? .green : .secondary)
                 }
+                HStack {
+                    Button("Install Helper") { Task { await model.installHelper() } }
+                        .disabled(model.helperInstalled)
+                    Button("Remove Managed System State", role: .destructive) {
+                        Task { await model.removeHelper() }
+                    }
+                    .disabled(!model.helperInstalled)
+                }
                 Toggle("Start at login", isOn: .constant(model.configuration.startAtLogin))
                     .disabled(true)
                 Text("Helper installation and login-item registration become available in a signed app build.")

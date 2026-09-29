@@ -49,6 +49,7 @@ final class AppModel: ObservableObject {
     private let store: AppConfigurationStore
     private let supervisor = ServiceSupervisor()
     private let runner = ProcessRunner()
+    private let helper = PrivilegedHelperClient()
 
     init(paths: DevStackPaths = DevStackPaths()) {
         self.paths = paths
@@ -76,6 +77,9 @@ final class AppModel: ObservableObject {
             try paths.createRequiredDirectories()
             configuration = try await store.load()
             runtimeManifests = try loadRuntimeLock()
+            if helper.isRegistered {
+                helperInstalled = (try? await helper.status()) != nil
+            }
             await refreshServiceStates()
         } catch {
             errorMessage = error.localizedDescription
@@ -83,6 +87,7 @@ final class AppModel: ObservableObject {
     }
 
     func saveSite(_ site: SiteDefinition) async throws {
+        let previous = configuration
         var site = site
         site.hostname = try HostnameValidator.validate(
             site.hostname,
@@ -96,8 +101,21 @@ final class AppModel: ObservableObject {
         } else {
             configuration.sites.append(site)
         }
-        try await store.save(configuration)
-        try generateConfiguration()
+        do {
+            try await store.save(configuration)
+            try generateConfiguration()
+            let apacheState = await supervisor.state(for: .apache)
+            if apacheState.phase == .running {
+                try await prepareCertificatesAndPrivilegedState()
+                try validateWebConfigurations()
+                try reloadApache()
+            }
+        } catch {
+            configuration = previous
+            try? await store.save(previous)
+            try? generateConfiguration()
+            throw error
+        }
     }
 
     func deleteSite(_ site: SiteDefinition) async {
@@ -131,10 +149,15 @@ final class AppModel: ObservableObject {
         do {
             try generateConfiguration()
             try validateRequiredRuntimes()
+            try await prepareCertificatesAndPrivilegedState()
             try await startMailpit()
+            let database = DatabaseManager(paths: paths, runtimeRoot: paths.builtInRuntimes)
+            let initializedDatabase = try database.initializeIfNeeded(configuration.selectedDatabase)
             try await startDatabase(configuration.selectedDatabase)
+            if initializedDatabase { try database.configureDevelopmentRootPassword(configuration.selectedDatabase) }
             let phpRuntimes = Set(configuration.sites.map(\.phpRuntimeID)).union(["php-8.5"])
             for runtimeID in phpRuntimes.sorted() { try await startPHP(runtimeID: runtimeID) }
+            try verifyLegacyDatabaseCompatibilityIfNeeded()
             try validateWebConfigurations()
             try await startApache()
         } catch {
@@ -166,6 +189,25 @@ final class AppModel: ObservableObject {
             ),
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
         )
+    }
+
+    func installHelper() async {
+        do {
+            try helper.register()
+            helperInstalled = (try? await helper.status()) != nil
+        } catch {
+            errorMessage = "Could not install the privileged helper: \(error.localizedDescription)"
+        }
+    }
+
+    func removeHelper() async {
+        do {
+            if helper.isRegistered { try await helper.removeManagedState() }
+            try await helper.unregister()
+            helperInstalled = false
+        } catch {
+            errorMessage = "Could not remove the privileged helper: \(error.localizedDescription)"
+        }
     }
 
     func exportSupportBundle(to destination: URL) {
@@ -252,7 +294,7 @@ final class AppModel: ObservableObject {
     }
 
     private func validateRequiredRuntimes() throws {
-        var required = ["apache-2.4", "php-8.5", configuration.selectedDatabase.rawValue, "mailpit-1.31.1", "phpmyadmin-5.2.3"]
+        var required = ["apache-2.4", "php-8.5", configuration.selectedDatabase.rawValue, "mailpit-1.31.1", "phpmyadmin-5.2.3", "openssl-3.5"]
         if configuration.sites.contains(where: { $0.phpRuntimeID == "php-7.4" }) { required.append("php-7.4") }
         let missing = required.filter { !FileManager.default.fileExists(atPath: paths.builtInRuntimes.appendingPathComponent($0).path) }
         guard missing.isEmpty else {
@@ -267,6 +309,44 @@ final class AppModel: ObservableObject {
             let fpm = paths.builtInRuntimes.appendingPathComponent("\(runtimeID)/sbin/php-fpm")
             _ = try runner.runChecked(executable: fpm, arguments: ["-t", "-y", paths.generatedPHP.appendingPathComponent("\(runtimeID)-fpm.conf").path, "-c", paths.generatedPHP.appendingPathComponent("\(runtimeID).ini").path])
         }
+    }
+
+    private func reloadApache() throws {
+        let apache = paths.builtInRuntimes.appendingPathComponent("apache-2.4/bin/httpd")
+        _ = try runner.runChecked(executable: apache, arguments: ["-k", "graceful", "-f", paths.generatedApache.appendingPathComponent("httpd.conf").path])
+    }
+
+    private func prepareCertificatesAndPrivilegedState() async throws {
+        guard helper.isRegistered else {
+            throw CocoaError(.executableNotLoadable, userInfo: [NSLocalizedDescriptionKey: "Install the DevStack privileged helper in Settings before starting services."])
+        }
+        let certificates = CertificateManager(
+            paths: paths,
+            openssl: paths.builtInRuntimes.appendingPathComponent("openssl-3.5/bin/openssl")
+        )
+        let managementHosts = ["phpmyadmin.devstack.test", "mailpit.devstack.test"]
+        let TLSHosts = configuration.sites.filter(\.tlsEnabled).map(\.hostname) + managementHosts
+        try certificates.ensureCertificates(for: TLSHosts)
+        let hostnames = configuration.sites.map(\.hostname) + managementHosts
+        try await helper.applyHostMappings(hostnames.map { HostMapping(hostname: $0) })
+        try await helper.setPortForwarding(.init(enabled: true))
+        let status = try await helper.status()
+        if !status.localCATrusted {
+            try await helper.trustLocalCA(certificates.caCertificateDER())
+        }
+        helperInstalled = true
+    }
+
+    private func verifyLegacyDatabaseCompatibilityIfNeeded() throws {
+        guard configuration.selectedDatabase == .mysql84,
+              configuration.sites.contains(where: { $0.phpRuntimeID == "php-7.4" }) else { return }
+        let php = paths.builtInRuntimes.appendingPathComponent("php-7.4/bin/php")
+        let code = #"mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT); $db = new mysqli('127.0.0.1', 'root', 'root', '', 3306); $db->query('SELECT 1');"#
+        _ = try runner.runChecked(
+            executable: php,
+            arguments: ["-c", paths.generatedPHP.appendingPathComponent("php-7.4.ini").path, "-r", code],
+            timeout: 30
+        )
     }
 
     private func startApache() async throws {

@@ -34,8 +34,10 @@ public struct ConfigurationRenderer: Sendable {
         let apache = runtimeRoot.appendingPathComponent("apache-2.4")
         let moduleDirectory = apache.appendingPathComponent("modules")
         let siteBlocks = try sites.sorted { $0.hostname < $1.hostname }.map(apacheVirtualHost).joined(separator: "\n\n")
-        let managementCertificate = quote(paths.certificate(for: "devstack.test").path)
-        let managementKey = quote(paths.privateKey(for: "devstack.test").path)
+        let phpMyAdminCertificate = quote(paths.certificate(for: "phpmyadmin.devstack.test").path)
+        let phpMyAdminKey = quote(paths.privateKey(for: "phpmyadmin.devstack.test").path)
+        let mailpitCertificate = quote(paths.certificate(for: "mailpit.devstack.test").path)
+        let mailpitKey = quote(paths.privateKey(for: "mailpit.devstack.test").path)
         let phpMyAdminRoot = quote(runtimeRoot.appendingPathComponent("phpmyadmin-5.2.3").path)
         let managementSocket = escapeQuotedContent(paths.sockets.appendingPathComponent("php-8.5-management.sock").path)
 
@@ -78,8 +80,8 @@ public struct ConfigurationRenderer: Sendable {
             ServerName phpmyadmin.devstack.test
             DocumentRoot \(phpMyAdminRoot)
             SSLEngine on
-            SSLCertificateFile \(managementCertificate)
-            SSLCertificateKeyFile \(managementKey)
+            SSLCertificateFile \(phpMyAdminCertificate)
+            SSLCertificateKeyFile \(phpMyAdminKey)
             <Directory \(phpMyAdminRoot)>
                 Options FollowSymLinks
                 AllowOverride None
@@ -93,8 +95,8 @@ public struct ConfigurationRenderer: Sendable {
         <VirtualHost 127.0.0.1:8443>
             ServerName mailpit.devstack.test
             SSLEngine on
-            SSLCertificateFile \(managementCertificate)
-            SSLCertificateKeyFile \(managementKey)
+            SSLCertificateFile \(mailpitCertificate)
+            SSLCertificateKeyFile \(mailpitKey)
             ProxyPreserveHost On
             ProxyPass / http://127.0.0.1:8025/
             ProxyPassReverse / http://127.0.0.1:8025/
