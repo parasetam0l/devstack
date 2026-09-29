@@ -245,9 +245,11 @@ struct SettingsView: View {
                     }
                     .disabled(!model.helperInstalled)
                 }
-                Toggle("Start at login", isOn: .constant(model.configuration.startAtLogin))
-                    .disabled(true)
-                Text("Helper installation and login-item registration become available in a signed app build.")
+                Toggle("Start at login", isOn: Binding(
+                    get: { model.configuration.startAtLogin },
+                    set: { enabled in Task { await model.setStartAtLogin(enabled) } }
+                ))
+                Text("Uses the native login-item API; DevStack never modifies shell startup files.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

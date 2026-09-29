@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import DevStackCore
 import Foundation
+import ServiceManagement
 
 enum NavigationSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
@@ -82,6 +83,11 @@ final class AppModel: ObservableObject {
             try paths.createRequiredDirectories()
             configuration = try await store.load()
             runtimeManifests = try loadRuntimeLock()
+            let loginItemEnabled = SMAppService.mainApp.status == .enabled
+            if configuration.startAtLogin != loginItemEnabled {
+                configuration.startAtLogin = loginItemEnabled
+                try await store.save(configuration)
+            }
             if helper.isRegistered {
                 helperStatus = try? await helper.status()
                 helperInstalled = helperStatus != nil
@@ -221,6 +227,22 @@ final class AppModel: ObservableObject {
             helperInstalled = false
         } catch {
             errorMessage = "Could not remove the privileged helper: \(error.localizedDescription)"
+        }
+    }
+
+    func setStartAtLogin(_ enabled: Bool) async {
+        do {
+            let service = SMAppService.mainApp
+            if enabled {
+                if service.status != .enabled { try service.register() }
+            } else if service.status == .enabled {
+                try await service.unregister()
+            }
+            configuration.startAtLogin = SMAppService.mainApp.status == .enabled
+            try await store.save(configuration)
+        } catch {
+            errorMessage = "Could not update the login item: \(error.localizedDescription)"
+            configuration.startAtLogin = SMAppService.mainApp.status == .enabled
         }
     }
 
