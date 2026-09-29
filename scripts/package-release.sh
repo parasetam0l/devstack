@@ -38,6 +38,7 @@ mkdir -p "$application/Contents/MacOS" \
     "$application/Contents/Library/LaunchDaemons"
 
 cp "$repository_root/Packaging/Info.plist" "$application/Contents/Info.plist"
+cp "$repository_root/Sources/DevStackApp/Resources/DevStack.icns" "$application/Contents/Resources/DevStack.icns"
 cp "$products/DevStack" "$application/Contents/MacOS/DevStack"
 cp "$products/DevStackPrivilegedHelper" "$application/Contents/Library/LaunchServices/DevStackPrivilegedHelper"
 cp "$repository_root/Sources/DevStackApp/Resources/app.devstack.desktop.helper.plist" "$application/Contents/Library/LaunchDaemons/app.devstack.desktop.helper.plist"

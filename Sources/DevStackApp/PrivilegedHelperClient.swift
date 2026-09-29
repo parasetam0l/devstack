@@ -8,9 +8,10 @@ struct PrivilegedHelperClient: @unchecked Sendable {
     private let decoder = JSONDecoder()
 
     var isRegistered: Bool { service.status == .enabled }
+    var registrationStatus: SMAppService.Status { service.status }
 
     func register() throws {
-        guard service.status != .enabled else { return }
+        guard service.status != .enabled, service.status != .requiresApproval else { return }
         try service.register()
     }
 
@@ -50,13 +51,18 @@ struct PrivilegedHelperClient: @unchecked Sendable {
         try await call { proxy, reply in proxy.status(withReply: reply) }
     }
 
-    private func call<Response: Decodable>(
+    private func call<Response: Decodable & Sendable>(
         _ operation: @escaping (PrivilegedHelperXPCProtocol, @escaping (Data?, NSError?) -> Void) -> Void
     ) async throws -> Response {
         try await withCheckedThrowingContinuation { continuation in
             let connection = NSXPCConnection(machServiceName: PrivilegedHelperConstants.machServiceName, options: .privileged)
             connection.remoteObjectInterface = NSXPCInterface(with: PrivilegedHelperXPCProtocol.self)
             let gate = ReplyGate(continuation: continuation, decoder: decoder, connection: connection)
+            connection.interruptionHandler = { gate.fail(CocoaError(.xpcConnectionInterrupted)) }
+            connection.invalidationHandler = { gate.fail(CocoaError(.xpcConnectionInvalid)) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 15) {
+                gate.fail(NSError(domain: "app.devstack.desktop.helper", code: 1, userInfo: [NSLocalizedDescriptionKey: "The helper did not reply within 15 seconds. Check its approval in System Settings."]))
+            }
             guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
                 gate.fail(error)
             }) as? PrivilegedHelperXPCProtocol else {
@@ -69,11 +75,11 @@ struct PrivilegedHelperClient: @unchecked Sendable {
     }
 }
 
-private struct HelperAcknowledgement: Decodable {
+private struct HelperAcknowledgement: Decodable, Sendable {
     let ok: Bool
 }
 
-private final class ReplyGate<Response: Decodable>: @unchecked Sendable {
+private final class ReplyGate<Response: Decodable & Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Response, Error>?
     private let decoder: JSONDecoder

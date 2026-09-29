@@ -4,211 +4,136 @@ import SwiftUI
 struct DashboardView: View {
     @EnvironmentObject private var model: AppModel
 
-    private let columns = [GridItem(.adaptive(minimum: 205), spacing: 14)]
-
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                HStack(alignment: .firstTextBaseline) {
+        WorkspacePage {
+            HStack {
+                PageHeading(title: "Dashboard", subtitle: "")
+                Spacer()
+            }
+
+            if !model.helperInstalled {
+                HStack(spacing: 14) {
+                    FeatureIcon(symbol: "lock.shield")
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("DevStack")
-                            .font(.largeTitle.bold())
-                        Text("Offline local development, entirely on this Mac.")
-                            .foregroundStyle(.secondary)
+                        Text("System integration required").font(.system(size: 13, weight: .semibold))
+                        Text("Set up the helper to enable domains and HTTPS.").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("Stop All", systemImage: "stop.fill") {
-                        Task { await model.stopAll() }
-                    }
-                    .disabled(model.isBusy)
-                    Button("Start All", systemImage: "play.fill") {
-                        Task { await model.startAll() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(model.isBusy)
-                }
+                    Button("Set Up…") { model.selectedSection = .settings; Task { await model.installHelper() } }.buttonStyle(.glass).disabled(model.isBusy)
+                }.padding(16).background(DevStackDesign.accent.opacity(0.055), in: RoundedRectangle(cornerRadius: 16))
+            }
 
-                LazyVGrid(columns: columns, spacing: 14) {
-                    ForEach(model.serviceStates) { state in
-                        ServiceCard(state: state)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Services").font(.system(size: 15, weight: .semibold))
+                    Spacer()
+                    StatusBadge(title: model.hasRunningServices ? "Running" : "Stopped", color: model.hasRunningServices ? DevStackDesign.success : .secondary, dot: true)
+                }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 12)], spacing: 12) {
+                    ForEach(model.visibleServiceStates) { state in
+                        Button { model.selectedLogService = state.service; model.selectedSection = .logs } label: { ServiceTile(state: state) }
+                            .buttonStyle(.plain).help("Read \(state.service.displayName) logs")
                     }
                 }
+            }
 
-                GroupBox("Quick access") {
-                    HStack(spacing: 12) {
-                        Button("phpMyAdmin", systemImage: "cylinder") {
-                            model.openURL("https://phpmyadmin.devstack.test")
-                        }
-                        Button("Mailpit", systemImage: "envelope") {
-                            model.openURL("https://mailpit.devstack.test")
-                        }
-                        Button("Managed Shell", systemImage: "terminal") {
-                            model.openManagedShell()
-                        }
-                        Button("Copy Env Command", systemImage: "doc.on.clipboard") {
-                            model.copyManagedEnvironmentCommand()
+            SurfacePanel {
+                HStack {
+                    Text("Sites").font(.system(size: 15, weight: .semibold))
+                    Spacer()
+                    if !model.configuration.sites.isEmpty {
+                        Button("View All") { model.selectedSection = .sites }.buttonStyle(.borderless)
+                    }
+                    Button { model.requestNewSite() } label: { Label("New Site", systemImage: "plus") }.buttonStyle(.glass)
+                }
+                if model.configuration.sites.isEmpty {
+                    HStack(spacing: 14) {
+                        FeatureIcon(symbol: "globe")
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("No sites yet").font(.system(size: 13, weight: .medium))
+                            Text("Add a project folder to create a site.").font(.system(size: 12)).foregroundStyle(.secondary)
                         }
                         Spacer()
-                    }
-                    .padding(.vertical, 4)
-                }
-
-                if !model.runtimeManifests.isEmpty {
-                    GroupBox("Runtimes") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            ForEach(model.runtimeManifests) { manifest in
-                                RuntimeProvenanceRow(
-                                    manifest: manifest,
-                                    imported: model.configuration.importedRuntimeIDs.contains(manifest.id)
-                                )
-                            }
+                    }.padding(.vertical, 12)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(model.configuration.sites.prefix(4).enumerated()), id: \.element.id) { index, site in
+                            if index > 0 { Divider().padding(.vertical, 10) }
+                            HStack(spacing: 12) {
+                                FeatureIcon(symbol: "globe")
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(site.name).font(.system(size: 13, weight: .semibold))
+                                    Text(site.hostname).font(.system(size: 12)).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                StatusBadge(title: site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP "))
+                                StatusBadge(title: site.tlsEnabled ? "HTTPS" : "HTTP", color: site.tlsEnabled ? DevStackDesign.success : .secondary)
+                                Button { model.openURL("\(site.tlsEnabled ? "https" : "http")://\(site.hostname)") } label: { Image(systemName: "arrow.up.right") }
+                                    .buttonStyle(.borderless).help("Open \(site.name)").accessibilityLabel("Open \(site.name)")
+                            }.padding(.vertical, 2)
                         }
-                        .padding(.vertical, 4)
                     }
                 }
+            }
 
-                if model.configuration.sites.isEmpty {
-                    ContentUnavailableView {
-                        Label("No sites yet", systemImage: "network")
-                    } description: {
-                        Text("Add a site to create an Apache virtual host and a dedicated PHP-FPM pool.")
-                    } actions: {
-                        Button("Add a Site") { model.selectedSection = .sites }
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Tools").font(.system(size: 15, weight: .semibold))
+                GlassEffectContainer(spacing: 16) {
+                    HStack(spacing: 12) {
+                        QuickAccessTile(symbol: "externaldrive", title: "Database", subtitle: "Connections and backups") { model.selectedSection = .database }
+                        QuickAccessTile(symbol: "tray", title: "Mail Inbox", subtitle: "Open mail tools") { model.selectedSection = .mailpit }
+                        QuickAccessTile(symbol: "terminal", title: "Terminal", subtitle: "Open managed shell", action: model.openManagedShell)
                     }
-                    .frame(minHeight: 180)
                 }
             }
-            .padding(24)
-        }
-        .navigationTitle("Dashboard")
-        .task {
-            while !Task.isCancelled {
-                await model.refreshServiceStates()
-                try? await Task.sleep(for: .seconds(2))
-            }
         }
     }
+
 }
 
-private struct RuntimeProvenanceRow: View {
-    let manifest: RuntimeManifest
-    let imported: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 8) {
-                Text("\(manifest.kind.displayName) \(manifest.version)")
-                    .font(.headline)
-                Text(manifest.supportState.label(for: manifest))
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(manifest.supportState.color.opacity(0.18), in: Capsule())
-                    .foregroundStyle(manifest.supportState.color)
-                if imported {
-                    Text("Imported")
-                        .font(.caption2.bold())
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Text("\(manifest.architecture) · macOS \(manifest.minimumMacOS)+")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
-            Text(provenance)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-        }
-        .padding(8)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var provenance: String {
-        var parts = [
-            "Source \(manifest.source.url.host() ?? manifest.source.url.absoluteString)",
-            "SHA-256 \(manifest.source.sha256.prefix(12))…",
-            "License \(manifest.license)"
-        ]
-        if let abi = manifest.abi { parts.append("ABI \(abi)") }
-        if let build = manifest.build {
-            parts.append("Build \(build.buildSystem)")
-            if !build.flags.isEmpty { parts.append(build.flags.joined(separator: " ")) }
-            if let gate = build.feasibilityGate { parts.append("Gate: \(gate)") }
-        }
-        return parts.joined(separator: " · ")
-    }
-}
-
-private extension RuntimeKind {
-    var displayName: String {
-        switch self {
-        case .apache: "Apache"
-        case .php: "PHP"
-        case .mysql: "MySQL"
-        case .mailpit: "Mailpit"
-        case .phpMyAdmin: "phpMyAdmin"
-        case .composer: "Composer"
-        case .openssl: "OpenSSL"
-        case .phpExtension: "PHP extension"
-        case .library: "Library"
-        }
-    }
-}
-
-private extension RuntimeSupportState {
-    func label(for manifest: RuntimeManifest) -> String {
-        switch self {
-        case .supported: "Supported"
-        case .legacy: "Legacy"
-        case .endOfLife: "EOL"
-        case .conditional: manifest.build?.feasibilityGate != nil ? "EOL · Gate pending" : "Conditional"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .supported: .green
-        case .legacy: .orange
-        case .endOfLife: .red
-        case .conditional: .orange
-        }
-    }
-}
-
-private struct ServiceCard: View {
+private struct ServiceTile: View {
+    @Environment(\.colorScheme) private var colorScheme
     let state: ServiceState
-
     var body: some View {
-        GroupBox {
-            HStack(spacing: 12) {
-                Image(systemName: state.phase.symbol)
-                    .font(.title2)
-                    .foregroundStyle(statusColor)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(state.service.displayName)
-                        .font(.headline)
-                    Text(state.phase.rawValue.capitalized)
-                        .foregroundStyle(.secondary)
-                    if let pid = state.pid {
-                        Text("PID \(pid)")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                    }
-                }
+        VStack(alignment: .leading, spacing: 15) {
+            HStack {
+                Image(systemName: state.service.icon).font(.system(size: 20, weight: .light)).foregroundStyle(state.phase == .running ? DevStackDesign.success : .secondary)
                 Spacer()
+                Circle().fill(state.phase.color).frame(width: 6, height: 6)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 5)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(state.service.displayName).font(.system(size: 14, weight: .semibold)).foregroundStyle(.primary)
+                Text(state.service.endpoint).font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 5) {
+                Text(state.phase.rawValue.capitalized).font(.system(size: 11, weight: .medium)).foregroundStyle(state.phase.color)
+                Spacer(minLength: 0)
+                if let pid = state.pid { Text("\(pid)").font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary) }
+            }
         }
+        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        .background(colorScheme == .dark ? Color(red: 0.115, green: 0.135, blue: 0.175) : .white, in: RoundedRectangle(cornerRadius: 14))
+        .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(state.phase == .failed ? Color.red.opacity(0.25) : .primary.opacity(0.06), lineWidth: 1) }
+        .accessibilityElement(children: .combine)
     }
+}
 
-    private var statusColor: Color {
-        switch state.phase {
-        case .running: .green
-        case .failed: .red
-        case .starting, .stopping: .orange
-        case .stopped: .secondary
-        }
+private struct QuickAccessTile: View {
+    let symbol: String
+    let title: String
+    let subtitle: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: symbol).font(.system(size: 18, weight: .light)).foregroundStyle(DevStackDesign.accent)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(.primary)
+                    Text(subtitle).font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.up.right").font(.system(size: 9)).foregroundStyle(.tertiary)
+            }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .rect(cornerRadius: 16))
     }
 }

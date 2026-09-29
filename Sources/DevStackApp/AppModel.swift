@@ -3,13 +3,46 @@ import Combine
 import DevStackCore
 import Foundation
 import ServiceManagement
+import SwiftUI
+
+enum AppAppearance: String, CaseIterable, Identifiable {
+    case system = "System"
+    case light = "Light"
+    case dark = "Dark"
+    var id: String { rawValue }
+    var colorScheme: ColorScheme? {
+        switch self { case .system: nil; case .light: .light; case .dark: .dark }
+    }
+}
+
+enum HelperSetupState: Equatable {
+    case notInstalled, requiresApproval, connecting, ready
+    case unavailable(String)
+
+    var message: String {
+        switch self {
+        case .notInstalled: "Administrator approval enables local domains and standard web ports."
+        case .requiresApproval: "Approve DevStack in System Settings → General → Login Items & Extensions."
+        case .connecting: "Connecting to the helper…"
+        case .ready: "Authorized and responding."
+        case .unavailable(let message): message
+        }
+    }
+    var actionTitle: String {
+        switch self {
+        case .requiresApproval: "Approve in Settings…"
+        case .unavailable: "Retry Setup…"
+        default: "Set Up…"
+        }
+    }
+}
 
 enum NavigationSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case sites = "Sites"
     case php = "PHP"
     case database = "Database"
-    case mailpit = "Mailpit"
+    case mailpit = "Mail Inbox"
     case logs = "Logs"
     case doctor = "Doctor"
     case settings = "Settings"
@@ -42,34 +75,78 @@ private struct TrustedRuntimeKeys: Codable {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var selectedSection: NavigationSection? = .dashboard
+    @Published var selectedLogService: ServiceKind = .apache
     @Published var configuration = AppConfiguration()
     @Published var serviceStates = ServiceKind.allCases.map { ServiceState(service: $0) }
     @Published var runtimeManifests: [RuntimeManifest] = []
     @Published var diagnosticReport: DiagnosticReport?
     @Published var isBusy = false
+    @Published var isRunningDoctor = false
+    @Published var diagnosticProgress: String?
     @Published var errorMessage: String?
     @Published var helperInstalled = false
     @Published var helperStatus: PrivilegedHelperStatus?
+    @Published var helperSetupState: HelperSetupState = .notInstalled
     @Published var lastDatabaseBackup: URL?
+    @Published var isPresentingNewSite = false
+    @Published var appearance = AppAppearance(rawValue: UserDefaults.standard.string(forKey: "DevStackAppearance") ?? "") ?? .system {
+        didSet { if !isReviewMode { UserDefaults.standard.set(appearance.rawValue, forKey: "DevStackAppearance") } }
+    }
 
     let paths: DevStackPaths
+    let isReviewMode: Bool
     private let store: AppConfigurationStore
     private let supervisor = ServiceSupervisor()
     private let runner = ProcessRunner()
     private let helper = PrivilegedHelperClient()
 
-    init(paths: DevStackPaths = DevStackPaths()) {
+    init(paths: DevStackPaths = DevStackPaths(), automaticallyLoad: Bool = true) {
         self.paths = paths
+        self.isReviewMode = !automaticallyLoad
         self.store = AppConfigurationStore(url: paths.configurationFile)
-        Task { await load() }
+        if automaticallyLoad { Task { await load() } }
     }
 
-    var menuBarSymbol: String {
-        serviceStates.contains(where: { $0.phase == .failed }) ? "exclamationmark.triangle.fill" : "server.rack"
+    static func makeForLaunch() -> AppModel {
+        #if DEBUG
+        if CommandLine.arguments.contains("--ui-review") { return UIReview.makeModel() }
+        #endif
+        return AppModel()
+    }
+
+    func requestNewSite() {
+        selectedSection = .sites
+        isPresentingNewSite = true
+    }
+
+    func runtimeIsAvailable(_ id: String) -> Bool {
+        guard let manifest = runtimeManifests.first(where: { $0.id == id }), !manifest.entryPoints.isEmpty else { return false }
+        return manifest.entryPoints.values.allSatisfy {
+            FileManager.default.fileExists(atPath: paths.builtInRuntimes.appendingPathComponent(id).appendingPathComponent($0).path)
+        }
+    }
+
+    func extensionIsAvailable(_ name: String, runtimeID: String) -> Bool {
+        FileManager.default.fileExists(atPath: paths.builtInRuntimes.appendingPathComponent("\(runtimeID)/lib/php/extensions/\(name).so").path)
+    }
+
+    func serviceIsRunning(_ service: ServiceKind) -> Bool {
+        serviceStates.first(where: { $0.service == service })?.phase == .running
     }
 
     var hasRunningServices: Bool {
         serviceStates.contains { $0.phase == .running || $0.phase == .starting }
+    }
+
+    var visibleServiceStates: [ServiceState] {
+        serviceStates.filter {
+            switch $0.service {
+            case .php74: configuration.sites.contains { $0.phpRuntimeID == "php-7.4" } || $0.phase != .stopped
+            case .mysql57: configuration.selectedDatabase == .mysql57 || $0.phase != .stopped
+            case .mysql84: configuration.selectedDatabase == .mysql84 || $0.phase != .stopped
+            default: true
+            }
+        }
     }
 
     var selectedDatabaseBinding: DatabaseEngine {
@@ -93,10 +170,7 @@ final class AppModel: ObservableObject {
                 configuration.startAtLogin = loginItemEnabled
                 try await store.save(configuration)
             }
-            if helper.isRegistered {
-                helperStatus = try? await helper.status()
-                helperInstalled = helperStatus != nil
-            }
+            await refreshHelperStatus()
             await refreshServiceStates()
         } catch {
             errorMessage = error.localizedDescription
@@ -142,6 +216,9 @@ final class AppModel: ObservableObject {
     }
 
     func setExtension(_ name: String, enabled: Bool, runtimeID: String) async {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
         var extensions = configuration.enabledExtensions[runtimeID] ?? []
         if enabled { extensions.insert(name) } else { extensions.remove(name) }
         configuration.enabledExtensions[runtimeID] = extensions
@@ -195,6 +272,10 @@ final class AppModel: ObservableObject {
     }
 
     func runDoctor() async {
+        guard !isRunningDoctor else { return }
+        isRunningDoctor = true
+        diagnosticProgress = "Preparing checks…"
+        defer { isRunningDoctor = false; diagnosticProgress = nil }
         await refreshServiceStates()
         if helper.isRegistered { helperStatus = try? await helper.status() }
         let context = DiagnosticContext(
@@ -208,27 +289,64 @@ final class AppModel: ObservableObject {
             selectedDatabase: configuration.selectedDatabase
         )
         let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        let progressModel = self
         diagnosticReport = await Task.detached {
-            DevStackDoctor().run(context: context, appVersion: appVersion)
+            DevStackDoctor().run(context: context, appVersion: appVersion) { step in
+                Task { @MainActor in progressModel.diagnosticProgress = step }
+            }
         }.value
     }
 
     func installHelper() async {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
         do {
             try helper.register()
-            helperStatus = try? await helper.status()
-            helperInstalled = helperStatus != nil
+            await refreshHelperStatus()
+            if helperSetupState == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
         } catch {
-            errorMessage = "Could not install the privileged helper: \(error.localizedDescription)"
+            helperInstalled = false
+            helperSetupState = .unavailable("Setup failed: \(error.localizedDescription)")
+        }
+    }
+
+    func refreshHelperStatus() async {
+        guard !isReviewMode else { return }
+        switch helper.registrationStatus {
+        case .requiresApproval:
+            helperInstalled = false; helperStatus = nil; helperSetupState = .requiresApproval
+        case .enabled:
+            helperSetupState = .connecting
+            do {
+                helperStatus = try await helper.status()
+                helperInstalled = true
+                helperSetupState = .ready
+            } catch {
+                helperInstalled = false; helperStatus = nil
+                helperSetupState = .unavailable("The registered helper did not respond: \(error.localizedDescription)")
+            }
+        case .notRegistered:
+            helperInstalled = false; helperStatus = nil; helperSetupState = .notInstalled
+        case .notFound:
+            helperInstalled = false; helperStatus = nil
+            helperSetupState = .unavailable("macOS could not find the helper. Reinstall the signed DevStack app in Applications.")
+        @unknown default:
+            helperInstalled = false; helperStatus = nil
+            helperSetupState = .unavailable("macOS reported an unknown helper registration state.")
         }
     }
 
     func removeHelper() async {
+        guard !isBusy, !hasRunningServices else { return }
+        isBusy = true
+        defer { isBusy = false }
         do {
             if helper.isRegistered { try await helper.removeManagedState() }
             try await helper.unregister()
             helperStatus = nil
             helperInstalled = false
+            helperSetupState = .notInstalled
         } catch {
             errorMessage = "Could not remove the privileged helper: \(error.localizedDescription)"
         }
@@ -287,6 +405,9 @@ final class AppModel: ObservableObject {
     }
 
     func clearMailpit() async {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
         guard let url = URL(string: "http://127.0.0.1:8025/api/v1/messages") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
@@ -553,7 +674,7 @@ final class AppModel: ObservableObject {
     }
 
     private func loadRuntimeLock() throws -> [RuntimeManifest] {
-        guard let url = Bundle.module.url(forResource: "runtime-lock", withExtension: "json") else { return [] }
+        guard let url = DevStackResources.bundle.url(forResource: "runtime-lock", withExtension: "json") else { return [] }
         var manifests = try JSONDecoder().decode(RuntimeLock.self, from: Data(contentsOf: url)).runtimes
         for id in configuration.importedRuntimeIDs {
             let manifestURL = paths.importedRuntimes.appendingPathComponent(id).appendingPathComponent("manifest.json")
@@ -566,7 +687,7 @@ final class AppModel: ObservableObject {
     }
 
     private func loadTrustedRuntimeKeys() throws -> [String: Data] {
-        guard let url = Bundle.module.url(forResource: "trusted-runtime-keys", withExtension: "json") else {
+        guard let url = DevStackResources.bundle.url(forResource: "trusted-runtime-keys", withExtension: "json") else {
             throw CocoaError(.fileNoSuchFile)
         }
         let document = try JSONDecoder().decode(TrustedRuntimeKeys.self, from: Data(contentsOf: url))

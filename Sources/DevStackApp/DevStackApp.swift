@@ -5,20 +5,44 @@ import SwiftUI
 @main
 struct DevStackApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var model = AppModel()
+    @StateObject private var model = AppModel.makeForLaunch()
 
     var body: some Scene {
         WindowGroup("DevStack") {
             RootView()
                 .environmentObject(model)
-                .frame(minWidth: 980, minHeight: 650)
-                .onAppear { appDelegate.model = model }
+                .frame(minWidth: 1000, minHeight: 680)
+                .onAppear {
+                    appDelegate.model = model
+                    NSApp.applicationIconImage = DevStackDesign.icon
+                    appDelegate.limitWindowWidth()
+                }
         }
-        .defaultSize(width: 1160, height: 760)
+        .defaultSize(width: 1200, height: 800)
+        .windowToolbarStyle(.unified)
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("New Site…") { model.requestNewSite() }.keyboardShortcut("n")
+            }
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { model.selectedSection = .settings }.keyboardShortcut(",")
+            }
+            CommandMenu("Workspace") {
+                ForEach(Array(NavigationSection.allCases.enumerated()), id: \.element.id) { index, section in
+                    Button(section.rawValue) { model.selectedSection = section }
+                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))))
+                }
+                Divider()
+                Button("Start Stack") { Task { await model.startAll() } }.disabled(model.isBusy || model.hasRunningServices || !model.helperInstalled)
+                Button("Stop Stack") { Task { await model.stopAll() } }.disabled(model.isBusy || !model.hasRunningServices)
+            }
+        }
 
-        MenuBarExtra("DevStack", systemImage: model.menuBarSymbol) {
+        MenuBarExtra {
             MenuBarView()
                 .environmentObject(model)
+        } label: {
+            Image(nsImage: DevStackDesign.menuBarIcon).accessibilityLabel("DevStack")
         }
     }
 }
@@ -27,6 +51,18 @@ struct DevStackApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
     private var isFinishingTermination = false
+
+    func limitWindowWidth() {
+        Task { @MainActor in
+            await Task.yield()
+            for window in NSApp.windows where window.contentView?.bounds.width ?? 0 >= 1000 {
+                window.contentMaxSize = NSSize(width: 1400, height: window.contentMaxSize.height)
+                if let size = window.contentView?.bounds.size, size.width > 1400 {
+                    window.setContentSize(NSSize(width: 1400, height: size.height))
+                }
+            }
+        }
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isFinishingTermination, let model, model.hasRunningServices else { return .terminateNow }
@@ -59,8 +95,8 @@ private struct MenuBarView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        ForEach(model.serviceStates) { state in
-            Label(state.service.displayName, systemImage: state.phase.symbol)
+        ForEach(model.visibleServiceStates) { state in
+            Label("\(state.service.displayName) · \(state.phase.rawValue.capitalized)", systemImage: state.phase.symbol)
         }
         Divider()
         Button("Open DevStack") {
@@ -68,9 +104,9 @@ private struct MenuBarView: View {
             NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
         }
         Button("Start All") { Task { await model.startAll() } }
-            .disabled(model.isBusy)
+            .disabled(model.isBusy || model.hasRunningServices || !model.helperInstalled)
         Button("Stop All") { Task { await model.stopAll() } }
-            .disabled(model.isBusy)
+            .disabled(model.isBusy || !model.hasRunningServices)
         Divider()
         Button("Quit") {
             NSApplication.shared.terminate(nil)

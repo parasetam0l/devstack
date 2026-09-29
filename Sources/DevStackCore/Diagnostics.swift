@@ -38,7 +38,8 @@ public struct DevStackDoctor: Sendable {
         self.runner = runner
     }
 
-    public func run(context: DiagnosticContext, appVersion: String) -> DiagnosticReport {
+    public func run(context: DiagnosticContext, appVersion: String, progress: (@Sendable (String) -> Void)? = nil) -> DiagnosticReport {
+        progress?("Checking this Mac and local directories…")
         var results: [DiagnosticResult] = []
         let architecture = ProcessInfo.processInfo.machineArchitecture
         results.append(.init(
@@ -54,15 +55,18 @@ public struct DevStackDoctor: Sendable {
         results.append(helperResult(context))
         results.append(contentsOf: helperStatusResults(context.helperStatus))
         results.append(contentsOf: serviceReadinessResults(context.serviceStates))
+        progress?("Checking ports and local domain mappings…")
         results.append(contentsOf: portResults(context: context))
         results.append(hostsResult(expected: context.expectedHostnames))
-        results.append(contentsOf: runtimeResults(context.runtimeManifests, paths: context.paths))
+        results.append(contentsOf: runtimeResults(context.runtimeManifests, paths: context.paths, progress: progress))
+        progress?("Validating configuration and certificates…")
         results.append(contentsOf: configurationResults(context))
         results.append(contentsOf: certificateResults(context))
         results.append(databaseResult(context))
         results.append(diskResult(context.paths.applicationSupport))
 
         if let applicationURL = context.applicationURL {
+            progress?("Verifying the application signature…")
             results.append(codeSignatureResult(applicationURL))
         }
         return DiagnosticReport(appVersion: appVersion, results: results)
@@ -211,8 +215,9 @@ public struct DevStackDoctor: Sendable {
         }
     }
 
-    private func runtimeResults(_ manifests: [RuntimeManifest], paths: DevStackPaths) -> [DiagnosticResult] {
+    private func runtimeResults(_ manifests: [RuntimeManifest], paths: DevStackPaths, progress: (@Sendable (String) -> Void)?) -> [DiagnosticResult] {
         manifests.map { manifest in
+            progress?("Inspecting \(manifest.id)…")
             let roots = [paths.builtInRuntimes.appendingPathComponent(manifest.id), paths.importedRuntimes.appendingPathComponent(manifest.id)]
             let root = roots.first { FileManager.default.fileExists(atPath: $0.path) }
             let missing = manifest.entryPoints.values.filter { relative in
