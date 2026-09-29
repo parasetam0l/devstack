@@ -26,6 +26,27 @@ enum DevStackCoreChecks {
             "Reserved .test domain was incorrectly flagged"
         )
 
+        let hosts = """
+        127.0.0.1 localhost
+        # BEGIN DEVSTACK MANAGED — DO NOT EDIT
+        127.0.0.1 old.test
+        ::1 old.test
+        # END DEVSTACK MANAGED
+        """
+        let replacedHosts = try HostsFileEditor.replacingManagedSection(
+            in: hosts,
+            mappings: [HostMapping(hostname: "example.test")]
+        )
+        try expect(!replacedHosts.contains("old.test"), "Old managed host entry was preserved")
+        try expect(replacedHosts.contains("127.0.0.1\texample.test"), "IPv4 host entry was not generated")
+        try expect(replacedHosts.contains("::1\texample.test"), "IPv6 host entry was not generated")
+        do {
+            _ = try PrivilegedRequestValidator.portForwarding(.init(enabled: true, httpUpstreamPort: 8081))
+            throw CheckFailure(description: "Arbitrary port forwarding was accepted")
+        } catch PrivilegedRequestValidationError.invalidPortForwarding {
+            // Expected.
+        }
+
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("devstack-checks-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
         let paths = DevStackPaths(
