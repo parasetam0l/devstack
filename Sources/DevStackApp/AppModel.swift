@@ -68,6 +68,10 @@ final class AppModel: ObservableObject {
         serviceStates.contains(where: { $0.phase == .failed }) ? "exclamationmark.triangle.fill" : "server.rack"
     }
 
+    var hasRunningServices: Bool {
+        serviceStates.contains { $0.phase == .running || $0.phase == .starting }
+    }
+
     var selectedDatabaseBinding: DatabaseEngine {
         get { configuration.selectedDatabase }
         set {

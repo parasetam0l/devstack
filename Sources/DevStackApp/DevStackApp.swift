@@ -4,6 +4,7 @@ import SwiftUI
 
 @main
 struct DevStackApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
 
     var body: some Scene {
@@ -11,23 +12,45 @@ struct DevStackApp: App {
             RootView()
                 .environmentObject(model)
                 .frame(minWidth: 980, minHeight: 650)
+                .onAppear { appDelegate.model = model }
         }
         .defaultSize(width: 1160, height: 760)
-        .commands {
-            CommandGroup(replacing: .appTermination) {
-                Button("Quit DevStack") {
-                    Task {
-                        await model.stopAll()
-                        NSApplication.shared.terminate(nil)
-                    }
-                }
-                .keyboardShortcut("q")
-            }
-        }
 
         MenuBarExtra("DevStack", systemImage: model.menuBarSymbol) {
             MenuBarView()
                 .environmentObject(model)
+        }
+    }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var model: AppModel?
+    private var isFinishingTermination = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isFinishingTermination, let model, model.hasRunningServices else { return .terminateNow }
+
+        let alert = NSAlert()
+        alert.messageText = "Stop DevStack services before quitting?"
+        alert.informativeText = "Apache, PHP, MySQL, or Mailpit are still running."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Stop Services and Quit")
+        alert.addButton(withTitle: "Quit Without Stopping")
+        alert.addButton(withTitle: "Cancel")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            isFinishingTermination = true
+            Task { @MainActor in
+                await model.stopAll()
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        case .alertSecondButtonReturn:
+            return .terminateNow
+        default:
+            return .terminateCancel
         }
     }
 }
@@ -50,10 +73,7 @@ private struct MenuBarView: View {
             .disabled(model.isBusy)
         Divider()
         Button("Quit") {
-            Task {
-                await model.stopAll()
-                NSApplication.shared.terminate(nil)
-            }
+            NSApplication.shared.terminate(nil)
         }
     }
 }
