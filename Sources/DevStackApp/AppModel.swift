@@ -34,6 +34,10 @@ private struct RuntimeLock: Codable {
     var runtimes: [RuntimeManifest]
 }
 
+private struct TrustedRuntimeKeys: Codable {
+    var keys: [String: String]
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var selectedSection: NavigationSection? = .dashboard
@@ -210,6 +214,28 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func importRuntimePack(from archive: URL) async {
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            let keyData = try loadTrustedRuntimeKeys()
+            let destination = paths.importedRuntimes
+            let manifest = try await Task.detached {
+                let verifier = RuntimePackVerifier(trustedPublicKeys: keyData)
+                return try RuntimePackImporter(verifier: verifier).importArchive(archive, into: destination)
+            }.value
+            if !configuration.importedRuntimeIDs.contains(manifest.id) {
+                configuration.importedRuntimeIDs.append(manifest.id)
+                configuration.importedRuntimeIDs.sort()
+                try await store.save(configuration)
+            }
+            runtimeManifests.removeAll { $0.id == manifest.id }
+            runtimeManifests.append(manifest)
+        } catch {
+            errorMessage = "Runtime pack was rejected: \(error.localizedDescription)"
+        }
+    }
+
     func exportSupportBundle(to destination: URL) {
         guard let diagnosticReport else { return }
         do {
@@ -242,7 +268,7 @@ final class AppModel: ObservableObject {
         do {
             let php = paths.builtInRuntimes.appendingPathComponent("php-8.5/bin")
             let mysql = paths.builtInRuntimes.appendingPathComponent("\(configuration.selectedDatabase.rawValue)/bin")
-            let composer = paths.builtInRuntimes.appendingPathComponent("composer-2.10.3")
+            let composer = paths.builtInRuntimes.appendingPathComponent("composer-2.10.3/bin")
             let script = FileManager.default.temporaryDirectory.appendingPathComponent("DevStack-\(UUID().uuidString).command")
             let managedPath = [php.path, mysql.path, composer.path].joined(separator: ":")
             let contents = """
@@ -413,6 +439,19 @@ final class AppModel: ObservableObject {
     private func loadRuntimeLock() throws -> [RuntimeManifest] {
         guard let url = Bundle.module.url(forResource: "runtime-lock", withExtension: "json") else { return [] }
         return try JSONDecoder().decode(RuntimeLock.self, from: Data(contentsOf: url)).runtimes
+    }
+
+    private func loadTrustedRuntimeKeys() throws -> [String: Data] {
+        guard let url = Bundle.module.url(forResource: "trusted-runtime-keys", withExtension: "json") else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let document = try JSONDecoder().decode(TrustedRuntimeKeys.self, from: Data(contentsOf: url))
+        return try document.keys.mapValues { encoded in
+            guard let data = Data(base64Encoded: encoded), data.count == 32 else {
+                throw CocoaError(.coderReadCorrupt)
+            }
+            return data
+        }
     }
 
     private func shellQuote(_ value: String) -> String {

@@ -6,6 +6,25 @@ private struct CheckFailure: Error, CustomStringConvertible {
     var description: String
 }
 
+private struct RuntimeLockCheck: Decodable {
+    var schemaVersion: Int
+    var runtimes: [RuntimeManifest]
+}
+
+private struct DependencyLockCheck: Decodable {
+    var schemaVersion: Int
+    var sources: [DependencySourceCheck]
+}
+
+private struct DependencySourceCheck: Decodable {
+    var id: String
+    var version: String
+    var url: URL
+    var sha256: String
+    var license: String
+    var targets: [String]
+}
+
 private func expect(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
     guard try condition() else { throw CheckFailure(description: message) }
 }
@@ -13,6 +32,24 @@ private func expect(_ condition: @autoclosure () throws -> Bool, _ message: Stri
 @main
 enum DevStackCoreChecks {
     static func main() async throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let lockURL = repositoryRoot.appendingPathComponent("Sources/DevStackApp/Resources/runtime-lock.json")
+        let runtimeLock = try JSONDecoder().decode(RuntimeLockCheck.self, from: Data(contentsOf: lockURL))
+        try expect(runtimeLock.schemaVersion == 1, "Unsupported runtime lock schema")
+        try expect(Set(runtimeLock.runtimes.map(\.id)).count == runtimeLock.runtimes.count, "Runtime lock contains duplicate IDs")
+        try expect(runtimeLock.runtimes.allSatisfy { $0.source.sha256.count == 64 }, "Runtime source checksum is malformed")
+
+        let dependencyLockURL = repositoryRoot.appendingPathComponent("Dependencies/dependency-lock.json")
+        let dependencyLock = try JSONDecoder().decode(DependencyLockCheck.self, from: Data(contentsOf: dependencyLockURL))
+        try expect(dependencyLock.schemaVersion == 1, "Unsupported dependency lock schema")
+        try expect(Set(dependencyLock.sources.map(\.id)).count == dependencyLock.sources.count, "Dependency lock contains duplicate IDs")
+        try expect(dependencyLock.sources.allSatisfy { $0.sha256.count == 64 }, "Dependency source checksum is malformed")
+        try expect(dependencyLock.sources.allSatisfy { $0.url.scheme == "https" }, "Dependency source is not HTTPS")
+        try expect(dependencyLock.sources.allSatisfy { !$0.version.isEmpty && !$0.license.isEmpty && !$0.targets.isEmpty }, "Dependency source metadata is incomplete")
+
         try expect(
             HostnameValidator.validate(" Example.TEST. ") == "example.test",
             "Hostname normalization failed"
@@ -135,6 +172,32 @@ enum DevStackCoreChecks {
         } catch RuntimePackVerificationError.unsafePath {
             // Expected.
         }
+
+        let executablePackRoot = temporary.appendingPathComponent("executable-runtime-pack", isDirectory: true)
+        let executableURL = executablePackRoot.appendingPathComponent("bin/devstack-check")
+        try FileManager.default.createDirectory(at: executableURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard let currentExecutable = Bundle.main.executableURL else {
+            throw CheckFailure(description: "Could not locate the check executable")
+        }
+        try FileManager.default.copyItem(at: currentExecutable, to: executableURL)
+        try Data("{}".utf8).write(to: executablePackRoot.appendingPathComponent("sbom.json"))
+        var executableManifest = RuntimePackManifest(
+            runtime: RuntimeManifest(
+                id: "executable-test",
+                kind: .library,
+                version: "1.0.0",
+                entryPoints: ["check": "bin/devstack-check"],
+                license: "MIT",
+                source: SourceProvenance(url: URL(string: "https://example.test/runtime.tar.xz")!, sha256: String(repeating: "1", count: 64)),
+                supportState: .supported
+            ),
+            payload: [RuntimePackFile(path: "bin/devstack-check", sha256: try unsignedVerifier.sha256(executableURL), executable: true)],
+            signingIdentity: "DevStack Test",
+            sbomPath: "sbom.json"
+        )
+        let executableSignature = try privateKey.signature(for: unsignedVerifier.canonicalManifestData(executableManifest))
+        executableManifest.signature = RuntimePackSignature(keyID: "test", value: executableSignature.base64EncodedString())
+        try verifier.verify(manifest: executableManifest, root: executablePackRoot)
 
         let report = DevStackDoctor().run(
             context: DiagnosticContext(paths: paths, helperInstalled: false, expectedHostnames: ["example.test"]),

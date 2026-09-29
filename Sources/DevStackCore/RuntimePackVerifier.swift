@@ -82,16 +82,8 @@ public struct RuntimePackVerifier: Sendable {
             guard try sha256(url) == file.sha256.lowercased() else {
                 throw RuntimePackVerificationError.checksumMismatch(file.path)
             }
-            if file.executable && verifyCodeSignatures {
-                do {
-                    _ = try runner.runChecked(
-                        executable: URL(fileURLWithPath: "/usr/bin/codesign"),
-                        arguments: ["--verify", "--strict", "--verbose=2", url.path],
-                        timeout: 30
-                    )
-                } catch {
-                    throw RuntimePackVerificationError.invalidCodeSignature(file.path)
-                }
+            if file.executable {
+                try verifyMachO(url, relativePath: file.path, verifyCodeSignature: verifyCodeSignatures)
             }
         }
 
@@ -152,6 +144,64 @@ public struct RuntimePackVerifier: Sendable {
         }
     }
 
+    private func verifyMachO(_ url: URL, relativePath: String, verifyCodeSignature: Bool) throws {
+        let architectureResult = try runner.runChecked(
+            executable: URL(fileURLWithPath: "/usr/bin/lipo"),
+            arguments: ["-archs", url.path],
+            timeout: 30
+        )
+        let architectures = architectureResult.standardOutput.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard architectures == ["arm64"] else {
+            throw RuntimePackVerificationError.unsupportedArchitecture(architectures.joined(separator: ","))
+        }
+
+        let dependencyResult = try runner.runChecked(
+            executable: URL(fileURLWithPath: "/usr/bin/otool"),
+            arguments: ["-L", url.path],
+            timeout: 30
+        )
+        for line in dependencyResult.standardOutput.split(whereSeparator: \.isNewline).dropFirst() {
+            guard let dependency = line.split(whereSeparator: \.isWhitespace).first.map(String.init) else { continue }
+            try validateMachODependency(dependency)
+        }
+        let loadCommands = try runner.runChecked(
+            executable: URL(fileURLWithPath: "/usr/bin/otool"),
+            arguments: ["-l", url.path],
+            timeout: 30
+        ).standardOutput
+        let lines = loadCommands.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        for index in lines.indices where lines[index] == "cmd LC_RPATH" {
+            let pathIndex = lines.index(index, offsetBy: 2, limitedBy: lines.endIndex)
+            if let pathIndex, pathIndex < lines.endIndex, lines[pathIndex].hasPrefix("path ") {
+                let path = lines[pathIndex].dropFirst(5).split(separator: " ").first.map(String.init) ?? ""
+                guard path == "@loader_path" || path.hasPrefix("@loader_path/") ||
+                    path == "@executable_path" || path.hasPrefix("@executable_path/") else {
+                    throw RuntimePackVerificationError.forbiddenDependency(path)
+                }
+            }
+        }
+
+        if verifyCodeSignature {
+            do {
+                _ = try runner.runChecked(
+                    executable: URL(fileURLWithPath: "/usr/bin/codesign"),
+                    arguments: ["--verify", "--strict", "--verbose=2", url.path],
+                    timeout: 30
+                )
+            } catch {
+                throw RuntimePackVerificationError.invalidCodeSignature(relativePath)
+            }
+        }
+    }
+
+    private func validateMachODependency(_ path: String) throws {
+        if path.hasPrefix("@rpath/") || path.hasPrefix("@loader_path/") || path.hasPrefix("@executable_path/") ||
+            path.hasPrefix("/usr/lib/") || path.hasPrefix("/System/Library/") {
+            return
+        }
+        throw RuntimePackVerificationError.forbiddenDependency(path)
+    }
+
     private func compareVersions(_ lhs: String, _ rhs: String) -> ComparisonResult {
         lhs.compare(rhs, options: .numeric)
     }
@@ -205,4 +255,3 @@ public struct RuntimePackImporter: Sendable {
         return manifest.runtime
     }
 }
-

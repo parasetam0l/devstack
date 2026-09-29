@@ -8,6 +8,8 @@ public enum RuntimeKind: String, Codable, CaseIterable, Sendable {
     case phpMyAdmin = "phpmyadmin"
     case composer
     case openssl
+    case phpExtension = "php-extension"
+    case library
 }
 
 public enum RuntimeSupportState: String, Codable, Sendable {
@@ -60,6 +62,7 @@ public struct RuntimeManifest: Codable, Hashable, Identifiable, Sendable {
     public var source: SourceProvenance
     public var supportState: RuntimeSupportState
     public var dependencyPaths: [String]
+    public var build: RuntimeBuildMetadata?
 
     public init(
         id: String,
@@ -74,7 +77,8 @@ public struct RuntimeManifest: Codable, Hashable, Identifiable, Sendable {
         license: String,
         source: SourceProvenance,
         supportState: RuntimeSupportState,
-        dependencyPaths: [String] = []
+        dependencyPaths: [String] = [],
+        build: RuntimeBuildMetadata? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -89,6 +93,32 @@ public struct RuntimeManifest: Codable, Hashable, Identifiable, Sendable {
         self.source = source
         self.supportState = supportState
         self.dependencyPaths = dependencyPaths
+        self.build = build
+    }
+}
+
+public struct RuntimeBuildMetadata: Codable, Hashable, Sendable {
+    public var buildSystem: String
+    public var flags: [String]
+    public var environment: [String: String]
+    public var dependencies: [String]
+    public var patchSources: [SourceProvenance]
+    public var feasibilityGate: String?
+
+    public init(
+        buildSystem: String,
+        flags: [String],
+        environment: [String: String] = [:],
+        dependencies: [String] = [],
+        patchSources: [SourceProvenance] = [],
+        feasibilityGate: String? = nil
+    ) {
+        self.buildSystem = buildSystem
+        self.flags = flags
+        self.environment = environment
+        self.dependencies = dependencies
+        self.patchSources = patchSources
+        self.feasibilityGate = feasibilityGate
     }
 }
 
@@ -380,4 +410,3 @@ public struct PortForwardingConfiguration: Codable, Hashable, Sendable {
         self.httpsUpstreamPort = httpsUpstreamPort
     }
 }
-

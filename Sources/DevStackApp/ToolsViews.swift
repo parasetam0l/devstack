@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import DevStackCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct PHPView: View {
     @EnvironmentObject private var model: AppModel
@@ -260,10 +261,30 @@ struct SettingsView: View {
             Section("Runtime policy") {
                 Text("DevStack never downloads runtime packs. Importable packs must be signed and supplied from a local file or removable media.")
                     .foregroundStyle(.secondary)
+                Button("Import Signed Runtime Pack…", systemImage: "shippingbox.and.arrow.backward") {
+                    chooseRuntimePack()
+                }
+                .disabled(model.isBusy)
+                if !model.configuration.importedRuntimeIDs.isEmpty {
+                    LabeledContent("Imported") {
+                        Text(model.configuration.importedRuntimeIDs.joined(separator: ", "))
+                    }
+                }
             }
         }
         .formStyle(.grouped)
         .navigationTitle("Settings")
+    }
+
+    private func chooseRuntimePack() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.data]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "Choose a signed .devstack-runtime archive."
+        if panel.runModal() == .OK, let url = panel.url {
+            Task { await model.importRuntimePack(from: url) }
+        }
     }
 }
 
