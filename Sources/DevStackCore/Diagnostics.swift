@@ -5,20 +5,29 @@ public struct DiagnosticContext: Sendable {
     public var runtimeManifests: [RuntimeManifest]
     public var applicationURL: URL?
     public var helperInstalled: Bool
+    public var helperStatus: PrivilegedHelperStatus?
     public var expectedHostnames: [String]
+    public var serviceStates: [ServiceState]
+    public var selectedDatabase: DatabaseEngine
 
     public init(
         paths: DevStackPaths,
         runtimeManifests: [RuntimeManifest] = [],
         applicationURL: URL? = nil,
         helperInstalled: Bool = false,
-        expectedHostnames: [String] = []
+        helperStatus: PrivilegedHelperStatus? = nil,
+        expectedHostnames: [String] = [],
+        serviceStates: [ServiceState] = [],
+        selectedDatabase: DatabaseEngine = .mysql84
     ) {
         self.paths = paths
         self.runtimeManifests = runtimeManifests
         self.applicationURL = applicationURL
         self.helperInstalled = helperInstalled
+        self.helperStatus = helperStatus
         self.expectedHostnames = expectedHostnames
+        self.serviceStates = serviceStates
+        self.selectedDatabase = selectedDatabase
     }
 }
 
@@ -42,17 +51,15 @@ public struct DevStackDoctor: Sendable {
 
         results.append(directoryResult(context.paths.applicationSupport, id: "application-support"))
         results.append(directoryResult(context.paths.logs, id: "logs"))
-        results.append(.init(
-            id: "privileged-helper",
-            title: "Privileged helper",
-            severity: context.helperInstalled ? .info : .error,
-            evidence: context.helperInstalled ? "Installed" : "Not installed",
-            remediation: context.helperInstalled ? nil : "Install and authorize the DevStack helper from Settings."
-        ))
-
-        results.append(contentsOf: portResults([80, 443, 3306, 1025, 8025, 8080, 8443]))
+        results.append(helperResult(context))
+        results.append(contentsOf: helperStatusResults(context.helperStatus))
+        results.append(contentsOf: serviceReadinessResults(context.serviceStates))
+        results.append(contentsOf: portResults(context: context))
         results.append(hostsResult(expected: context.expectedHostnames))
         results.append(contentsOf: runtimeResults(context.runtimeManifests, paths: context.paths))
+        results.append(contentsOf: configurationResults(context))
+        results.append(contentsOf: certificateResults(context))
+        results.append(databaseResult(context))
         results.append(diskResult(context.paths.applicationSupport))
 
         if let applicationURL = context.applicationURL {
@@ -73,8 +80,92 @@ public struct DevStackDoctor: Sendable {
         }
     }
 
-    private func portResults(_ ports: [Int]) -> [DiagnosticResult] {
-        ports.map { port in
+    private func helperResult(_ context: DiagnosticContext) -> DiagnosticResult {
+        let severity: DiagnosticSeverity
+        let evidence: String
+        switch (context.helperStatus, context.helperInstalled) {
+        case (let status?, _):
+            severity = .info
+            evidence = "Authorized and responding (version \(status.version)); host mappings \(status.hostMappingsInstalled ? "installed" : "missing")."
+        case (nil, true):
+            severity = .warning
+            evidence = "Registered but did not return authenticated status."
+        case (nil, false):
+            severity = .error
+            evidence = "Not installed"
+        }
+        return .init(
+            id: "privileged-helper",
+            title: "Privileged helper",
+            severity: severity,
+            evidence: evidence,
+            remediation: severity == .info ? nil : "Install or reauthorize the DevStack helper from Settings."
+        )
+    }
+
+    private func helperStatusResults(_ status: PrivilegedHelperStatus?) -> [DiagnosticResult] {
+        guard let status else { return [] }
+        return [
+            .init(
+                id: "helper-port-forwarding",
+                title: "Privileged port forwarding",
+                severity: status.portForwardingEnabled ? .info : .warning,
+                evidence: status.portForwardingEnabled ? "80→8080 and 443→8443 are enabled." : "Disabled",
+                remediation: status.portForwardingEnabled ? nil : "Start DevStack to enable its loopback-only forwarders."
+            ),
+            .init(
+                id: "ca-trust",
+                title: "Local CA trust",
+                severity: status.localCATrusted ? .info : .warning,
+                evidence: status.localCATrusted ? "The public DevStack CA is trusted." : "The DevStack CA is not trusted.",
+                remediation: status.localCATrusted ? nil : "Start DevStack or reinstall the helper to trust the public local CA certificate."
+            )
+        ]
+    }
+
+    private func serviceReadinessResults(_ states: [ServiceState]) -> [DiagnosticResult] {
+        states.sorted { $0.service.rawValue < $1.service.rawValue }.map { state in
+            let severity: DiagnosticSeverity
+            let evidence: String
+            let remediation: String?
+            switch state.phase {
+            case .running:
+                severity = .info
+                evidence = "Running\(state.pid.map { " (PID \($0))" } ?? "")"
+                remediation = nil
+            case .stopped:
+                severity = .info
+                evidence = "Stopped"
+                remediation = nil
+            case .starting, .stopping:
+                severity = .warning
+                evidence = state.phase.rawValue.capitalized
+                remediation = "Wait for the current service transition to complete."
+            case .failed:
+                severity = .error
+                evidence = state.failure?.message ?? "Failed"
+                remediation = state.failure?.recoveryAction ?? "Review the service log and retry."
+            }
+            return .init(
+                id: "service-\(state.service.rawValue)",
+                title: "Service \(state.service.rawValue)",
+                severity: severity,
+                evidence: evidence,
+                remediation: remediation,
+                containsSensitiveData: state.failure?.logExcerpt != nil
+            )
+        }
+    }
+
+    private func portResults(context: DiagnosticContext) -> [DiagnosticResult] {
+        let selectedDatabaseService: ServiceKind = context.selectedDatabase == .mysql57 ? .mysql57 : .mysql84
+        let owners: [(Int, ServiceKind)] = [
+            (80, .apache), (443, .apache), (8080, .apache), (8443, .apache),
+            (3306, selectedDatabaseService), (1025, .mailpit), (8025, .mailpit)
+        ]
+        var phases: [ServiceKind: ServicePhase] = [:]
+        for state in context.serviceStates { phases[state.service] = state.phase }
+        return owners.map { port, service in
             do {
                 let result = try runner.run(
                     executable: URL(fileURLWithPath: "/usr/sbin/lsof"),
@@ -82,12 +173,17 @@ public struct DevStackDoctor: Sendable {
                     timeout: 5
                 )
                 let occupied = result.exitCode == 0 && !result.standardOutput.isEmpty
+                let expected = phases[service] == .running
+                let severity: DiagnosticSeverity = expected ? (occupied ? .info : .error) : (occupied ? .warning : .info)
+                let evidence = occupied ? redact(result.standardOutput) : "Available"
                 return .init(
                     id: "port-\(port)",
                     title: "Port \(port)",
-                    severity: occupied ? .warning : .info,
-                    evidence: occupied ? redact(result.standardOutput) : "Available",
-                    remediation: occupied ? "Stop the conflicting listener before starting DevStack." : nil
+                    severity: severity,
+                    evidence: expected && occupied ? "DevStack expects this listener.\n\(evidence)" : evidence,
+                    remediation: expected && !occupied
+                        ? "Restart \(service.rawValue); its readiness listener is missing."
+                        : (!expected && occupied ? "Stop the conflicting listener before starting DevStack." : nil)
                 )
             } catch {
                 return .init(id: "port-\(port)", title: "Port \(port)", severity: .warning, evidence: error.localizedDescription)
@@ -99,12 +195,16 @@ public struct DevStackDoctor: Sendable {
         do {
             let hosts = try String(contentsOfFile: "/etc/hosts", encoding: .utf8)
             let missing = expected.filter { !hosts.localizedCaseInsensitiveContains($0) }
+            let hasMarkers = hosts.contains(PrivilegedHelperConstants.hostsBeginMarker) && hosts.contains(PrivilegedHelperConstants.hostsEndMarker)
+            let healthy = missing.isEmpty && (expected.isEmpty || hasMarkers)
             return .init(
                 id: "hosts",
                 title: "/etc/hosts mappings",
-                severity: missing.isEmpty ? .info : .warning,
-                evidence: missing.isEmpty ? "All expected hostnames are present." : "Missing: \(missing.joined(separator: ", "))",
-                remediation: missing.isEmpty ? nil : "Reapply site mappings from DevStack."
+                severity: healthy ? .info : .warning,
+                evidence: healthy
+                    ? "The marked DevStack section contains all expected hostnames."
+                    : "Managed markers: \(hasMarkers ? "present" : "missing"); missing hostnames: \(missing.isEmpty ? "none" : missing.joined(separator: ", ")).",
+                remediation: healthy ? nil : "Reapply site mappings from DevStack."
             )
         } catch {
             return .init(id: "hosts", title: "/etc/hosts mappings", severity: .error, evidence: error.localizedDescription)
@@ -119,14 +219,161 @@ public struct DevStackDoctor: Sendable {
                 guard let root else { return true }
                 return !FileManager.default.fileExists(atPath: root.appendingPathComponent(relative).path)
             }
+            guard missing.isEmpty, let root else {
+                return .init(
+                    id: "runtime-\(manifest.id)",
+                    title: "Runtime \(manifest.id)",
+                    severity: .error,
+                    evidence: "Missing: \(missing.joined(separator: ", "))",
+                    remediation: "Reinstall DevStack or import a valid signed runtime pack."
+                )
+            }
+            let binaryFailures = auditRuntimeBinaries(at: root, manifest: manifest)
             return .init(
                 id: "runtime-\(manifest.id)",
                 title: "Runtime \(manifest.id)",
-                severity: missing.isEmpty ? .info : .error,
-                evidence: missing.isEmpty ? "All entry points are present." : "Missing: \(missing.joined(separator: ", "))",
-                remediation: missing.isEmpty ? nil : "Reinstall DevStack or import a valid signed runtime pack."
+                severity: binaryFailures.isEmpty ? .info : .error,
+                evidence: binaryFailures.isEmpty ? "Entry points, ARM64 architecture, signatures, and dependency paths passed." : binaryFailures.joined(separator: "\n"),
+                remediation: binaryFailures.isEmpty ? nil : "Reinstall DevStack or import a valid signed runtime pack."
             )
         }
+    }
+
+    private func auditRuntimeBinaries(at root: URL, manifest: RuntimeManifest) -> [String] {
+        let verifier = RuntimePackVerifier(trustedPublicKeys: [:], requireSignature: false, runner: runner)
+        var candidates = Set(manifest.entryPoints.values.map { root.appendingPathComponent($0) })
+        if let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            while let file = enumerator.nextObject() as? URL {
+                guard file.pathExtension == "dylib" || file.pathExtension == "so" else { continue }
+                guard (try? file.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { continue }
+                candidates.insert(file)
+            }
+        }
+
+        var failures: [String] = []
+        for file in candidates.sorted(by: { $0.path < $1.path }) {
+            guard let result = try? runner.run(executable: URL(fileURLWithPath: "/usr/bin/file"), arguments: ["-b", file.path], timeout: 10),
+                  result.exitCode == 0,
+                  result.standardOutput.contains("Mach-O") else { continue }
+            do {
+                try verifier.verifyMachO(file, relativePath: file.path.replacingOccurrences(of: root.path + "/", with: ""))
+            } catch {
+                failures.append("\(file.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+        return failures
+    }
+
+    private func configurationResults(_ context: DiagnosticContext) -> [DiagnosticResult] {
+        var checks: [(id: String, title: String, executable: URL, arguments: [String], reportsOutput: Bool)] = []
+        let apacheConfig = context.paths.generatedApache.appendingPathComponent("httpd.conf")
+        checks.append((
+            "config-apache", "Apache configuration",
+            context.paths.builtInRuntimes.appendingPathComponent("apache-2.4/bin/httpd"),
+            ["-t", "-f", apacheConfig.path],
+            true
+        ))
+        for runtimeID in ["php-7.4", "php-8.5"] {
+            let config = context.paths.generatedPHP.appendingPathComponent("\(runtimeID)-fpm.conf")
+            checks.append((
+                "config-\(runtimeID)", "\(runtimeID) FPM configuration",
+                context.paths.builtInRuntimes.appendingPathComponent("\(runtimeID)/sbin/php-fpm"),
+                ["-t", "-y", config.path, "-c", context.paths.generatedPHP.appendingPathComponent("\(runtimeID).ini").path],
+                true
+            ))
+        }
+        let engine = context.selectedDatabase
+        let mysqlConfig = context.paths.generated.appendingPathComponent("\(engine.rawValue).cnf")
+        let mysqlArguments = engine == .mysql84
+            ? ["--defaults-file=\(mysqlConfig.path)", "--validate-config"]
+            : ["--defaults-file=\(mysqlConfig.path)", "--verbose", "--help"]
+        checks.append((
+            "config-\(engine.rawValue)", "\(engine.displayName) configuration",
+            context.paths.builtInRuntimes.appendingPathComponent("\(engine.rawValue)/bin/mysqld"),
+            mysqlArguments,
+            engine == .mysql84
+        ))
+
+        return checks.map { id, title, executable, arguments, reportsOutput in
+            let referencedFiles = arguments.filter { $0.hasPrefix("/") || $0.hasPrefix("--defaults-file=") }
+            let missingReference = referencedFiles.first { argument in
+                let path = argument.replacingOccurrences(of: "--defaults-file=", with: "")
+                return !FileManager.default.fileExists(atPath: path)
+            }
+            guard FileManager.default.isExecutableFile(atPath: executable.path), missingReference == nil else {
+                return .init(
+                    id: id,
+                    title: title,
+                    severity: .warning,
+                    evidence: "Not checked because the runtime or generated configuration is not installed.",
+                    remediation: "Install the runtime and generate configuration before running this check."
+                )
+            }
+            do {
+                let result = try runner.runChecked(executable: executable, arguments: arguments, timeout: 30)
+                let output = (result.standardError + result.standardOutput).trimmingCharacters(in: .whitespacesAndNewlines)
+                let evidence = output.isEmpty || !reportsOutput ? "Syntax valid" : redact(String(output.prefix(2_000)))
+                return .init(id: id, title: title, severity: .info, evidence: evidence)
+            } catch {
+                return .init(id: id, title: title, severity: .error, evidence: redact(error.localizedDescription), remediation: "Regenerate the configuration and inspect the relevant service log.")
+            }
+        }
+    }
+
+    private func certificateResults(_ context: DiagnosticContext) -> [DiagnosticResult] {
+        let openssl = context.paths.builtInRuntimes.appendingPathComponent("openssl-3.5/bin/openssl")
+        let certificates = context.expectedHostnames.map { context.paths.certificate(for: $0) }
+        let privateKeys = context.expectedHostnames.map { context.paths.privateKey(for: $0) }
+        guard FileManager.default.isExecutableFile(atPath: openssl.path) else {
+            return [.init(id: "certificates", title: "TLS certificates", severity: .warning, evidence: "OpenSSL runtime is not installed; certificate expiry was not checked.")]
+        }
+        let missing = certificates.filter { !FileManager.default.fileExists(atPath: $0.path) }
+        let expiring = certificates.filter { certificate in
+            guard FileManager.default.fileExists(atPath: certificate.path) else { return false }
+            guard let result = try? runner.run(executable: openssl, arguments: ["x509", "-checkend", "2592000", "-noout", "-in", certificate.path], timeout: 10)
+            else { return true }
+            return result.exitCode != 0
+        }
+        let insecureKeys = privateKeys.filter { key in
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: key.path),
+                  let permissions = attributes[.posixPermissions] as? NSNumber else { return true }
+            return permissions.intValue & 0o077 != 0
+        }
+        let healthy = missing.isEmpty && expiring.isEmpty && insecureKeys.isEmpty
+        return [.init(
+            id: "certificates",
+            title: "TLS certificates",
+            severity: healthy ? .info : .warning,
+            evidence: healthy
+                ? "All leaf certificates are valid for at least 30 days and private keys are mode 0600."
+                : "Missing: \(missing.count); expiring or invalid: \(expiring.count); insecure or missing keys: \(insecureKeys.count).",
+            remediation: healthy ? nil : "Renew site certificates and verify private-key permissions."
+        )]
+    }
+
+    private func databaseResult(_ context: DiagnosticContext) -> DiagnosticResult {
+        let selectedDirectory = context.selectedDatabase == .mysql57 ? context.paths.mysql57Data : context.paths.mysql84Data
+        let otherDirectory = context.selectedDatabase == .mysql57 ? context.paths.mysql84Data : context.paths.mysql57Data
+        guard selectedDirectory.standardizedFileURL.path != otherDirectory.standardizedFileURL.path else {
+            return .init(id: "database-state", title: "Database isolation", severity: .error, evidence: "MySQL data directories resolve to the same path.", remediation: "Move each engine to its own data directory before starting MySQL.")
+        }
+        let initialized = FileManager.default.fileExists(atPath: selectedDirectory.appendingPathComponent("mysql").path)
+        let manager = DatabaseManager(paths: context.paths, runtimeRoot: context.paths.builtInRuntimes, runner: runner)
+        let selectedService: ServiceKind = context.selectedDatabase == .mysql57 ? .mysql57 : .mysql84
+        let running = context.serviceStates.first(where: { $0.service == selectedService })?.phase == .running
+        let reachable = running ? manager.ping(context.selectedDatabase) : false
+        let healthy = !running || reachable
+        return .init(
+            id: "database-state",
+            title: "Database isolation and state",
+            severity: healthy ? .info : .error,
+            evidence: "Selected: \(context.selectedDatabase.displayName); initialized: \(initialized ? "yes" : "no"); readiness: \(running ? (reachable ? "reachable" : "unreachable") : "stopped"); data directories are separate.",
+            remediation: healthy ? nil : "Inspect the selected MySQL log and restart the engine."
+        )
     }
 
     private func diskResult(_ url: URL) -> DiagnosticResult {

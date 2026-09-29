@@ -144,7 +144,7 @@ public struct RuntimePackVerifier: Sendable {
         }
     }
 
-    private func verifyMachO(_ url: URL, relativePath: String, verifyCodeSignature: Bool) throws {
+    func verifyMachO(_ url: URL, relativePath: String, verifyCodeSignature: Bool = true) throws {
         let architectureResult = try runner.runChecked(
             executable: URL(fileURLWithPath: "/usr/bin/lipo"),
             arguments: ["-archs", url.path],

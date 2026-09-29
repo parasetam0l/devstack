@@ -48,6 +48,7 @@ final class AppModel: ObservableObject {
     @Published var isBusy = false
     @Published var errorMessage: String?
     @Published var helperInstalled = false
+    @Published var helperStatus: PrivilegedHelperStatus?
 
     let paths: DevStackPaths
     private let store: AppConfigurationStore
@@ -82,7 +83,8 @@ final class AppModel: ObservableObject {
             configuration = try await store.load()
             runtimeManifests = try loadRuntimeLock()
             if helper.isRegistered {
-                helperInstalled = (try? await helper.status()) != nil
+                helperStatus = try? await helper.status()
+                helperInstalled = helperStatus != nil
             }
             await refreshServiceStates()
         } catch {
@@ -182,23 +184,30 @@ final class AppModel: ObservableObject {
         serviceStates = await supervisor.allStates()
     }
 
-    func runDoctor() {
-        diagnosticReport = DevStackDoctor().run(
-            context: DiagnosticContext(
-                paths: paths,
-                runtimeManifests: runtimeManifests,
-                applicationURL: Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.bundleURL : nil,
-                helperInstalled: helperInstalled,
-                expectedHostnames: configuration.sites.map(\.hostname) + ["phpmyadmin.devstack.test", "mailpit.devstack.test"]
-            ),
-            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+    func runDoctor() async {
+        await refreshServiceStates()
+        if helper.isRegistered { helperStatus = try? await helper.status() }
+        let context = DiagnosticContext(
+            paths: paths,
+            runtimeManifests: runtimeManifests,
+            applicationURL: Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.bundleURL : nil,
+            helperInstalled: helperInstalled,
+            helperStatus: helperStatus,
+            expectedHostnames: configuration.sites.map(\.hostname) + ["phpmyadmin.devstack.test", "mailpit.devstack.test"],
+            serviceStates: serviceStates,
+            selectedDatabase: configuration.selectedDatabase
         )
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        diagnosticReport = await Task.detached {
+            DevStackDoctor().run(context: context, appVersion: appVersion)
+        }.value
     }
 
     func installHelper() async {
         do {
             try helper.register()
-            helperInstalled = (try? await helper.status()) != nil
+            helperStatus = try? await helper.status()
+            helperInstalled = helperStatus != nil
         } catch {
             errorMessage = "Could not install the privileged helper: \(error.localizedDescription)"
         }
@@ -208,6 +217,7 @@ final class AppModel: ObservableObject {
         do {
             if helper.isRegistered { try await helper.removeManagedState() }
             try await helper.unregister()
+            helperStatus = nil
             helperInstalled = false
         } catch {
             errorMessage = "Could not remove the privileged helper: \(error.localizedDescription)"
@@ -356,10 +366,12 @@ final class AppModel: ObservableObject {
         let hostnames = configuration.sites.map(\.hostname) + managementHosts
         try await helper.applyHostMappings(hostnames.map { HostMapping(hostname: $0) })
         try await helper.setPortForwarding(.init(enabled: true))
-        let status = try await helper.status()
+        var status = try await helper.status()
         if !status.localCATrusted {
             try await helper.trustLocalCA(certificates.caCertificateDER())
+            status.localCATrusted = true
         }
+        helperStatus = status
         helperInstalled = true
     }
 

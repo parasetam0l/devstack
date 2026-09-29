@@ -206,13 +206,55 @@ enum DevStackCoreChecks {
         let executableSignature = try privateKey.signature(for: unsignedVerifier.canonicalManifestData(executableManifest))
         executableManifest.signature = RuntimePackSignature(keyID: "test", value: executableSignature.base64EncodedString())
         try verifier.verify(manifest: executableManifest, root: executablePackRoot)
+        var forbiddenManifest = executableManifest
+        forbiddenManifest.runtime.dependencyPaths = ["/opt/homebrew/lib/libdevstack.dylib"]
+        do {
+            try RuntimePackVerifier(trustedPublicKeys: [:], requireSignature: false).verify(
+                manifest: forbiddenManifest,
+                root: executablePackRoot,
+                verifyCodeSignatures: false
+            )
+            throw CheckFailure(description: "Build-machine dependency path was accepted")
+        } catch RuntimePackVerificationError.forbiddenDependency {
+            // Expected.
+        }
 
+        let fakeApache = paths.builtInRuntimes.appendingPathComponent("apache-2.4/bin/httpd")
+        try AtomicFileWriter.write("#!/bin/sh\necho 'Syntax OK'\n", to: fakeApache, permissions: 0o755)
+        try AtomicFileWriter.write("# generated httpd.conf\n", to: paths.generatedApache.appendingPathComponent("httpd.conf"), permissions: 0o644)
+
+        let helperStatus = PrivilegedHelperStatus(hostMappingsInstalled: true, portForwardingEnabled: true, localCATrusted: false, version: "1.0")
+        let failedMySQL = ServiceFailure(message: "Service exited unexpectedly.", exitCode: 1, recoveryAction: "Restart MySQL and inspect its log.")
         let report = DevStackDoctor().run(
-            context: DiagnosticContext(paths: paths, helperInstalled: false, expectedHostnames: ["example.test"]),
+            context: DiagnosticContext(
+                paths: paths,
+                helperInstalled: true,
+                helperStatus: helperStatus,
+                expectedHostnames: ["example.test"],
+                serviceStates: [
+                    ServiceState(service: .mailpit, phase: .running, pid: 1234),
+                    ServiceState(service: .mysql84, phase: .failed, failure: failedMySQL)
+                ],
+                selectedDatabase: .mysql57
+            ),
             appVersion: "0.1.0"
         )
         try expect(report.results.contains(where: { $0.id == "architecture" }), "Doctor omitted architecture check")
-        try expect(report.results.contains(where: { $0.id == "privileged-helper" && $0.severity == .error }), "Doctor omitted missing helper")
+        try expect(report.results.contains(where: { $0.id == "privileged-helper" && $0.severity == .info && $0.evidence.contains("1.0") }), "Doctor did not report authenticated helper status")
+        try expect(report.results.contains(where: { $0.id == "helper-port-forwarding" && $0.severity == .info }), "Doctor omitted enabled port forwarding")
+        try expect(report.results.contains(where: { $0.id == "ca-trust" && $0.severity == .warning }), "Doctor did not flag untrusted local CA")
+        try expect(report.results.contains(where: { $0.id == "service-mailpit" && $0.severity == .info }), "Doctor did not report running service")
+        try expect(report.results.contains(where: { $0.id == "service-mysql-8.4" && $0.severity == .error && $0.remediation == failedMySQL.recoveryAction }), "Doctor did not surface service failure recovery")
+        try expect(report.results.contains(where: { $0.id == "database-state" && $0.evidence.contains("MySQL 5.7.44") }), "Doctor did not report selected database state")
+        try expect(report.results.contains(where: { $0.id == "config-php-8.5" && $0.severity == .warning }), "Doctor did not skip missing runtime configuration")
+        try expect(report.results.contains(where: { $0.id == "config-apache" && $0.severity == .info && $0.evidence.contains("Syntax OK") }), "Doctor did not validate installed Apache configuration")
+        try expect(report.results.contains(where: { $0.id == "port-3306" }), "Doctor omitted database port check")
+
+        let missingHelperReport = DevStackDoctor().run(
+            context: DiagnosticContext(paths: paths, helperInstalled: false, expectedHostnames: ["example.test"]),
+            appVersion: "0.1.0"
+        )
+        try expect(missingHelperReport.results.contains(where: { $0.id == "privileged-helper" && $0.severity == .error }), "Doctor omitted missing helper")
 
         let supervisor = ServiceSupervisor()
         let serviceLog = temporary.appendingPathComponent("logs/sleep.log")

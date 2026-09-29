@@ -188,7 +188,7 @@ struct DoctorView: View {
                 }
                 .disabled(model.diagnosticReport == nil)
                 Button("Run Doctor", systemImage: "stethoscope") {
-                    model.runDoctor()
+                    Task { await model.runDoctor() }
                 }
                 .buttonStyle(.borderedProminent)
             }
