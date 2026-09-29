@@ -10,7 +10,27 @@ identity="${DEVSTACK_SIGNING_IDENTITY:--}"
 [[ "$(uname -m)" == "arm64" ]] || { echo "Release packaging requires Apple Silicon." >&2; exit 69; }
 [[ -d "$runtime_root" ]] || { echo "Runtime payload is missing: $runtime_root" >&2; exit 66; }
 
+# Legacy runtimes are fail-closed: a failed feasibility gate removes the runtime
+# from this release instead of shipping an unverified payload.
+enforce_legacy_gate() {
+    local runtime_id="$1" gate="$2"
+    if [[ ! -d "$runtime_root/$runtime_id" ]]; then
+        echo "Legacy runtime $runtime_id is not present; it will not be packaged." >&2
+        return 0
+    fi
+    if "$repository_root/scripts/gates/$gate.sh"; then
+        return 0
+    fi
+    echo "Feasibility gate failed for $runtime_id; omitting it from this release." >&2
+    rm -rf "$runtime_root/$runtime_id"
+}
+
+enforce_legacy_gate php-7.4 php74
+enforce_legacy_gate mysql-5.7 mysql57
+
 swift build -c release --arch arm64
+swift run -c release --arch arm64 DevStackCoreChecks
+products="$(swift build -c release --arch arm64 --show-bin-path)"
 rm -rf "$release_root"
 mkdir -p "$application/Contents/MacOS" \
     "$application/Contents/Resources/Runtimes" \
@@ -18,17 +38,17 @@ mkdir -p "$application/Contents/MacOS" \
     "$application/Contents/Library/LaunchDaemons"
 
 cp "$repository_root/Packaging/Info.plist" "$application/Contents/Info.plist"
-cp "$repository_root/.build/arm64-apple-macosx/release/DevStack" "$application/Contents/MacOS/DevStack"
-cp "$repository_root/.build/arm64-apple-macosx/release/DevStackPrivilegedHelper" "$application/Contents/Library/LaunchServices/DevStackPrivilegedHelper"
+cp "$products/DevStack" "$application/Contents/MacOS/DevStack"
+cp "$products/DevStackPrivilegedHelper" "$application/Contents/Library/LaunchServices/DevStackPrivilegedHelper"
 cp "$repository_root/Sources/DevStackApp/Resources/app.devstack.desktop.helper.plist" "$application/Contents/Library/LaunchDaemons/app.devstack.desktop.helper.plist"
 cp "$repository_root/Sources/DevStackApp/Resources/runtime-lock.json" "$application/Contents/Resources/runtime-lock.json"
 cp -R "$runtime_root/." "$application/Contents/Resources/Runtimes/"
-for resource_bundle in "$repository_root"/.build/arm64-apple-macosx/release/*.bundle; do
+for resource_bundle in "$products"/*.bundle; do
     [[ -d "$resource_bundle" ]] && cp -R "$resource_bundle" "$application/Contents/Resources/"
 done
 
-if [[ -d "$repository_root/SBOM" ]]; then cp -R "$repository_root/SBOM" "$application/Contents/Resources/SBOM"; fi
 if [[ -d "$repository_root/ThirdPartyNotices" ]]; then cp -R "$repository_root/ThirdPartyNotices" "$application/Contents/Resources/ThirdPartyNotices"; fi
+"$repository_root/scripts/generate-sbom.py" "$runtime_root" "$application/Contents/Resources/SBOM/runtime-sbom.cdx.json"
 source_cache="${DEVSTACK_SOURCE_CACHE:-$repository_root/.build/runtime-cache}"
 if [[ -d "$source_cache" ]]; then cp -R "$source_cache" "$application/Contents/Resources/CorrespondingSources"; fi
 cp "$repository_root/LICENSE" "$application/Contents/Resources/LICENSE"
