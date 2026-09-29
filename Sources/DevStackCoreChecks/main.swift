@@ -54,6 +54,24 @@ enum DevStackCoreChecks {
             HostnameValidator.validate(" Example.TEST. ") == "example.test",
             "Hostname normalization failed"
         )
+        do {
+            _ = try HostnameValidator.validate("192.168.0.1")
+            throw CheckFailure(description: "IP literal hostname was accepted")
+        } catch HostnameValidationError.ipLiteral {
+            // Expected.
+        }
+        do {
+            _ = try HostnameValidator.validate("*.example.test")
+            throw CheckFailure(description: "Wildcard hostname was accepted")
+        } catch HostnameValidationError.wildcard {
+            // Expected.
+        }
+        do {
+            _ = try HostnameValidator.validate("example.test", existing: ["EXAMPLE.test."])
+            throw CheckFailure(description: "Duplicate hostname was accepted")
+        } catch HostnameValidationError.duplicate {
+            // Expected.
+        }
         try expect(
             HostnameValidator.shadowsPublicDomain("example.com"),
             "Public domain warning was not detected"
@@ -110,6 +128,14 @@ enum DevStackCoreChecks {
         let composerWrapper = renderer.composerWrapperScript()
         try expect(composerWrapper.contains("self-update"), "Composer wrapper does not guard self-update")
         try expect(composerWrapper.contains("php-8.5"), "Composer wrapper does not use the managed PHP runtime")
+        var unsafeSite = site
+        unsafeSite.documentRoot = "/tmp/example\nRequire all granted"
+        do {
+            _ = try renderer.apacheConfiguration(sites: [unsafeSite])
+            throw CheckFailure(description: "Configuration metacharacters were accepted")
+        } catch ConfigurationRendererError.unsafeValue {
+            // Expected.
+        }
 
         let store = AppConfigurationStore(url: paths.configurationFile)
         var configuration = AppConfiguration()
@@ -117,6 +143,19 @@ enum DevStackCoreChecks {
         try await store.save(configuration)
         let loaded = try await store.load()
         try expect(loaded == configuration, "Configuration round trip failed")
+
+        let newerConfiguration = temporary.appendingPathComponent("newer-configuration.json")
+        try Data(#"{"schemaVersion":99,"sites":[],"selectedDatabase":"mysql-8.4","enabledExtensions":{},"startAtLogin":false,"importedRuntimeIDs":[]}"#.utf8).write(to: newerConfiguration)
+        do {
+            _ = try await AppConfigurationStore(url: newerConfiguration).load()
+            throw CheckFailure(description: "Newer configuration schema was accepted")
+        } catch let error as CocoaError where error.code == .fileReadCorruptFile {
+            // Expected.
+        }
+        let atomicProbe = temporary.appendingPathComponent("atomic-probe")
+        try AtomicFileWriter.write("probe", to: atomicProbe, permissions: 0o600)
+        let atomicAttributes = try FileManager.default.attributesOfItem(atPath: atomicProbe.path)
+        try expect((atomicAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600, "Atomic writer did not apply permissions")
 
         let command = try ProcessRunner().runChecked(
             executable: URL(fileURLWithPath: "/usr/bin/printf"),
