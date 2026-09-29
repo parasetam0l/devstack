@@ -135,9 +135,16 @@ public struct ConfigurationRenderer: Sendable {
         }
         let runtime = runtimeRoot.appendingPathComponent(runtimeID)
         let extensionDirectory = runtime.appendingPathComponent("lib/php/extensions")
-        let extensionLines = enabledExtensions.sorted().map { name in
+        var settings = enabledExtensions.sorted().map { name in
             let directive = name == "xdebug" ? "zend_extension" : "extension"
             return "\(directive)=\(quote(extensionDirectory.appendingPathComponent("\(name).so").path))"
+        }
+        if enabledExtensions.contains("xdebug") {
+            settings.append(contentsOf: [
+                "xdebug.mode=debug",
+                "xdebug.client_host=127.0.0.1",
+                "xdebug.client_port=9003"
+            ])
         }
 
         return """
@@ -161,7 +168,7 @@ public struct ConfigurationRenderer: Sendable {
         opcache.enable=1
         opcache.enable_cli=0
 
-        \(extensionLines.joined(separator: "\n"))
+        \(settings.joined(separator: "\n"))
         """
     }
 
@@ -195,6 +202,7 @@ public struct ConfigurationRenderer: Sendable {
             "--smtp", "127.0.0.1:1025",
             "--database", paths.mailpitDatabase.path,
             "--allowed-hosts", "127.0.0.1,localhost,mailpit.devstack.test",
+            "--disable-version-check",
             "--max", "5000"
         ]
     }

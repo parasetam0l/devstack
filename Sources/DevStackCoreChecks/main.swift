@@ -128,6 +128,10 @@ enum DevStackCoreChecks {
         let composerWrapper = renderer.composerWrapperScript()
         try expect(composerWrapper.contains("self-update"), "Composer wrapper does not guard self-update")
         try expect(composerWrapper.contains("php-8.5"), "Composer wrapper does not use the managed PHP runtime")
+        let phpINI = try renderer.phpINI(runtimeID: "php-8.5", enabledExtensions: ["xdebug", "redis"], mailpitBinary: URL(fileURLWithPath: "/tmp/mailpit"))
+        try expect(phpINI.contains("xdebug.client_port=9003"), "Xdebug endpoint was not pinned")
+        try expect(phpINI.contains("sendmail_path"), "Mail delivery was not configured")
+        try expect(renderer.mailpitArguments().contains("--disable-version-check"), "Mailpit version check was not disabled")
         var unsafeSite = site
         unsafeSite.documentRoot = "/tmp/example\nRequire all granted"
         do {
