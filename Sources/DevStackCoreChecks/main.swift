@@ -176,10 +176,18 @@ enum DevStackCoreChecks {
         let executablePackRoot = temporary.appendingPathComponent("executable-runtime-pack", isDirectory: true)
         let executableURL = executablePackRoot.appendingPathComponent("bin/devstack-check")
         try FileManager.default.createDirectory(at: executableURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        guard let currentExecutable = Bundle.main.executableURL else {
-            throw CheckFailure(description: "Could not locate the check executable")
-        }
-        try FileManager.default.copyItem(at: currentExecutable, to: executableURL)
+        let fixtureSource = temporary.appendingPathComponent("devstack-check.c")
+        try Data("int main(void) { return 0; }\n".utf8).write(to: fixtureSource)
+        _ = try ProcessRunner().runChecked(
+            executable: URL(fileURLWithPath: "/usr/bin/clang"),
+            arguments: ["-arch", "arm64", "-o", executableURL.path, fixtureSource.path],
+            timeout: 120
+        )
+        _ = try ProcessRunner().runChecked(
+            executable: URL(fileURLWithPath: "/usr/bin/codesign"),
+            arguments: ["--force", "--sign", "-", executableURL.path],
+            timeout: 60
+        )
         try Data("{}".utf8).write(to: executablePackRoot.appendingPathComponent("sbom.json"))
         var executableManifest = RuntimePackManifest(
             runtime: RuntimeManifest(
