@@ -5,6 +5,8 @@ DerivedData/
 dist/
 build/
 Artifacts/
+SBOM/
+ThirdPartyNotices/
 *.xcuserstate
 xcuserdata/
 *.dSYM/
