@@ -1,4 +1,5 @@
 import DevStackCore
+import CryptoKit
 import Foundation
 
 private struct CheckFailure: Error, CustomStringConvertible {
@@ -61,6 +62,52 @@ enum DevStackCoreChecks {
             arguments: ["devstack"]
         )
         try expect(command.standardOutput == "devstack", "Command output capture failed")
+
+        let payloadRoot = temporary.appendingPathComponent("runtime-pack", isDirectory: true)
+        try FileManager.default.createDirectory(at: payloadRoot, withIntermediateDirectories: true)
+        let payloadURL = payloadRoot.appendingPathComponent("bin/php")
+        try FileManager.default.createDirectory(at: payloadURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("php-runtime".utf8).write(to: payloadURL)
+        try Data("{}".utf8).write(to: payloadRoot.appendingPathComponent("sbom.json"))
+        let privateKey = Curve25519.Signing.PrivateKey()
+        var runtimeManifest = RuntimePackManifest(
+            runtime: RuntimeManifest(
+                id: "php-test",
+                kind: .php,
+                version: "8.5.11",
+                entryPoints: ["php": "bin/php"],
+                license: "PHP-3.01",
+                source: SourceProvenance(url: URL(string: "https://example.test/php.tar.xz")!, sha256: String(repeating: "0", count: 64)),
+                supportState: .supported
+            ),
+            payload: [],
+            signingIdentity: "DevStack Test",
+            sbomPath: "sbom.json"
+        )
+        let unsignedVerifier = RuntimePackVerifier(trustedPublicKeys: [:], requireSignature: false)
+        runtimeManifest.payload = [RuntimePackFile(path: "bin/php", sha256: try unsignedVerifier.sha256(payloadURL))]
+        let signature = try privateKey.signature(for: unsignedVerifier.canonicalManifestData(runtimeManifest))
+        runtimeManifest.signature = RuntimePackSignature(keyID: "test", value: signature.base64EncodedString())
+        let verifier = RuntimePackVerifier(trustedPublicKeys: ["test": privateKey.publicKey.rawRepresentation])
+        try verifier.verify(
+            manifest: runtimeManifest,
+            root: payloadRoot,
+            verifyCodeSignatures: false,
+            currentMacOS: OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0)
+        )
+        do {
+            _ = try verifier.validateRelativePath("../escape")
+            throw CheckFailure(description: "Runtime path traversal was accepted")
+        } catch RuntimePackVerificationError.unsafePath {
+            // Expected.
+        }
+
+        let report = DevStackDoctor().run(
+            context: DiagnosticContext(paths: paths, helperInstalled: false, expectedHostnames: ["example.test"]),
+            appVersion: "0.1.0"
+        )
+        try expect(report.results.contains(where: { $0.id == "architecture" }), "Doctor omitted architecture check")
+        try expect(report.results.contains(where: { $0.id == "privileged-helper" && $0.severity == .error }), "Doctor omitted missing helper")
 
         let supervisor = ServiceSupervisor()
         let serviceLog = temporary.appendingPathComponent("logs/sleep.log")
