@@ -45,6 +45,9 @@ struct DashboardView: View {
                         Button("Managed Shell", systemImage: "terminal") {
                             model.openManagedShell()
                         }
+                        Button("Copy Env Command", systemImage: "doc.on.clipboard") {
+                            model.copyManagedEnvironmentCommand()
+                        }
                         Spacer()
                     }
                     .padding(.vertical, 4)

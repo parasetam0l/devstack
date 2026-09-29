@@ -354,11 +354,7 @@ final class AppModel: ObservableObject {
 
     func openManagedShell() {
         do {
-            let php = paths.builtInRuntimes.appendingPathComponent("php-8.5/bin")
-            let mysql = paths.builtInRuntimes.appendingPathComponent("\(configuration.selectedDatabase.rawValue)/bin")
-            let composer = paths.builtInRuntimes.appendingPathComponent("composer-2.10.3/bin")
             let script = FileManager.default.temporaryDirectory.appendingPathComponent("DevStack-\(UUID().uuidString).command")
-            let managedPath = [php.path, mysql.path, composer.path].joined(separator: ":")
             let contents = """
             #!/bin/zsh
             export PATH=\(shellQuote(managedPath)):$PATH
@@ -374,6 +370,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func copyManagedEnvironmentCommand() {
+        let command = "export PATH=\(shellQuote(managedPath)):\"$PATH\"\n"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+    }
+
     func logContents(for service: ServiceKind) -> String {
         let url = paths.logs.appendingPathComponent("\(service.rawValue).log")
         guard let data = try? Data(contentsOf: url) else { return "No log output yet." }
@@ -386,6 +388,14 @@ final class AppModel: ObservableObject {
 
     private var databaseManager: DatabaseManager {
         DatabaseManager(paths: paths, runtimeRoot: paths.builtInRuntimes)
+    }
+
+    private var managedPath: String {
+        [
+            paths.builtInRuntimes.appendingPathComponent("php-8.5/bin").path,
+            paths.builtInRuntimes.appendingPathComponent("\(configuration.selectedDatabase.rawValue)/bin").path,
+            paths.generated.appendingPathComponent("bin").path
+        ].joined(separator: ":")
     }
 
     private func requireRunningDatabase(_ engine: DatabaseEngine) throws {
@@ -416,6 +426,7 @@ final class AppModel: ObservableObject {
             let base = paths.builtInRuntimes.appendingPathComponent(engine.rawValue)
             try AtomicFileWriter.write(renderer.mysqlConfiguration(engine: engine, baseDirectory: base), to: paths.generated.appendingPathComponent("\(engine.rawValue).cnf"), permissions: 0o600)
         }
+        try AtomicFileWriter.write(renderer.composerWrapperScript(), to: paths.generated.appendingPathComponent("bin/composer"), permissions: 0o755)
     }
 
     private func validateRequiredRuntimes() throws {

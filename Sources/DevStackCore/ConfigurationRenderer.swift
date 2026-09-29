@@ -199,6 +199,23 @@ public struct ConfigurationRenderer: Sendable {
         ]
     }
 
+    public func composerWrapperScript() -> String {
+        let php = runtimeRoot.appendingPathComponent("php-8.5/bin/php").path
+        let ini = paths.generatedPHP.appendingPathComponent("php-8.5.ini").path
+        let phar = runtimeRoot.appendingPathComponent("composer-2.10.3/composer.phar").path
+        return """
+        #!/bin/sh
+        # DevStack-managed Composer wrapper. The bundled Composer phar is immutable.
+        case "${1:-}" in
+            self-update|selfupdate)
+                echo "Composer self-update is disabled in DevStack. Update Composer through a signed DevStack release." >&2
+                exit 64
+                ;;
+        esac
+        exec \(shellQuote(php)) -c \(shellQuote(ini)) \(shellQuote(phar)) "$@"
+        """
+    }
+
     private func apacheVirtualHost(_ site: SiteDefinition) throws -> String {
         _ = try HostnameValidator.validate(site.hostname)
         try requireSafe(site.documentRoot)
@@ -296,6 +313,10 @@ public struct ConfigurationRenderer: Sendable {
 
     private func quote(_ value: String) -> String {
         "\"\(escapeQuotedContent(value))\""
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private func escapeQuotedContent(_ value: String) -> String {

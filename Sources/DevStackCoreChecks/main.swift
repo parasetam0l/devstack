@@ -107,6 +107,9 @@ enum DevStackCoreChecks {
         let php = try renderer.phpFPMConfiguration(runtimeID: "php-8.5", sites: [site], includeManagementPool: true)
         try expect(php.contains("[management]"), "PHP management pool was not rendered")
         try expect(php.contains(site.id.uuidString.replacingOccurrences(of: "-", with: "_").lowercased()), "Site PHP pool was not rendered")
+        let composerWrapper = renderer.composerWrapperScript()
+        try expect(composerWrapper.contains("self-update"), "Composer wrapper does not guard self-update")
+        try expect(composerWrapper.contains("php-8.5"), "Composer wrapper does not use the managed PHP runtime")
 
         let store = AppConfigurationStore(url: paths.configurationFile)
         var configuration = AppConfiguration()
