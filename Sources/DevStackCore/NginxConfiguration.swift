@@ -3,6 +3,21 @@ import Foundation
 extension ConfigurationRenderer {
     public func nginxConfiguration(sites: [SiteDefinition]) throws -> String {
         let root = runtimeDirectory("nginx-1.30")
+        // Local network access binds every interface and restricts clients to
+        // loopback and private ranges; otherwise the server stays on loopback.
+        let httpHost = localNetworkAccess ? "0.0.0.0" : "127.0.0.1"
+        let httpHost6 = localNetworkAccess ? "[::]" : "[::1]"
+        let accessRules = localNetworkAccess ? """
+            allow 127.0.0.1;
+            allow ::1;
+            allow 10.0.0.0/8;
+            allow 172.16.0.0/12;
+            allow 192.168.0.0/16;
+            allow 169.254.0.0/16;
+            allow fc00::/7;
+            allow fe80::/10;
+            deny all;
+            """ : ""
         var servers: [String] = []
         // The default site is the first server on both ports so localhost,
         // 127.0.0.1 and unmatched hostnames never fall through to phpMyAdmin.
@@ -25,12 +40,12 @@ extension ConfigurationRenderer {
             """
             servers.append("""
             server {
-                listen 127.0.0.1:\(ports.webHTTPListen); listen [::1]:\(ports.webHTTPListen);
+                listen \(httpHost):\(ports.webHTTPListen); listen \(httpHost6):\(ports.webHTTPListen);
                 server_name localhost 127.0.0.1 _;
                 \(locations)
             }
             server {
-                listen 127.0.0.1:\(ports.webHTTPSListen) ssl; listen [::1]:\(ports.webHTTPSListen) ssl;
+                listen \(httpHost):\(ports.webHTTPSListen) ssl; listen \(httpHost6):\(ports.webHTTPSListen) ssl;
                 server_name localhost 127.0.0.1 _;
                 ssl_certificate \(try nginxQuote(paths.certificate(for: "localhost").path));
                 ssl_certificate_key \(try nginxQuote(paths.privateKey(for: "localhost").path));
@@ -60,12 +75,12 @@ extension ConfigurationRenderer {
             if site.tlsEnabled {
                 return """
                 server {
-                    listen 127.0.0.1:\(ports.webHTTPListen); listen [::1]:\(ports.webHTTPListen);
+                    listen \(httpHost):\(ports.webHTTPListen); listen \(httpHost6):\(ports.webHTTPListen);
                     server_name \(hostname);
                     return 302 https://$host\(ports.webHTTPS == 443 ? "" : ":\(ports.webHTTPS)")$request_uri;
                 }
                 server {
-                    listen 127.0.0.1:\(ports.webHTTPSListen) ssl; listen [::1]:\(ports.webHTTPSListen) ssl;
+                    listen \(httpHost):\(ports.webHTTPSListen) ssl; listen \(httpHost6):\(ports.webHTTPSListen) ssl;
                     server_name \(hostname);
                     ssl_certificate \(try nginxQuote(paths.certificate(for: hostname).path));
                     ssl_certificate_key \(try nginxQuote(paths.privateKey(for: hostname).path));
@@ -75,7 +90,7 @@ extension ConfigurationRenderer {
             }
             return """
             server {
-                listen 127.0.0.1:\(ports.webHTTPListen); listen [::1]:\(ports.webHTTPListen);
+                listen \(httpHost):\(ports.webHTTPListen); listen \(httpHost6):\(ports.webHTTPListen);
                 server_name \(hostname);
                 \(locations)
             }
@@ -83,7 +98,7 @@ extension ConfigurationRenderer {
         })
         servers.append("""
         server {
-            listen 127.0.0.1:\(ports.webHTTPListen); listen [::1]:\(ports.webHTTPListen);
+            listen \(httpHost):\(ports.webHTTPListen); listen \(httpHost6):\(ports.webHTTPListen);
             server_name phpmyadmin.localhost adminer.localhost mailpit.localhost;
             return 302 https://$host\(ports.webHTTPS == 443 ? "" : ":\(ports.webHTTPS)")$request_uri;
         }
@@ -91,7 +106,7 @@ extension ConfigurationRenderer {
         for (host, runtimeID, pool) in [("phpmyadmin.localhost", "phpmyadmin-5.2.3", "management"), ("adminer.localhost", "adminer-6.1.1", "adminer")] {
             servers.append("""
             server {
-                listen 127.0.0.1:\(ports.webHTTPSListen) ssl; listen [::1]:\(ports.webHTTPSListen) ssl;
+                listen \(httpHost):\(ports.webHTTPSListen) ssl; listen \(httpHost6):\(ports.webHTTPSListen) ssl;
                 server_name \(host);
                 ssl_certificate \(try nginxQuote(paths.certificate(for: host).path));
                 ssl_certificate_key \(try nginxQuote(paths.privateKey(for: host).path));
@@ -110,7 +125,7 @@ extension ConfigurationRenderer {
         }
         servers.append("""
         server {
-            listen 127.0.0.1:\(ports.webHTTPSListen) ssl; listen [::1]:\(ports.webHTTPSListen) ssl;
+            listen \(httpHost):\(ports.webHTTPSListen) ssl; listen \(httpHost6):\(ports.webHTTPSListen) ssl;
             server_name mailpit.localhost;
             ssl_certificate \(try nginxQuote(paths.certificate(for: "mailpit.localhost").path));
             ssl_certificate_key \(try nginxQuote(paths.privateKey(for: "mailpit.localhost").path));
@@ -132,6 +147,7 @@ extension ConfigurationRenderer {
             include \(try nginxQuote(root.appendingPathComponent("conf/mime.types").path));
             default_type application/octet-stream;
             server_tokens off;
+            \(accessRules)
             client_max_body_size 64m;
             ssl_protocols TLSv1.2 TLSv1.3;
             client_body_temp_path \(try nginxQuote(paths.generatedNginx.appendingPathComponent("client_temp").path));

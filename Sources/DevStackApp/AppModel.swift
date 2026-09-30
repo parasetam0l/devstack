@@ -531,11 +531,16 @@ final class AppModel: ObservableObject {
 
     var localNetworkAddress: String? { LocalNetwork.primaryIPv4Address() }
 
+    /// Ports the helper forwards to the web server for local-network clients.
+    /// Unprivileged ports are bound directly by the web server, so only
+    /// privileged public ports need forwarding.
     var localNetworkLanEntries: [PortForwardingEntry] {
         guard configuration.localNetworkAccess else { return [] }
-        let http = PortForwardingEntry(publicPort: configuration.ports.webHTTP, upstreamPort: configuration.ports.webHTTPListen)
-        let https = PortForwardingEntry(publicPort: configuration.ports.webHTTPS, upstreamPort: configuration.ports.webHTTPSListen)
-        return http == https ? [http] : [http, https]
+        let candidates = [
+            PortForwardingEntry(publicPort: configuration.ports.webHTTP, upstreamPort: configuration.ports.webHTTPListen),
+            PortForwardingEntry(publicPort: configuration.ports.webHTTPS, upstreamPort: configuration.ports.webHTTPSListen)
+        ]
+        return candidates.filter { $0.publicPort < 1024 && $0.publicPort != $0.upstreamPort }
     }
 
     /// Keeps the helper's host mappings, loopback/LAN forwarding and local DNS in
@@ -570,13 +575,43 @@ final class AppModel: ObservableObject {
         configuration.localNetworkAccess = enabled
         do {
             try await store.save(configuration)
+            // The web server binds every interface when local access is on.
+            try generateConfiguration()
+            try await reloadWebServerIfRunning()
+            if enabled { exportCACertificateForLocalNetwork() }
             try await applyPrivilegedNetworking(hostnames: configuration.sites.map(\.hostname) + Self.managementHostnames)
             await refreshHelperStatus()
         } catch {
             configuration.localNetworkAccess = previous
             try? await store.save(configuration)
+            try? generateConfiguration()
+            try? await reloadWebServerIfRunning()
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Reloads the running web server after a configuration change.
+    private func reloadWebServerIfRunning() async throws {
+        if serviceIsRunning(.apache) {
+            try await validateWebConfigurations()
+            try await reloadApache()
+        }
+        if serviceIsRunning(.nginx) {
+            try await validateWebConfigurations()
+            let executable = runtimeDirectory("nginx-1.30").appendingPathComponent("sbin/nginx")
+            let arguments = ["-p", paths.generatedNginx.path + "/", "-c", paths.generatedNginx.appendingPathComponent("nginx.conf").path, "-s", "reload"]
+            let environment = runtimeEnvironment
+            let runner = runner
+            try await Task.detached { _ = try runner.runChecked(executable: executable, arguments: arguments, environment: environment) }.value
+        }
+    }
+
+    /// Copies the public CA next to the default site so phones can download it
+    /// over the local network and trust HTTPS.
+    private func exportCACertificateForLocalNetwork() {
+        let caCertificate = certificateManager.caCertificate
+        guard let data = try? Data(contentsOf: caCertificate) else { return }
+        try? AtomicFileWriter.write(data, to: paths.defaultSiteRoot.appendingPathComponent("devstack-ca.crt"), permissions: 0o644)
     }
 
     func refreshHelperStatus() async {
@@ -957,6 +992,7 @@ final class AppModel: ObservableObject {
             try certificates.ensureCertificates(for: TLSHosts)
             try certificates.refreshTrustBundle()
         }.value
+        exportCACertificateForLocalNetwork()
         // User trust is enough for browser HTTPS on this account and needs no
         // administrator authorization, so it can be installed automatically.
         // System-wide trust cannot be set from the privileged helper: macOS
@@ -1052,7 +1088,8 @@ final class AppModel: ObservableObject {
     private var configurationRenderer: ConfigurationRenderer {
         ConfigurationRenderer(paths: paths, runtimeRoot: paths.builtInRuntimes,
             runtimeDirectories: Dictionary(uniqueKeysWithValues: configuration.importedRuntimeIDs.map { ($0, runtimeDirectory($0)) }),
-            ports: configuration.ports)
+            ports: configuration.ports,
+            localNetworkAccess: configuration.localNetworkAccess)
     }
 
     func siteURL(_ site: SiteDefinition) -> String {

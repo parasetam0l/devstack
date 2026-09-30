@@ -17,6 +17,9 @@ public struct ConfigurationRenderer: Sendable {
     public let runtimeRoot: URL
     public let runtimeDirectories: [String: URL]
     public let ports: ServicePorts
+    /// When enabled the web server binds every interface so devices on the
+    /// local network can reach it directly; otherwise it stays on loopback.
+    public let localNetworkAccess: Bool
     public let userName: String
     public let groupName: String
 
@@ -25,6 +28,7 @@ public struct ConfigurationRenderer: Sendable {
         runtimeRoot: URL,
         runtimeDirectories: [String: URL] = [:],
         ports: ServicePorts = ServicePorts(),
+        localNetworkAccess: Bool = false,
         userName: String = NSUserName(),
         groupName: String = "staff"
     ) {
@@ -32,8 +36,36 @@ public struct ConfigurationRenderer: Sendable {
         self.runtimeRoot = runtimeRoot
         self.runtimeDirectories = runtimeDirectories
         self.ports = ports
+        self.localNetworkAccess = localNetworkAccess
         self.userName = userName
         self.groupName = groupName
+    }
+
+    private var listenDirectives: String {
+        let http = ports.webHTTPListen
+        let https = ports.webHTTPSListen
+        if localNetworkAccess {
+            return """
+            Listen 0.0.0.0:\(http)
+            Listen 0.0.0.0:\(https)
+            Listen [::]:\(http)
+            Listen [::]:\(https)
+            """
+        }
+        return """
+        Listen 127.0.0.1:\(http)
+        Listen 127.0.0.1:\(https)
+        Listen [::1]:\(http)
+        Listen [::1]:\(https)
+        """
+    }
+
+    /// Loopback only, or loopback plus the private ranges the helper also
+    /// accepts, so local-network clients are served but nothing public is.
+    private var directoryAccess: String {
+        localNetworkAccess
+            ? "Require ip 127.0.0.1 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 fc00::/7 fe80::/10"
+            : "Require local"
     }
 
     public func apacheConfiguration(sites: [SiteDefinition]) throws -> String {
@@ -61,10 +93,7 @@ public struct ConfigurationRenderer: Sendable {
         ErrorLog \(quote(paths.logs.appendingPathComponent("apache-error.log").path))
         LogLevel warn
         ServerName devstack.test
-        Listen 127.0.0.1:\(ports.webHTTPListen)
-        Listen 127.0.0.1:\(ports.webHTTPSListen)
-        Listen [::1]:\(ports.webHTTPListen)
-        Listen [::1]:\(ports.webHTTPSListen)
+        \(listenDirectives)
 
         \(mpmDirective)
         LoadModule unixd_module \(quote(moduleDirectory.appendingPathComponent("mod_unixd.so").path))
@@ -104,7 +133,7 @@ public struct ConfigurationRenderer: Sendable {
             <Directory \(phpMyAdminRoot)>
                 Options FollowSymLinks
                 AllowOverride None
-                Require local
+                \(directoryAccess)
                 <FilesMatch "\\.php$">
                     SetHandler "proxy:unix:\(managementSocket)|fcgi://localhost/"
                 </FilesMatch>
@@ -119,7 +148,7 @@ public struct ConfigurationRenderer: Sendable {
             SSLCertificateKeyFile \(quote(paths.privateKey(for: "adminer.localhost").path))
             <Directory \(quote(paths.generatedAdminer.path))>
                 AllowOverride None
-                Require local
+                \(directoryAccess)
                 <FilesMatch "\\.php$">
                     SetHandler "proxy:unix:\(escapeQuotedContent(paths.sockets.appendingPathComponent("php-8.5-adminer.sock").path))|fcgi://localhost/"
                 </FilesMatch>
@@ -310,7 +339,7 @@ public struct ConfigurationRenderer: Sendable {
             <Directory \(root)>
                 Options FollowSymLinks
                 AllowOverride All
-                Require local
+                \(directoryAccess)
                 <FilesMatch "\\.php$">
                     SetHandler "proxy:unix:\(socket)|fcgi://localhost/"
                 </FilesMatch>

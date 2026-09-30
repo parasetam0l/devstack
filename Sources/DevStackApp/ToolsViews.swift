@@ -669,6 +669,7 @@ private struct LocalNetworkEditor: View {
         guard let address = model.localNetworkAddress else { return "Connect to Wi-Fi or Ethernet, then enable access for your devices." }
         if model.configuration.localNetworkAccess {
             var text = "On each device: Wi-Fi settings → Configure DNS → Manual → \(address)."
+            text += " For HTTPS, open http://\(address):\(model.configuration.ports.webHTTPListen)/devstack-ca.crt on the device and trust the DevStack CA."
             if model.configuration.sites.contains(where: { $0.hostname.hasSuffix(".localhost") }) {
                 text += " Names ending in .localhost resolve on the device itself, so use a .test domain (e.g. mysite.test) for sites you open from other devices."
             }
