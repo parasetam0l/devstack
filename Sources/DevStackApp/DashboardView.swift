@@ -95,7 +95,7 @@ private struct ServiceControl<Selector: View>: View {
     var body: some View {
         HStack(spacing: 7) {
             Image(systemName: service.icon).foregroundStyle(.secondary).frame(width: 16)
-            Text(title).font(.system(size: 12, weight: .medium)).frame(width: 68, alignment: .leading)
+            Text(title).font(.system(size: 12, weight: .medium)).lineLimit(1).frame(width: 80, alignment: .leading)
             selector.pickerStyle(.menu).labelsHidden().controlSize(.small)
                 .disabled(model.isBusy).frame(width: 140, alignment: .leading)
             Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
