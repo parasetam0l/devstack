@@ -33,7 +33,7 @@ struct DevStackApp: App {
                         .keyboardShortcut(KeyEquivalent(Character(String(index + 1))))
                 }
                 Divider()
-                Button("Start Stack") { Task { await model.startAll() } }.disabled(model.isBusy || model.hasRunningServices || !model.helperInstalled)
+                Button("Start Stack") { Task { await model.startAll() } }.disabled(model.isBusy || model.stackIsRunning)
                 Button("Stop Stack") { Task { await model.stopAll() } }.disabled(model.isBusy || !model.hasRunningServices)
             }
         }
@@ -95,8 +95,19 @@ private struct MenuBarView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        ForEach(model.visibleServiceStates) { state in
-            Label("\(state.service.displayName) · \(state.phase.rawValue.capitalized)", systemImage: state.phase.symbol)
+        ForEach(model.dashboardServices) { service in
+            let state = model.serviceState(service)
+            Menu {
+                Button(state.phase == .running ? "Stop" : "Start") {
+                    Task {
+                        if state.phase == .running { await model.stopService(service) }
+                        else { await model.startService(service) }
+                    }
+                }.disabled(model.isBusy)
+                Button("Restart") { Task { await model.restartService(service) } }.disabled(model.isBusy || state.phase != .running)
+            } label: {
+                Label("\(service.displayName) · \(state.phase.rawValue.capitalized)", systemImage: state.phase.symbol)
+            }
         }
         Divider()
         Button("Open DevStack") {
@@ -104,7 +115,7 @@ private struct MenuBarView: View {
             NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
         }
         Button("Start All") { Task { await model.startAll() } }
-            .disabled(model.isBusy || model.hasRunningServices || !model.helperInstalled)
+            .disabled(model.isBusy || model.stackIsRunning)
         Button("Stop All") { Task { await model.stopAll() } }
             .disabled(model.isBusy || !model.hasRunningServices)
         Divider()
@@ -118,7 +129,9 @@ extension ServiceKind {
     var displayName: String {
         switch self {
         case .apache: "Apache"
+        case .nginx: "Nginx"
         case .php74: "PHP 7.4"
+        case .php84: "PHP 8.4"
         case .php85: "PHP 8.5"
         case .mysql57: "MySQL 5.7"
         case .mysql84: "MySQL 8.4"

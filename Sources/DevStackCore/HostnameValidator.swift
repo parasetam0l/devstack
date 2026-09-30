@@ -54,7 +54,7 @@ public enum HostnameValidator {
 
     public static func shadowsPublicDomain(_ hostname: String) -> Bool {
         let normalized = normalize(hostname)
-        return normalized != "test" && !normalized.hasSuffix(".test")
+        return normalized != "test" && !normalized.hasSuffix(".test") && normalized != "localhost" && !normalized.hasSuffix(".localhost")
     }
 
     private static func isIPv4(_ value: String) -> Bool {

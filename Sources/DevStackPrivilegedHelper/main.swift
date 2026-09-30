@@ -32,7 +32,16 @@ private enum CodeSignatureValidator {
         let attributes = [kSecGuestAttributePid as String: NSNumber(value: processIdentifier)] as CFDictionary
         guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &guest) == errSecSuccess, let guest else { return false }
         var requirement: SecRequirement?
-        let expression = "identifier \"\(PrivilegedHelperConstants.applicationBundleIdentifier)\" and anchor apple generic" as CFString
+        var helperCode: SecCode?
+        var helperStaticCode: SecStaticCode?
+        var helperInformation: CFDictionary?
+        guard SecCodeCopySelf([], &helperCode) == errSecSuccess, let helperCode,
+              SecCodeCopyStaticCode(helperCode, [], &helperStaticCode) == errSecSuccess, let helperStaticCode,
+              SecCodeCopySigningInformation(helperStaticCode, [], &helperInformation) == errSecSuccess,
+              let information = helperInformation as? [String: Any],
+              let team = information[kSecCodeInfoTeamIdentifier as String] as? String,
+              team.range(of: "^[A-Z0-9]{10}$", options: .regularExpression) != nil else { return false }
+        let expression = "identifier \"\(PrivilegedHelperConstants.applicationBundleIdentifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\"" as CFString
         guard SecRequirementCreateWithString(expression, [], &requirement) == errSecSuccess, let requirement else { return false }
         return SecCodeCheckValidity(guest, [], requirement) == errSecSuccess
     }

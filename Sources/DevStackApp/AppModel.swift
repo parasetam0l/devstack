@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CryptoKit
 import DevStackCore
 import Foundation
 import ServiceManagement
@@ -21,7 +22,7 @@ enum HelperSetupState: Equatable {
 
     var message: String {
         switch self {
-        case .notInstalled: "Administrator approval enables local domains and standard web ports."
+        case .notInstalled: "Administrator approval enables custom domains and standard web ports."
         case .requiresApproval: "Approve DevStack in System Settings → General → Login Items & Extensions."
         case .connecting: "Connecting to the helper…"
         case .ready: "Authorized and responding."
@@ -84,6 +85,7 @@ final class AppModel: ObservableObject {
     @Published var isRunningDoctor = false
     @Published var diagnosticProgress: String?
     @Published var errorMessage: String?
+    @Published var localCATrusted = false
     @Published var helperInstalled = false
     @Published var helperStatus: PrivilegedHelperStatus?
     @Published var helperSetupState: HelperSetupState = .notInstalled
@@ -96,12 +98,16 @@ final class AppModel: ObservableObject {
     let paths: DevStackPaths
     let isReviewMode: Bool
     private let store: AppConfigurationStore
-    private let supervisor = ServiceSupervisor()
+    private let supervisor: ServiceSupervisor
     private let runner = ProcessRunner()
     private let helper = PrivilegedHelperClient()
+    private var runtimeEnvironment: [String: String] {
+        RuntimeEnvironment.services(openssl: runtimeDirectory("openssl-3.5"), imageMagick: runtimeDirectory("imagemagick-7.1"), phpConfiguration: paths.generatedPHP)
+    }
 
     init(paths: DevStackPaths = DevStackPaths(), automaticallyLoad: Bool = true) {
         self.paths = paths
+        self.supervisor = ServiceSupervisor(recordsURL: paths.generated.appendingPathComponent("processes.json"))
         self.isReviewMode = !automaticallyLoad
         self.store = AppConfigurationStore(url: paths.configurationFile)
         if automaticallyLoad { Task { await load() } }
@@ -114,6 +120,15 @@ final class AppModel: ObservableObject {
         return AppModel()
     }
 
+    func applyAppearance() {
+        switch appearance {
+        case .system: NSApp.appearance = nil
+        case .light: NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark: NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+        for window in NSApp.windows { window.appearance = NSApp.appearance }
+    }
+
     func requestNewSite() {
         selectedSection = .sites
         isPresentingNewSite = true
@@ -122,12 +137,12 @@ final class AppModel: ObservableObject {
     func runtimeIsAvailable(_ id: String) -> Bool {
         guard let manifest = runtimeManifests.first(where: { $0.id == id }), !manifest.entryPoints.isEmpty else { return false }
         return manifest.entryPoints.values.allSatisfy {
-            FileManager.default.fileExists(atPath: paths.builtInRuntimes.appendingPathComponent(id).appendingPathComponent($0).path)
+            FileManager.default.fileExists(atPath: runtimeDirectory(id).appendingPathComponent($0).path)
         }
     }
 
     func extensionIsAvailable(_ name: String, runtimeID: String) -> Bool {
-        FileManager.default.fileExists(atPath: paths.builtInRuntimes.appendingPathComponent("\(runtimeID)/lib/php/extensions/\(name).so").path)
+        FileManager.default.fileExists(atPath: runtimeDirectory(runtimeID).appendingPathComponent("lib/php/extensions/\(name).so").path)
     }
 
     func serviceIsRunning(_ service: ServiceKind) -> Bool {
@@ -138,26 +153,31 @@ final class AppModel: ObservableObject {
         serviceStates.contains { $0.phase == .running || $0.phase == .starting }
     }
 
-    var visibleServiceStates: [ServiceState] {
-        serviceStates.filter {
-            switch $0.service {
-            case .php74: configuration.sites.contains { $0.phpRuntimeID == "php-7.4" } || $0.phase != .stopped
-            case .mysql57: configuration.selectedDatabase == .mysql57 || $0.phase != .stopped
-            case .mysql84: configuration.selectedDatabase == .mysql84 || $0.phase != .stopped
-            default: true
-            }
-        }
+    var stackIsRunning: Bool {
+        dashboardServices.allSatisfy(serviceIsRunning)
+            && requiredPHPRuntimes.allSatisfy { id in ServiceKind(rawValue: id).map(serviceIsRunning) == true }
+    }
+
+    var availablePHPRuntimes: [RuntimeManifest] {
+        runtimeManifests.filter { $0.kind == .php && runtimeIsAvailable($0.id) }.sorted { $0.version > $1.version }
+    }
+
+    func serviceState(_ service: ServiceKind) -> ServiceState {
+        serviceStates.first { $0.service == service } ?? ServiceState(service: service)
+    }
+
+    private var requiredPHPRuntimes: Set<String> {
+        Set(configuration.sites.map(\.phpRuntimeID)).union(["php-8.5", configuration.defaultPHPRuntimeID])
+    }
+
+    var dashboardServices: [ServiceKind] {
+        [configuration.selectedWebServer.service, ServiceKind(rawValue: configuration.defaultPHPRuntimeID) ?? .php85,
+         configuration.selectedDatabase == .mysql84 ? .mysql84 : .mysql57, .mailpit]
     }
 
     var selectedDatabaseBinding: DatabaseEngine {
         get { configuration.selectedDatabase }
-        set {
-            configuration.selectedDatabase = newValue
-            Task {
-                await persistConfiguration()
-                await switchDatabaseIfRunning()
-            }
-        }
+        set { Task { await selectDatabase(newValue) } }
     }
 
     func load() async {
@@ -171,6 +191,7 @@ final class AppModel: ObservableObject {
                 try await store.save(configuration)
             }
             await refreshHelperStatus()
+            localCATrusted = certificateManager.isTrusted()
             await refreshServiceStates()
         } catch {
             errorMessage = error.localizedDescription
@@ -178,54 +199,73 @@ final class AppModel: ObservableObject {
     }
 
     func saveSite(_ site: SiteDefinition) async throws {
-        let previous = configuration
         var site = site
-        site.hostname = try HostnameValidator.validate(
-            site.hostname,
-            existing: configuration.sites.filter { $0.id != site.id }.map(\.hostname)
-        )
-        guard FileManager.default.fileExists(atPath: site.documentRoot) else {
+        site.hostname = try HostnameValidator.validate(site.hostname, existing: configuration.sites.filter { $0.id != site.id }.map(\.hostname))
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: site.documentRoot, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: site.documentRoot])
         }
-        if let index = configuration.sites.firstIndex(where: { $0.id == site.id }) {
-            configuration.sites[index] = site
-        } else {
-            configuration.sites.append(site)
-        }
-        do {
-            try await store.save(configuration)
-            try generateConfiguration()
-            let apacheState = await supervisor.state(for: .apache)
-            if apacheState.phase == .running {
-                try await prepareCertificatesAndPrivilegedState()
-                try validateWebConfigurations()
-                try reloadApache()
-            }
-        } catch {
-            configuration = previous
-            try? await store.save(previous)
-            try? generateConfiguration()
-            throw error
-        }
+        var sites = configuration.sites
+        if let index = sites.firstIndex(where: { $0.id == site.id }) { sites[index] = site }
+        else { sites.append(site) }
+        try await applySites(sites)
     }
 
     func deleteSite(_ site: SiteDefinition) async {
-        configuration.sites.removeAll { $0.id == site.id }
-        await persistConfiguration()
-        do { try generateConfiguration() } catch { errorMessage = error.localizedDescription }
+        do { try await applySites(configuration.sites.filter { $0.id != site.id }) }
+        catch { errorMessage = error.localizedDescription }
+    }
+
+    private func applySites(_ sites: [SiteDefinition]) async throws {
+        guard !isBusy else { throw CocoaError(.userCancelled) }
+        isBusy = true
+        defer { isBusy = false }
+        let previous = configuration
+        let webRunning = (await supervisor.allStates()).contains { ($0.service == .apache || $0.service == .nginx) && $0.phase == .running }
+        configuration.sites = sites
+        do {
+            try generateConfiguration()
+            if webRunning {
+                try await prepareCertificatesAndPrivilegedState()
+                try await validateWebConfigurations()
+                try await refreshWebServices()
+            }
+            try await store.save(configuration)
+        } catch {
+            configuration = previous
+            try? generateConfiguration()
+            if webRunning {
+                try? await prepareCertificatesAndPrivilegedState()
+                try? await refreshWebServices()
+            }
+            await refreshServiceStates()
+            throw error
+        }
+        await refreshServiceStates()
+    }
+
+    private func refreshWebServices() async throws {
+        let states = await supervisor.allStates()
+        let requiredPHP = requiredPHPRuntimes
+        for state in states where state.service.phpRuntimeID != nil && state.phase == .running {
+            await supervisor.stop(state.service)
+        }
+        for id in requiredPHP.sorted() { try await startPHP(runtimeID: id) }
+        if states.contains(where: { $0.service == .apache && $0.phase == .running }) { try await reloadApache() }
+        if states.contains(where: { $0.service == .nginx && $0.phase == .running }) { try await supervisor.reload(.nginx) }
     }
 
     func setExtension(_ name: String, enabled: Bool, runtimeID: String) async {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
-        var extensions = configuration.enabledExtensions[runtimeID] ?? []
+        var extensions = (configuration.enabledExtensions[runtimeID] ?? []).filter { extensionIsAvailable($0, runtimeID: runtimeID) }
         if enabled { extensions.insert(name) } else { extensions.remove(name) }
         configuration.enabledExtensions[runtimeID] = extensions
         await persistConfiguration()
         do {
             try generateConfiguration()
-            let service: ServiceKind = runtimeID == "php-7.4" ? .php74 : .php85
+            let service = ServiceKind(rawValue: runtimeID)!
             let state = await supervisor.state(for: service)
             if state.phase == .running {
                 await supervisor.stop(service)
@@ -240,20 +280,29 @@ final class AppModel: ObservableObject {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
+        let previouslyRunning = Set((await supervisor.allStates()).filter { $0.phase == .running }.map(\.service))
         do {
             try generateConfiguration()
             try validateRequiredRuntimes()
             try await prepareCertificatesAndPrivilegedState()
+            try await validateWebConfigurations()
             try await startMailpit()
-            let initializedDatabase = try databaseManager.initializeIfNeeded(configuration.selectedDatabase)
-            try await startDatabase(configuration.selectedDatabase)
-            if initializedDatabase { try databaseManager.configureDevelopmentRootPassword(configuration.selectedDatabase) }
-            let phpRuntimes = Set(configuration.sites.map(\.phpRuntimeID)).union(["php-8.5"])
+            let manager = databaseManager
+            let engine = configuration.selectedDatabase
+            let initializedDatabase = try await Task.detached { try manager.initializeIfNeeded(engine) }.value
+            try await startDatabase(engine)
+            if initializedDatabase { try await Task.detached { try manager.configureDevelopmentRootPassword(engine) }.value }
+            let phpRuntimes = requiredPHPRuntimes
             for runtimeID in phpRuntimes.sorted() { try await startPHP(runtimeID: runtimeID) }
             try verifyLegacyDatabaseCompatibilityIfNeeded()
-            try validateWebConfigurations()
-            try await startApache()
+            try await validateWebConfigurations()
+            await supervisor.stop(configuration.selectedWebServer == .apache ? .nginx : .apache)
+            if configuration.selectedWebServer == .apache { try await startApache() }
+            else { try await startNginx() }
         } catch {
+            for state in await supervisor.allStates() where state.phase == .running && !previouslyRunning.contains(state.service) {
+                await supervisor.stop(state.service)
+            }
             errorMessage = error.localizedDescription
         }
         await refreshServiceStates()
@@ -277,15 +326,16 @@ final class AppModel: ObservableObject {
         diagnosticProgress = "Preparing checks…"
         defer { isRunningDoctor = false; diagnosticProgress = nil }
         await refreshServiceStates()
-        if helper.isRegistered { helperStatus = try? await helper.status() }
+        await refreshHelperStatus()
         let context = DiagnosticContext(
             paths: paths,
             runtimeManifests: runtimeManifests,
             applicationURL: Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.bundleURL : nil,
             helperInstalled: helperInstalled,
             helperStatus: helperStatus,
-            expectedHostnames: configuration.sites.map(\.hostname) + ["phpmyadmin.devstack.test", "mailpit.devstack.test"],
+            expectedHostnames: configuration.sites.map(\.hostname) + ["phpmyadmin.localhost", "mailpit.localhost", "adminer.localhost"],
             serviceStates: serviceStates,
+            requiredRuntimeIDs: Set(configuration.sites.map(\.phpRuntimeID)).union([configuration.selectedDatabase.rawValue, "php-8.5"]),
             selectedDatabase: configuration.selectedDatabase
         )
         let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
@@ -311,8 +361,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    var helperIsRegistered: Bool { helper.registrationStatus == .enabled || helper.registrationStatus == .requiresApproval }
+
     func refreshHelperStatus() async {
         guard !isReviewMode else { return }
+        guard helper.canAuthenticate else {
+            helperInstalled = false; helperStatus = nil
+            helperSetupState = .unavailable("Standard ports require a Developer ID signed release. This development build uses ports 8080 and 8443.")
+            return
+        }
         switch helper.registrationStatus {
         case .requiresApproval:
             helperInstalled = false; helperStatus = nil; helperSetupState = .requiresApproval
@@ -337,16 +394,31 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private var certificateManager: CertificateManager {
+        CertificateManager(paths: paths, openssl: runtimeDirectory("openssl-3.5").appendingPathComponent("bin/openssl"))
+    }
+
+    func trustHTTPS() async {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
+        let certificates = certificateManager
+        do {
+            try await Task.detached { try certificates.trustForCurrentUser() }.value
+            localCATrusted = certificates.isTrusted()
+        } catch { errorMessage = "HTTPS trust: \(error.localizedDescription)" }
+    }
+
     func removeHelper() async {
         guard !isBusy, !hasRunningServices else { return }
         isBusy = true
         defer { isBusy = false }
         do {
-            if helper.isRegistered { try await helper.removeManagedState() }
+            if helper.isRegistered && helper.canAuthenticate { try await helper.removeManagedState() }
             try await helper.unregister()
             helperStatus = nil
             helperInstalled = false
-            helperSetupState = .notInstalled
+            await refreshHelperStatus()
         } catch {
             errorMessage = "Could not remove the privileged helper: \(error.localizedDescription)"
         }
@@ -432,7 +504,8 @@ final class AppModel: ObservableObject {
             await refreshServiceStates()
             let engine = configuration.selectedDatabase
             try requireRunningDatabase(engine)
-            lastDatabaseBackup = try databaseManager.exportSQL(engine, destination: destination)
+            let manager = databaseManager
+            lastDatabaseBackup = try await Task.detached { try manager.exportSQL(engine, destination: destination) }.value
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -445,8 +518,9 @@ final class AppModel: ObservableObject {
             await refreshServiceStates()
             let engine = configuration.selectedDatabase
             try requireRunningDatabase(engine)
-            lastDatabaseBackup = try databaseManager.exportSQL(engine)
-            try databaseManager.importSQL(engine, source: source)
+            let manager = databaseManager
+            lastDatabaseBackup = try await Task.detached { try manager.exportSQL(engine) }.value
+            try await Task.detached { try manager.importSQL(engine, source: source) }.value
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -458,19 +532,20 @@ final class AppModel: ObservableObject {
         defer { isBusy = false }
         let engine = configuration.selectedDatabase
         let kind: ServiceKind = engine == .mysql57 ? .mysql57 : .mysql84
+        let manager = databaseManager
         do {
             await refreshServiceStates()
             if serviceStates.first(where: { $0.service == kind })?.phase == .running {
-                lastDatabaseBackup = try databaseManager.exportSQL(engine)
+                lastDatabaseBackup = try await Task.detached { try manager.exportSQL(engine) }.value
             }
             await supervisor.stop(kind)
             if FileManager.default.fileExists(atPath: databaseManager.dataDirectoryURL(engine).path) {
                 let archived = try databaseManager.archiveDataDirectory(engine)
                 if lastDatabaseBackup == nil { lastDatabaseBackup = archived }
             }
-            let initialized = try databaseManager.initializeIfNeeded(engine)
-            if initialized { try databaseManager.configureDevelopmentRootPassword(engine) }
+            let initialized = try await Task.detached { try manager.initializeIfNeeded(engine) }.value
             try await startDatabase(engine)
+            if initialized { try await Task.detached { try manager.configureDevelopmentRootPassword(engine) }.value }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -483,10 +558,11 @@ final class AppModel: ObservableObject {
             let contents = """
             #!/bin/zsh
             export PATH=\(shellQuote(managedPath)):$PATH
-            export PHPRC=\(shellQuote(paths.generatedPHP.appendingPathComponent("php-8.5.ini").path))
+            \(managedRuntimeEnvironmentCommand)
+            export PHPRC=\(shellQuote(paths.generatedPHP.appendingPathComponent("\(configuration.defaultPHPRuntimeID).ini").path))
             export MYSQL_UNIX_PORT=\(shellQuote(paths.sockets.appendingPathComponent("mysql.sock").path))
             rm -f -- "$0"
-            exec /bin/zsh -l
+            exec /bin/zsh -i
             """
             try AtomicFileWriter.write(contents, to: script, permissions: 0o700)
             NSWorkspace.shared.open(script)
@@ -496,7 +572,7 @@ final class AppModel: ObservableObject {
     }
 
     func copyManagedEnvironmentCommand() {
-        let command = "export PATH=\(shellQuote(managedPath)):\"$PATH\"\n"
+        let command = "export PATH=\(shellQuote(managedPath)):\"$PATH\"\n\(managedRuntimeEnvironmentCommand)\nexport PHPRC=\(shellQuote(paths.generatedPHP.appendingPathComponent("\(configuration.defaultPHPRuntimeID).ini").path))\nexport MYSQL_UNIX_PORT=\(shellQuote(paths.sockets.appendingPathComponent("mysql.sock").path))\n"
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(command, forType: .string)
     }
@@ -512,15 +588,20 @@ final class AppModel: ObservableObject {
     }
 
     private var databaseManager: DatabaseManager {
-        DatabaseManager(paths: paths, runtimeRoot: paths.builtInRuntimes)
+        DatabaseManager(paths: paths, runtimeRoot: configuration.importedRuntimeIDs.contains(configuration.selectedDatabase.rawValue) ? paths.importedRuntimes : paths.builtInRuntimes,
+            opensslRuntime: runtimeDirectory("openssl-3.5"))
     }
 
     private var managedPath: String {
         [
-            paths.builtInRuntimes.appendingPathComponent("php-8.5/bin").path,
-            paths.builtInRuntimes.appendingPathComponent("\(configuration.selectedDatabase.rawValue)/bin").path,
-            paths.generated.appendingPathComponent("bin").path
+            paths.generated.appendingPathComponent("bin").path,
+            runtimeDirectory(configuration.defaultPHPRuntimeID).appendingPathComponent("bin").path,
+            runtimeDirectory(configuration.selectedDatabase.rawValue).appendingPathComponent("bin").path
         ].joined(separator: ":")
+    }
+
+    private var managedRuntimeEnvironmentCommand: String {
+        runtimeEnvironment.map { "export \($0.key)=\(shellQuote($0.value))" }.sorted().joined(separator: "\n")
     }
 
     private func requireRunningDatabase(_ engine: DatabaseEngine) throws {
@@ -532,62 +613,96 @@ final class AppModel: ObservableObject {
 
     private func generateConfiguration() throws {
         try paths.createRequiredDirectories()
-        let renderer = ConfigurationRenderer(paths: paths, runtimeRoot: paths.builtInRuntimes)
-        let mailpit = paths.builtInRuntimes.appendingPathComponent("mailpit-1.31.1/mailpit")
+        let renderer = configurationRenderer
+        let mailpit = runtimeDirectory("mailpit-1.31.1").appendingPathComponent("mailpit")
+        let cookieSecretURL = paths.phpMyAdmin.appendingPathComponent("cookie-secret")
+        let cookieSecret: String
+        if FileManager.default.fileExists(atPath: cookieSecretURL.path) {
+            cookieSecret = try String(contentsOf: cookieSecretURL, encoding: .utf8)
+        } else {
+            cookieSecret = SymmetricKey(size: .bits256).withUnsafeBytes { String(Data($0).base64EncodedString().prefix(32)) }
+            try AtomicFileWriter.write(cookieSecret, to: cookieSecretURL, permissions: 0o600)
+        }
+        try AtomicFileWriter.write(try renderer.phpMyAdminConfiguration(cookieSecret: cookieSecret),
+            to: paths.phpMyAdmin.appendingPathComponent("config.inc.php"), permissions: 0o600)
         try AtomicFileWriter.write(try renderer.apacheConfiguration(sites: configuration.sites), to: paths.generatedApache.appendingPathComponent("httpd.conf"), permissions: 0o644)
-        for runtimeID in ["php-7.4", "php-8.5"] {
+        for runtimeID in ["php-7.4", "php-8.4", "php-8.5"] {
             try AtomicFileWriter.write(
                 try renderer.phpFPMConfiguration(runtimeID: runtimeID, sites: configuration.sites, includeManagementPool: runtimeID == "php-8.5"),
                 to: paths.generatedPHP.appendingPathComponent("\(runtimeID)-fpm.conf"),
                 permissions: 0o600
             )
             try AtomicFileWriter.write(
-                try renderer.phpINI(runtimeID: runtimeID, enabledExtensions: configuration.enabledExtensions[runtimeID] ?? [], mailpitBinary: mailpit),
+                try renderer.phpINI(runtimeID: runtimeID, enabledExtensions: (configuration.enabledExtensions[runtimeID] ?? []).filter { extensionIsAvailable($0, runtimeID: runtimeID) }, mailpitBinary: mailpit),
                 to: paths.generatedPHP.appendingPathComponent("\(runtimeID).ini"),
                 permissions: 0o600
             )
         }
+        try AtomicFileWriter.write(try renderer.nginxConfiguration(sites: configuration.sites), to: paths.generatedNginx.appendingPathComponent("nginx.conf"), permissions: 0o600)
         for engine in DatabaseEngine.allCases {
-            let base = paths.builtInRuntimes.appendingPathComponent(engine.rawValue)
+            let base = runtimeDirectory(engine.rawValue)
             try AtomicFileWriter.write(renderer.mysqlConfiguration(engine: engine, baseDirectory: base), to: paths.generated.appendingPathComponent("\(engine.rawValue).cnf"), permissions: 0o600)
         }
-        try AtomicFileWriter.write(renderer.composerWrapperScript(), to: paths.generated.appendingPathComponent("bin/composer"), permissions: 0o755)
+        try AtomicFileWriter.write(renderer.composerWrapperScript(runtimeID: configuration.defaultPHPRuntimeID), to: paths.generated.appendingPathComponent("bin/composer"), permissions: 0o755)
+        for client in ["mysql", "mysqldump", "mysqladmin"] {
+            try AtomicFileWriter.write(try renderer.databaseClientWrapperScript(engine: configuration.selectedDatabase, client: client),
+                to: paths.generated.appendingPathComponent("bin/\(client)"), permissions: 0o755)
+        }
     }
 
     private func validateRequiredRuntimes() throws {
-        var required = ["apache-2.4", "php-8.5", configuration.selectedDatabase.rawValue, "mailpit-1.31.1", "phpmyadmin-5.2.3", "openssl-3.5"]
-        if configuration.sites.contains(where: { $0.phpRuntimeID == "php-7.4" }) { required.append("php-7.4") }
-        let missing = required.filter { !FileManager.default.fileExists(atPath: paths.builtInRuntimes.appendingPathComponent($0).path) }
+        var required = [configuration.selectedWebServer.service.runtimeID, "php-8.5", configuration.selectedDatabase.rawValue, "mailpit-1.31.1", "phpmyadmin-5.2.3", "adminer-6.1.1", "openssl-3.5"]
+        required.append(contentsOf: requiredPHPRuntimes)
+        let missing = required.filter { !runtimeIsAvailable($0) }
         guard missing.isEmpty else {
             throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "Runtime payloads are not installed: \(missing.joined(separator: ", ")). Build or import signed runtime packs first."])
         }
     }
 
-    private func validateWebConfigurations() throws {
-        let apache = paths.builtInRuntimes.appendingPathComponent("apache-2.4/bin/httpd")
-        _ = try runner.runChecked(executable: apache, arguments: ["-t", "-f", paths.generatedApache.appendingPathComponent("httpd.conf").path])
-        for runtimeID in Set(configuration.sites.map(\.phpRuntimeID)).union(["php-8.5"]) {
-            let fpm = paths.builtInRuntimes.appendingPathComponent("\(runtimeID)/sbin/php-fpm")
-            _ = try runner.runChecked(executable: fpm, arguments: ["-t", "-y", paths.generatedPHP.appendingPathComponent("\(runtimeID)-fpm.conf").path, "-c", paths.generatedPHP.appendingPathComponent("\(runtimeID).ini").path])
+    private func validateWebConfigurations() async throws {
+        var checks: [(URL, [String])] = []
+        if configuration.selectedWebServer == .apache {
+            checks.append((runtimeDirectory("apache-2.4").appendingPathComponent("bin/httpd"),
+                ["-t", "-f", paths.generatedApache.appendingPathComponent("httpd.conf").path]))
+        } else {
+            checks.append((runtimeDirectory("nginx-1.30").appendingPathComponent("sbin/nginx"),
+                ["-t", "-p", paths.generatedNginx.path + "/", "-c", paths.generatedNginx.appendingPathComponent("nginx.conf").path]))
         }
+        for id in requiredPHPRuntimes {
+            checks.append((runtimeDirectory(id).appendingPathComponent("sbin/php-fpm"),
+                ["-t", "-y", paths.generatedPHP.appendingPathComponent("\(id)-fpm.conf").path, "-c", paths.generatedPHP.appendingPathComponent("\(id).ini").path]))
+        }
+        let commands = checks
+        let environment = runtimeEnvironment
+        let runner = runner
+        try await Task.detached {
+            for (executable, arguments) in commands {
+                _ = try runner.runChecked(executable: executable, arguments: arguments, environment: environment)
+            }
+        }.value
     }
 
-    private func reloadApache() throws {
-        let apache = paths.builtInRuntimes.appendingPathComponent("apache-2.4/bin/httpd")
-        _ = try runner.runChecked(executable: apache, arguments: ["-k", "graceful", "-f", paths.generatedApache.appendingPathComponent("httpd.conf").path])
+    private func reloadApache() async throws {
+        let executable = runtimeDirectory("apache-2.4").appendingPathComponent("bin/httpd")
+        let arguments = ["-k", "graceful", "-f", paths.generatedApache.appendingPathComponent("httpd.conf").path]
+        let environment = runtimeEnvironment
+        let runner = runner
+        try await Task.detached { _ = try runner.runChecked(executable: executable, arguments: arguments, environment: environment) }.value
     }
 
     private func prepareCertificatesAndPrivilegedState() async throws {
-        guard helper.isRegistered else {
-            throw CocoaError(.executableNotLoadable, userInfo: [NSLocalizedDescriptionKey: "Install the DevStack privileged helper in Settings before starting services."])
-        }
         let certificates = CertificateManager(
             paths: paths,
-            openssl: paths.builtInRuntimes.appendingPathComponent("openssl-3.5/bin/openssl")
+            openssl: runtimeDirectory("openssl-3.5").appendingPathComponent("bin/openssl")
         )
-        let managementHosts = ["phpmyadmin.devstack.test", "mailpit.devstack.test"]
+        let managementHosts = ["phpmyadmin.localhost", "mailpit.localhost", "adminer.localhost"]
         let TLSHosts = configuration.sites.filter(\.tlsEnabled).map(\.hostname) + managementHosts
-        try certificates.ensureCertificates(for: TLSHosts)
+        try await Task.detached {
+            try certificates.ensureCertificates(for: TLSHosts)
+            try certificates.refreshTrustBundle()
+        }.value
+        localCATrusted = certificates.isTrusted()
+        guard helperInstalled else { return }
         let hostnames = configuration.sites.map(\.hostname) + managementHosts
         try await helper.applyHostMappings(hostnames.map { HostMapping(hostname: $0) })
         try await helper.setPortForwarding(.init(enabled: true))
@@ -603,11 +718,12 @@ final class AppModel: ObservableObject {
     private func verifyLegacyDatabaseCompatibilityIfNeeded() throws {
         guard configuration.selectedDatabase == .mysql84,
               configuration.sites.contains(where: { $0.phpRuntimeID == "php-7.4" }) else { return }
-        let php = paths.builtInRuntimes.appendingPathComponent("php-7.4/bin/php")
+        let php = runtimeDirectory("php-7.4").appendingPathComponent("bin/php")
         let code = #"mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT); $db = new mysqli('127.0.0.1', 'root', 'root', '', 3306); $db->query('SELECT 1');"#
         _ = try runner.runChecked(
             executable: php,
             arguments: ["-c", paths.generatedPHP.appendingPathComponent("php-7.4.ini").path, "-r", code],
+            environment: runtimeEnvironment,
             timeout: 30
         )
     }
@@ -615,22 +731,30 @@ final class AppModel: ObservableObject {
     private func startApache() async throws {
         try await supervisor.start(ServiceSpecification(
             kind: .apache,
-            executable: paths.builtInRuntimes.appendingPathComponent("apache-2.4/bin/httpd"),
+            executable: runtimeDirectory("apache-2.4").appendingPathComponent("bin/httpd"),
             arguments: ["-D", "FOREGROUND", "-f", paths.generatedApache.appendingPathComponent("httpd.conf").path],
+            environment: runtimeEnvironment,
             logFile: paths.logs.appendingPathComponent("apache.log"),
             readinessProbe: .tcpLoopback(port: 8080)
         ))
     }
 
     private func startPHP(runtimeID: String) async throws {
-        let kind: ServiceKind = runtimeID == "php-7.4" ? .php74 : .php85
+        let kind = ServiceKind(rawValue: runtimeID)!
+        if await supervisor.state(for: kind).phase == .running { return }
+        try CertificateManager(paths: paths, openssl: runtimeDirectory("openssl-3.5").appendingPathComponent("bin/openssl")).refreshTrustBundle()
         let sites = configuration.sites.filter { $0.phpRuntimeID == runtimeID }
         let probe: ReadinessProbe = sites.first.map { .fileExists(paths.phpSocket(runtimeID: runtimeID, siteID: $0.id)) }
-            ?? .fileExists(paths.sockets.appendingPathComponent("php-8.5-management.sock"))
+            ?? .fileExists(paths.sockets.appendingPathComponent(runtimeID == "php-8.5" ? "php-8.5-management.sock" : "\(runtimeID)-default.sock"))
+        let sockets = sites.map { paths.phpSocket(runtimeID: runtimeID, siteID: $0.id) }
+            + [paths.sockets.appendingPathComponent(runtimeID == "php-8.5" ? "php-8.5-management.sock" : "\(runtimeID)-default.sock")]
+            + (runtimeID == "php-8.5" ? [paths.sockets.appendingPathComponent("php-8.5-adminer.sock")] : [])
+        for socket in sockets where FileManager.default.fileExists(atPath: socket.path) { try FileManager.default.removeItem(at: socket) }
         try await supervisor.start(ServiceSpecification(
             kind: kind,
-            executable: paths.builtInRuntimes.appendingPathComponent("\(runtimeID)/sbin/php-fpm"),
+            executable: runtimeDirectory(runtimeID).appendingPathComponent("sbin/php-fpm"),
             arguments: ["--nodaemonize", "--fpm-config", paths.generatedPHP.appendingPathComponent("\(runtimeID)-fpm.conf").path, "--php-ini", paths.generatedPHP.appendingPathComponent("\(runtimeID).ini").path],
+            environment: runtimeEnvironment,
             logFile: paths.logs.appendingPathComponent("\(runtimeID).log"),
             readinessProbe: probe
         ))
@@ -640,8 +764,9 @@ final class AppModel: ObservableObject {
         let kind: ServiceKind = engine == .mysql57 ? .mysql57 : .mysql84
         try await supervisor.start(ServiceSpecification(
             kind: kind,
-            executable: paths.builtInRuntimes.appendingPathComponent("\(engine.rawValue)/bin/mysqld"),
+            executable: runtimeDirectory(engine.rawValue).appendingPathComponent("bin/mysqld"),
             arguments: ["--defaults-file=\(paths.generated.appendingPathComponent("\(engine.rawValue).cnf").path)"],
+            environment: runtimeEnvironment,
             logFile: paths.logs.appendingPathComponent("\(engine.rawValue).log"),
             readinessProbe: .tcpLoopback(port: 3306),
             readinessTimeout: 30
@@ -649,26 +774,149 @@ final class AppModel: ObservableObject {
     }
 
     private func startMailpit() async throws {
-        let renderer = ConfigurationRenderer(paths: paths, runtimeRoot: paths.builtInRuntimes)
+        let renderer = configurationRenderer
         try await supervisor.start(ServiceSpecification(
             kind: .mailpit,
-            executable: paths.builtInRuntimes.appendingPathComponent("mailpit-1.31.1/mailpit"),
+            executable: runtimeDirectory("mailpit-1.31.1").appendingPathComponent("mailpit"),
             arguments: renderer.mailpitArguments(),
             logFile: paths.logs.appendingPathComponent("mailpit.log"),
             readinessProbe: .tcpLoopback(port: 8025)
         ))
     }
 
-    private func switchDatabaseIfRunning() async {
-        let old: ServiceKind = configuration.selectedDatabase == .mysql84 ? .mysql57 : .mysql84
-        let oldState = await supervisor.state(for: old)
-        let selectedKind: ServiceKind = configuration.selectedDatabase == .mysql57 ? .mysql57 : .mysql84
-        let selectedState = await supervisor.state(for: selectedKind)
-        if oldState.phase == .running || selectedState.phase == .running {
-            await supervisor.stop(old)
-            if selectedState.phase != .running {
-                do { try await startDatabase(configuration.selectedDatabase) } catch { errorMessage = error.localizedDescription }
+    func runtimeDirectory(_ id: String) -> URL {
+        (configuration.importedRuntimeIDs.contains(id) ? paths.importedRuntimes : paths.builtInRuntimes).appendingPathComponent(id)
+    }
+
+    private var configurationRenderer: ConfigurationRenderer {
+        ConfigurationRenderer(paths: paths, runtimeRoot: paths.builtInRuntimes,
+            runtimeDirectories: Dictionary(uniqueKeysWithValues: configuration.importedRuntimeIDs.map { ($0, runtimeDirectory($0)) }),
+            standardPortsEnabled: helperInstalled)
+    }
+
+    func siteURL(_ site: SiteDefinition) -> String {
+        let scheme = site.tlsEnabled ? "https" : "http"
+        let port = site.tlsEnabled ? 8443 : 8080
+        return "\(scheme)://\(site.hostname)\(helperInstalled ? "" : ":\(port)")"
+    }
+
+    func toolURL(_ name: String) -> String {
+        return "https://\(name).localhost\(helperInstalled ? "" : ":8443")"
+    }
+
+    func selectWebServer(_ server: WebServer) async {
+        guard !isBusy, server != configuration.selectedWebServer else { return }
+        isBusy = true
+        defer { isBusy = false }
+        let previous = configuration.selectedWebServer
+        let wasRunning = serviceIsRunning(previous.service)
+        do {
+            guard runtimeIsAvailable(server.service.runtimeID) else { throw CocoaError(.fileNoSuchFile) }
+            configuration.selectedWebServer = server
+            try generateConfiguration()
+            if wasRunning {
+                try await validateWebConfigurations()
+                await supervisor.stop(previous.service)
+                if server == .apache { try await startApache() } else { try await startNginx() }
             }
+            try await store.save(configuration)
+        } catch {
+            configuration.selectedWebServer = previous
+            if wasRunning {
+                await supervisor.stop(server.service)
+                if previous == .apache { try? await startApache() } else { try? await startNginx() }
+            }
+            errorMessage = "Could not switch to \(server.displayName): \(error.localizedDescription)"
+        }
+        await refreshServiceStates()
+    }
+
+    func selectPHP(_ runtimeID: String) async {
+        guard !isBusy, runtimeIsAvailable(runtimeID), runtimeID != configuration.defaultPHPRuntimeID else { return }
+        let previous = configuration.defaultPHPRuntimeID
+        configuration.defaultPHPRuntimeID = runtimeID
+        do { try generateConfiguration(); try await store.save(configuration) }
+        catch { configuration.defaultPHPRuntimeID = previous; try? generateConfiguration(); errorMessage = error.localizedDescription }
+    }
+
+    func startService(_ service: ServiceKind) async {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            guard runtimeIsAvailable(service.runtimeID) else {
+                throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "\(service.displayName) is not installed."])
+            }
+            try generateConfiguration()
+            switch service {
+            case .apache, .nginx:
+                try await prepareCertificatesAndPrivilegedState()
+                for id in requiredPHPRuntimes.sorted() {
+                    try await startPHP(runtimeID: id)
+                }
+                await supervisor.stop(service == .apache ? .nginx : .apache)
+                if service == .apache { try await validateWebConfigurations(); try await startApache() }
+                else { try await startNginx() }
+            case .php74, .php84, .php85: try await startPHP(runtimeID: service.rawValue)
+            case .mysql57, .mysql84:
+                let engine: DatabaseEngine = service == .mysql57 ? .mysql57 : .mysql84
+                await supervisor.stop(engine == .mysql57 ? .mysql84 : .mysql57)
+                configuration.selectedDatabase = engine
+                try await store.save(configuration)
+                let manager = databaseManager
+                let initialized = try await Task.detached { try manager.initializeIfNeeded(engine) }.value
+                try await startDatabase(engine)
+                if initialized { try await Task.detached { try manager.configureDevelopmentRootPassword(engine) }.value }
+            case .mailpit: try await startMailpit()
+            }
+        } catch { errorMessage = "\(service.displayName): \(error.localizedDescription)" }
+        await refreshServiceStates()
+    }
+
+    func stopService(_ service: ServiceKind) async {
+        guard !isBusy else { return }
+        isBusy = true
+        await supervisor.stop(service)
+        await refreshServiceStates()
+        isBusy = false
+    }
+
+    func restartService(_ service: ServiceKind) async {
+        await stopService(service)
+        await startService(service)
+    }
+
+    private func startNginx() async throws {
+        let executable = runtimeDirectory("nginx-1.30").appendingPathComponent("sbin/nginx")
+        let arguments = ["-p", paths.generatedNginx.path + "/", "-c", paths.generatedNginx.appendingPathComponent("nginx.conf").path]
+        _ = try runner.runChecked(executable: executable, arguments: ["-t"] + arguments, environment: runtimeEnvironment)
+        try await supervisor.start(ServiceSpecification(kind: .nginx, executable: executable, arguments: arguments, environment: runtimeEnvironment,
+            logFile: paths.logs.appendingPathComponent("nginx.log"), readinessProbe: .tcpLoopback(port: 8443)))
+    }
+
+    private func selectDatabase(_ engine: DatabaseEngine) async {
+        guard !isBusy, engine != configuration.selectedDatabase, runtimeIsAvailable(engine.rawValue) else { return }
+        isBusy = true
+        defer { isBusy = false }
+        let previous = configuration.selectedDatabase
+        let old: ServiceKind = previous == .mysql84 ? .mysql84 : .mysql57
+        let next: ServiceKind = engine == .mysql84 ? .mysql84 : .mysql57
+        let wasRunning = await supervisor.state(for: old).phase == .running
+        configuration.selectedDatabase = engine
+        do {
+            try generateConfiguration()
+            if wasRunning {
+                let manager = databaseManager
+                let initialized = try await Task.detached { try manager.initializeIfNeeded(engine) }.value
+                await supervisor.stop(old)
+                try await startDatabase(engine)
+                if initialized { try await Task.detached { try manager.configureDevelopmentRootPassword(engine) }.value }
+            }
+            try await store.save(configuration)
+        } catch {
+            configuration.selectedDatabase = previous
+            if wasRunning { await supervisor.stop(next); try? await startDatabase(previous) }
+            errorMessage = "Could not switch database: \(error.localizedDescription)"
         }
         await refreshServiceStates()
     }

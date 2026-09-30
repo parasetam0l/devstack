@@ -34,18 +34,20 @@ public struct ProcessRunner: Sendable {
         executable: URL,
         arguments: [String] = [],
         standardInput: Data? = nil,
+        standardInputFile: URL? = nil,
+        standardOutputFile: URL? = nil,
         environment: [String: String] = [:],
         currentDirectory: URL? = nil,
         timeout: TimeInterval = 60
     ) throws -> CommandResult {
         let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("devstack-command-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: tempDirectory) }
 
-        let stdoutURL = tempDirectory.appendingPathComponent("stdout")
+        let stdoutURL = standardOutputFile ?? tempDirectory.appendingPathComponent("stdout")
         let stderrURL = tempDirectory.appendingPathComponent("stderr")
-        FileManager.default.createFile(atPath: stdoutURL.path, contents: nil)
-        FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
+        FileManager.default.createFile(atPath: stdoutURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        FileManager.default.createFile(atPath: stderrURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
         let stdout = try FileHandle(forWritingTo: stdoutURL)
         let stderr = try FileHandle(forWritingTo: stderrURL)
         defer {
@@ -61,7 +63,10 @@ public struct ProcessRunner: Sendable {
         process.standardOutput = stdout
         process.standardError = stderr
         var inputHandle: FileHandle?
-        if let standardInput {
+        if let standardInputFile {
+            inputHandle = try FileHandle(forReadingFrom: standardInputFile)
+            process.standardInput = inputHandle
+        } else if let standardInput {
             let inputURL = tempDirectory.appendingPathComponent("stdin")
             try standardInput.write(to: inputURL, options: .withoutOverwriting)
             inputHandle = try FileHandle(forReadingFrom: inputURL)
@@ -78,6 +83,9 @@ public struct ProcessRunner: Sendable {
             process.interrupt()
             Thread.sleep(forTimeInterval: 0.2)
             if process.isRunning { process.terminate() }
+            Thread.sleep(forTimeInterval: 0.1)
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            process.waitUntilExit()
             throw CommandExecutionError.timedOut(executable: executable.path, seconds: timeout)
         }
         process.waitUntilExit()
@@ -86,7 +94,7 @@ public struct ProcessRunner: Sendable {
 
         return CommandResult(
             exitCode: process.terminationStatus,
-            standardOutput: String(decoding: try Data(contentsOf: stdoutURL), as: UTF8.self),
+            standardOutput: standardOutputFile == nil ? String(decoding: try Data(contentsOf: stdoutURL), as: UTF8.self) : "",
             standardError: String(decoding: try Data(contentsOf: stderrURL), as: UTF8.self)
         )
     }
@@ -95,11 +103,15 @@ public struct ProcessRunner: Sendable {
         executable: URL,
         arguments: [String] = [],
         standardInput: Data? = nil,
+        standardInputFile: URL? = nil,
+        standardOutputFile: URL? = nil,
         environment: [String: String] = [:],
         currentDirectory: URL? = nil,
         timeout: TimeInterval = 60
     ) throws -> CommandResult {
-        let result = try run(executable: executable, arguments: arguments, standardInput: standardInput, environment: environment, currentDirectory: currentDirectory, timeout: timeout)
+        let result = try run(executable: executable, arguments: arguments, standardInput: standardInput,
+            standardInputFile: standardInputFile, standardOutputFile: standardOutputFile,
+            environment: environment, currentDirectory: currentDirectory, timeout: timeout)
         guard result.exitCode == 0 else {
             throw CommandExecutionError.nonZeroExit(executable: executable.path, result: result)
         }

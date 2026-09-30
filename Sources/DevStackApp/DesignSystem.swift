@@ -4,7 +4,11 @@ import DevStackCore
 import SwiftUI
 
 enum DevStackDesign {
-    static let accent = Color(red: 0.27, green: 0.43, blue: 0.94)
+    static let accent = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.27, green: 0.81, blue: 0.79, alpha: 1)
+            : NSColor(srgbRed: 0.02, green: 0.43, blue: 0.46, alpha: 1)
+    })
     static let success = Color(red: 0.13, green: 0.64, blue: 0.43)
     static let radius: CGFloat = 14
     static let icon: NSImage? = {
@@ -63,8 +67,8 @@ struct WorkspaceBackground: View {
     @Environment(\.colorScheme) private var colorScheme
     var body: some View {
         ZStack {
-            colorScheme == .dark ? Color(red: 0.075, green: 0.09, blue: 0.12) : Color(red: 0.96, green: 0.97, blue: 0.985)
-            LinearGradient(colors: [DevStackDesign.accent.opacity(colorScheme == .dark ? 0.055 : 0.025), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)
+            (colorScheme == .dark ? Color.black : Color.white).opacity(0.12)
+            LinearGradient(colors: [DevStackDesign.accent.opacity(0.08), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)
         }.ignoresSafeArea()
     }
 }
@@ -73,7 +77,9 @@ struct WorkspacePage<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) { content }
+            GlassEffectContainer(spacing: 12) {
+                VStack(alignment: .leading, spacing: 20) { content }
+            }
                 .frame(maxWidth: 1040, alignment: .leading)
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .top)
@@ -94,7 +100,6 @@ struct PageHeading: View {
 }
 
 struct SurfacePanel<Content: View>: View {
-    @Environment(\.colorScheme) private var colorScheme
     var title: String? = nil
     var subtitle: String? = nil
     @ViewBuilder var content: Content
@@ -110,8 +115,7 @@ struct SurfacePanel<Content: View>: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(colorScheme == .dark ? Color(red: 0.115, green: 0.135, blue: 0.175) : .white, in: RoundedRectangle(cornerRadius: DevStackDesign.radius))
-        .overlay { RoundedRectangle(cornerRadius: DevStackDesign.radius).strokeBorder(.primary.opacity(colorScheme == .dark ? 0.075 : 0.065), lineWidth: 1) }
+        .glassEffect(.regular, in: .rect(cornerRadius: 20))
     }
 }
 
@@ -215,16 +219,17 @@ extension ServicePhase {
 extension ServiceKind {
     var icon: String {
         switch self {
-        case .apache: "globe"
-        case .php74, .php85: "chevron.left.forwardslash.chevron.right"
+        case .apache, .nginx: "globe"
+        case .php74, .php84, .php85: "chevron.left.forwardslash.chevron.right"
         case .mysql57, .mysql84: "externaldrive"
         case .mailpit: "envelope"
         }
     }
     var endpoint: String {
         switch self {
-        case .apache: "HTTP & HTTPS"
-        case .php74, .php85: "PHP-FPM"
+        case .apache: "8080 · 8443"
+        case .nginx: "8080 · 8443"
+        case .php74, .php84, .php85: "PHP-FPM"
         case .mysql57, .mysql84: "127.0.0.1:3306"
         case .mailpit: "SMTP · 1025"
         }
@@ -235,14 +240,28 @@ extension RuntimeKind {
     var displayName: String {
         switch self {
         case .apache: "Apache"
+        case .nginx: "Nginx"
         case .php: "PHP"
         case .mysql: "MySQL"
         case .mailpit: "Mailpit"
+        case .adminer: "Adminer"
         case .phpMyAdmin: "phpMyAdmin"
         case .composer: "Composer"
         case .openssl: "OpenSSL"
         case .phpExtension: "PHP extension"
         case .library: "Library"
         }
+    }
+}
+
+struct DevStackGlassButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.font(.system(size: 12, weight: .medium))
+            .foregroundStyle(enabled ? Color.primary : Color.secondary)
+            .padding(.horizontal, 16).padding(.vertical, 8)
+            .glassEffect(.regular.interactive(), in: .capsule)
+            .opacity(enabled ? 1 : 0.5)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
     }
 }

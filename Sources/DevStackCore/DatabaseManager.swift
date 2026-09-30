@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum DatabaseManagerError: LocalizedError, Sendable {
@@ -18,17 +19,21 @@ public struct DatabaseManager: Sendable {
     public let paths: DevStackPaths
     public let runtimeRoot: URL
     private let runner: ProcessRunner
+    private let environment: [String: String]
 
-    public init(paths: DevStackPaths, runtimeRoot: URL, runner: ProcessRunner = ProcessRunner()) {
+    public init(paths: DevStackPaths, runtimeRoot: URL, runner: ProcessRunner = ProcessRunner(), opensslRuntime: URL? = nil) {
         self.paths = paths
         self.runtimeRoot = runtimeRoot
         self.runner = runner
+        self.environment = RuntimeEnvironment.openssl(at: opensslRuntime ?? runtimeRoot.appendingPathComponent("openssl-3.5"))
     }
 
     public func initializeIfNeeded(_ engine: DatabaseEngine) throws -> Bool {
         let dataDirectory = dataDirectory(for: engine)
         let initializedMarker = dataDirectory.appendingPathComponent("mysql", isDirectory: true)
-        guard !FileManager.default.fileExists(atPath: initializedMarker.path) else { return false }
+        guard !FileManager.default.fileExists(atPath: initializedMarker.path) else {
+            return !FileManager.default.fileExists(atPath: dataDirectory.appendingPathComponent(".devstack-root-configured").path)
+        }
         try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
         let runtime = runtimeRoot.appendingPathComponent(engine.rawValue)
         _ = try runner.runChecked(
@@ -37,30 +42,33 @@ public struct DatabaseManager: Sendable {
                 "--no-defaults", "--initialize-insecure",
                 "--basedir=\(runtime.path)", "--datadir=\(dataDirectory.path)"
             ],
-            timeout: 300
+            environment: environment, timeout: 300
         )
         return true
     }
 
     public func configureDevelopmentRootPassword(_ engine: DatabaseEngine) throws {
+        let marker = dataDirectory(for: engine).appendingPathComponent(".devstack-root-configured")
+        if ping(engine) { try AtomicFileWriter.write("configured\n", to: marker, permissions: 0o600); return }
         let sql = engine == .mysql84
             ? "ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY 'root'; FLUSH PRIVILEGES;"
             : "ALTER USER 'root'@'localhost' IDENTIFIED BY 'root'; FLUSH PRIVILEGES;"
         _ = try runner.runChecked(
             executable: client(engine, name: "mysql"),
-            arguments: connectionArguments(passwordConfigured: false) + ["--execute", sql],
-            timeout: 60
+            arguments: connectionArguments(engine, passwordConfigured: false) + ["--execute", sql],
+            environment: environment, timeout: 60
         )
+        try AtomicFileWriter.write("configured\n", to: marker, permissions: 0o600)
     }
 
     public func ping(_ engine: DatabaseEngine) -> Bool {
         guard let result = try? runner.run(
-            executable: client(engine, name: "mysqladmin"),
-            arguments: connectionArguments(passwordConfigured: true) + ["ping"],
-            environment: ["MYSQL_PWD": "root"],
+            executable: client(engine, name: "mysql"),
+            arguments: connectionArguments(engine, passwordConfigured: true) + ["--batch", "--skip-column-names", "--execute", "SELECT 1"],
+            environment: environment.merging(["MYSQL_PWD": "root"]) { _, new in new },
             timeout: 5
         ) else { return false }
-        return result.exitCode == 0
+        return result.exitCode == 0 && result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
     }
 
     @discardableResult
@@ -68,29 +76,32 @@ public struct DatabaseManager: Sendable {
         if let database { try validateDatabaseName(database) }
         try FileManager.default.createDirectory(at: paths.backups, withIntermediateDirectories: true)
         let target = destination ?? paths.backups.appendingPathComponent(backupFilename(engine: engine, database: database))
-        var arguments = connectionArguments(passwordConfigured: true) + ["--single-transaction", "--routines", "--events", "--triggers"]
+        var arguments = connectionArguments(engine, passwordConfigured: true) + ["--single-transaction", "--routines", "--events", "--triggers"]
         if let database { arguments.append(database) } else { arguments.append("--all-databases") }
-        let result = try runner.runChecked(
+        let staged = target.deletingLastPathComponent().appendingPathComponent(".devstack-export-\(UUID().uuidString).sql")
+        defer { try? FileManager.default.removeItem(at: staged) }
+        _ = try runner.runChecked(
             executable: client(engine, name: "mysqldump"),
             arguments: arguments,
-            environment: ["MYSQL_PWD": "root"],
+            standardOutputFile: staged,
+            environment: environment.merging(["MYSQL_PWD": "root"]) { _, new in new },
             timeout: 3_600
         )
-        try AtomicFileWriter.write(result.standardOutput, to: target, permissions: 0o600)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staged.path)
+        guard rename(staged.path, target.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         return target
     }
 
     public func importSQL(_ engine: DatabaseEngine, source: URL, database: String? = nil) throws {
         guard FileManager.default.fileExists(atPath: source.path) else { throw DatabaseManagerError.sourceFileMissing(source.path) }
         if let database { try validateDatabaseName(database) }
-        let input = try Data(contentsOf: source, options: .mappedIfSafe)
-        var arguments = connectionArguments(passwordConfigured: true)
+        var arguments = connectionArguments(engine, passwordConfigured: true)
         if let database { arguments.append(database) }
         _ = try runner.runChecked(
             executable: client(engine, name: "mysql"),
             arguments: arguments,
-            standardInput: input,
-            environment: ["MYSQL_PWD": "root"],
+            standardInputFile: source,
+            environment: environment.merging(["MYSQL_PWD": "root"]) { _, new in new },
             timeout: 3_600
         )
     }
@@ -127,7 +138,7 @@ public struct DatabaseManager: Sendable {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
         return formatter.string(from: date)
     }
 
@@ -139,8 +150,11 @@ public struct DatabaseManager: Sendable {
         engine == .mysql57 ? paths.mysql57Data : paths.mysql84Data
     }
 
-    private func connectionArguments(passwordConfigured: Bool) -> [String] {
-        var result = ["--protocol=TCP", "--host=127.0.0.1", "--port=3306", "--user=root"]
+    private func connectionArguments(_ engine: DatabaseEngine, passwordConfigured: Bool) -> [String] {
+        var result = ["--no-defaults", "--no-login-paths",
+            "--character-sets-dir=\(runtimeRoot.appendingPathComponent("\(engine.rawValue)/share/charsets").path)",
+            "--plugin-dir=\(runtimeRoot.appendingPathComponent("\(engine.rawValue)/lib/plugin").path)",
+            "--protocol=TCP", "--host=127.0.0.1", "--port=3306", "--user=root"]
         if !passwordConfigured { result.append("--skip-password") }
         return result
     }

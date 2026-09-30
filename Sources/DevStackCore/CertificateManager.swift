@@ -26,6 +26,9 @@ public struct CertificateManager: Sendable {
 
     public var caCertificate: URL { paths.certificates.appendingPathComponent("DevStack-Local-CA.pem") }
     public var caPrivateKey: URL { paths.certificates.appendingPathComponent("DevStack-Local-CA-key.pem") }
+    private var environment: [String: String] {
+        RuntimeEnvironment.openssl(at: openssl.deletingLastPathComponent().deletingLastPathComponent())
+    }
 
     public func ensureCA() throws {
         try paths.createRequiredDirectories()
@@ -39,7 +42,7 @@ public struct CertificateManager: Sendable {
                 "-addext", "keyUsage=critical,keyCertSign,cRLSign",
                 "-keyout", caPrivateKey.path, "-out", caCertificate.path
             ],
-            timeout: 120
+            environment: environment, timeout: 120
         )
         try setPermissions(0o600, on: caPrivateKey)
         try setPermissions(0o644, on: caCertificate)
@@ -75,7 +78,7 @@ public struct CertificateManager: Sendable {
         _ = try runner.runChecked(
             executable: openssl,
             arguments: ["req", "-new", "-newkey", "rsa:2048", "-nodes", "-sha256", "-subj", "/CN=\(hostname)", "-keyout", generatedKey.path, "-out", request.path],
-            timeout: 120
+            environment: environment, timeout: 120
         )
         _ = try runner.runChecked(
             executable: openssl,
@@ -84,7 +87,7 @@ public struct CertificateManager: Sendable {
                 "-CA", caCertificate.path, "-CAkey", caPrivateKey.path, "-CAcreateserial",
                 "-extfile", extensionFile.path, "-out", generatedCertificate.path
             ],
-            timeout: 120
+            environment: environment, timeout: 120
         )
         try AtomicFileWriter.write(try Data(contentsOf: generatedKey), to: privateKey, permissions: 0o600)
         try AtomicFileWriter.write(try Data(contentsOf: generatedCertificate), to: certificate, permissions: 0o644)
@@ -97,18 +100,27 @@ public struct CertificateManager: Sendable {
         }
     }
 
+    public func refreshTrustBundle() throws {
+        try ensureCA()
+        let roots = try runner.runChecked(executable: URL(fileURLWithPath: "/usr/bin/security"),
+            arguments: ["find-certificate", "-a", "-p", "/System/Library/Keychains/SystemRootCertificates.keychain"])
+        let ca = try String(contentsOf: caCertificate, encoding: .utf8)
+        try AtomicFileWriter.write(roots.standardOutput + "\n" + ca,
+            to: paths.certificates.appendingPathComponent("trusted-roots.pem"), permissions: 0o644)
+    }
+
     public func caCertificateDER() throws -> Data {
         try ensureCA()
         let output = paths.certificates.appendingPathComponent(".DevStack-Local-CA-\(UUID().uuidString).der")
         defer { try? FileManager.default.removeItem(at: output) }
-        _ = try runner.runChecked(executable: openssl, arguments: ["x509", "-in", caCertificate.path, "-outform", "DER", "-out", output.path])
+        _ = try runner.runChecked(executable: openssl, arguments: ["x509", "-in", caCertificate.path, "-outform", "DER", "-out", output.path], environment: environment)
         return try Data(contentsOf: output)
     }
 
     public func certificateIsValid(_ certificate: URL, forAtLeastDays days: Int) -> Bool {
         guard days >= 0 else { return false }
         let seconds = days * 86_400
-        guard let result = try? runner.run(executable: openssl, arguments: ["x509", "-checkend", String(seconds), "-noout", "-in", certificate.path]) else { return false }
+        guard let result = try? runner.run(executable: openssl, arguments: ["x509", "-checkend", String(seconds), "-noout", "-in", certificate.path], environment: environment) else { return false }
         return result.exitCode == 0
     }
 

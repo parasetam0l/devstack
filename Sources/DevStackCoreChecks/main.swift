@@ -192,6 +192,14 @@ enum DevStackCoreChecks {
             standardInput: Data("database-import".utf8)
         )
         try expect(standardInput.standardOutput == "database-import", "Command standard input failed")
+        let streamedInput = temporary.appendingPathComponent("streamed-input.sql")
+        let streamedOutput = temporary.appendingPathComponent("streamed-output.sql")
+        let largeInput = Data(repeating: 0x61, count: 2_000_000)
+        try largeInput.write(to: streamedInput)
+        let streamed = try ProcessRunner().runChecked(executable: URL(fileURLWithPath: "/bin/cat"),
+            standardInputFile: streamedInput, standardOutputFile: streamedOutput)
+        try expect(streamed.standardOutput.isEmpty && (try Data(contentsOf: streamedOutput)) == largeInput,
+            "SQL file streaming did not preserve the input or captured it in memory")
 
         let databaseManager = DatabaseManager(paths: paths, runtimeRoot: paths.builtInRuntimes)
         let backupName = databaseManager.backupFilename(
@@ -199,9 +207,9 @@ enum DevStackCoreChecks {
             database: nil,
             date: Date(timeIntervalSince1970: 0)
         )
-        try expect(backupName == "mysql-8.4-all-databases-19700101-000000.sql", "Database backup naming is not deterministic")
+        try expect(backupName == "mysql-8.4-all-databases-19700101-000000-000.sql", "Database backup naming is not deterministic")
         try expect(
-            databaseManager.archiveDataDirectoryName(engine: .mysql57, date: Date(timeIntervalSince1970: 0)) == "mysql-5.7-data-19700101-000000",
+            databaseManager.archiveDataDirectoryName(engine: .mysql57, date: Date(timeIntervalSince1970: 0)) == "mysql-5.7-data-19700101-000000-000",
             "Database data archive naming is not deterministic"
         )
         do {
@@ -336,9 +344,13 @@ enum DevStackCoreChecks {
             context: DiagnosticContext(paths: paths, helperInstalled: false, expectedHostnames: ["example.test"]),
             appVersion: "0.1.0"
         )
-        try expect(missingHelperReport.results.contains(where: { $0.id == "privileged-helper" && $0.severity == .error }), "Doctor omitted missing helper")
+        try expect(missingHelperReport.results.contains(where: { $0.id == "privileged-helper" && $0.severity == .warning }), "Doctor omitted missing helper")
 
-        let supervisor = ServiceSupervisor()
+        let migrated = try JSONDecoder().decode(AppConfiguration.self, from: Data(#"{"schemaVersion":1,"sites":[]}"#.utf8))
+        try expect(migrated.selectedWebServer == .apache, "Nginx must stay disabled when migrating old configurations")
+        try expect(paths.phpSocket(runtimeID: "php-8.5", siteID: UUID()).path.utf8.count < 104, "PHP socket exceeds the macOS limit")
+        let supervisorRecord = temporary.appendingPathComponent("processes.json")
+        let supervisor = ServiceSupervisor(recordsURL: supervisorRecord)
         let serviceLog = temporary.appendingPathComponent("logs/sleep.log")
         try await supervisor.start(ServiceSpecification(
             kind: .mailpit,
@@ -348,7 +360,10 @@ enum DevStackCoreChecks {
         ))
         let runningState = await supervisor.state(for: .mailpit)
         try expect(runningState.phase == .running, "Service did not enter running state")
-        await supervisor.stop(.mailpit)
+        let reconciledSupervisor = ServiceSupervisor(recordsURL: supervisorRecord)
+        let restoredState = await reconciledSupervisor.state(for: .mailpit)
+        try expect(restoredState.phase == .running && restoredState.pid == runningState.pid, "Supervisor did not restore the owned process")
+        await reconciledSupervisor.stop(.mailpit)
         let stoppedState = await supervisor.state(for: .mailpit)
         try expect(stoppedState.phase == .stopped, "Service did not stop")
         print("DevStackCoreChecks: all checks passed")

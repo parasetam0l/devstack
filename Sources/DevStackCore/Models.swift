@@ -2,10 +2,12 @@ import Foundation
 
 public enum RuntimeKind: String, Codable, CaseIterable, Sendable {
     case apache
+    case nginx
     case php
     case mysql
     case mailpit
     case phpMyAdmin = "phpmyadmin"
+    case adminer
     case composer
     case openssl
     case phpExtension = "php-extension"
@@ -269,6 +271,13 @@ public enum DatabaseEngine: String, Codable, CaseIterable, Sendable {
     public var isLegacy: Bool { self == .mysql57 }
 }
 
+public enum WebServer: String, Codable, CaseIterable, Identifiable, Sendable {
+    case apache, nginx
+    public var id: String { rawValue }
+    public var displayName: String { self == .apache ? "Apache" : "Nginx" }
+    public var service: ServiceKind { self == .apache ? .apache : .nginx }
+}
+
 public struct AppConfiguration: Codable, Hashable, Sendable {
     public static let currentSchemaVersion = 1
 
@@ -278,6 +287,8 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
     public var enabledExtensions: [String: Set<String>]
     public var startAtLogin: Bool
     public var importedRuntimeIDs: [String]
+    public var selectedWebServer: WebServer
+    public var defaultPHPRuntimeID: String
 
     public init(
         schemaVersion: Int = currentSchemaVersion,
@@ -285,10 +296,13 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
         selectedDatabase: DatabaseEngine = .mysql84,
         enabledExtensions: [String: Set<String>] = [
             "php-7.4": ["redis", "imagick"],
-            "php-8.5": ["redis", "imagick"]
+            "php-8.5": ["redis", "imagick"],
+            "php-8.4": ["redis", "imagick"]
         ],
         startAtLogin: Bool = false,
-        importedRuntimeIDs: [String] = []
+        importedRuntimeIDs: [String] = [],
+        selectedWebServer: WebServer = .apache,
+        defaultPHPRuntimeID: String = "php-8.5"
     ) {
         self.schemaVersion = schemaVersion
         self.sites = sites
@@ -296,18 +310,51 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
         self.enabledExtensions = enabledExtensions
         self.startAtLogin = startAtLogin
         self.importedRuntimeIDs = importedRuntimeIDs
+        self.selectedWebServer = selectedWebServer
+        self.defaultPHPRuntimeID = defaultPHPRuntimeID
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, sites, selectedDatabase, enabledExtensions, startAtLogin, importedRuntimeIDs, selectedWebServer, defaultPHPRuntimeID
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            schemaVersion: try values.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1,
+            sites: try values.decodeIfPresent([SiteDefinition].self, forKey: .sites) ?? [],
+            selectedDatabase: try values.decodeIfPresent(DatabaseEngine.self, forKey: .selectedDatabase) ?? .mysql84,
+            enabledExtensions: try values.decodeIfPresent([String: Set<String>].self, forKey: .enabledExtensions) ?? [:],
+            startAtLogin: try values.decodeIfPresent(Bool.self, forKey: .startAtLogin) ?? false,
+            importedRuntimeIDs: try values.decodeIfPresent([String].self, forKey: .importedRuntimeIDs) ?? [],
+            selectedWebServer: try values.decodeIfPresent(WebServer.self, forKey: .selectedWebServer) ?? .apache,
+            defaultPHPRuntimeID: try values.decodeIfPresent(String.self, forKey: .defaultPHPRuntimeID) ?? "php-8.5"
+        )
+    }
+
 }
 
 public enum ServiceKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case apache
+    case nginx
     case php74 = "php-7.4"
+    case php84 = "php-8.4"
     case php85 = "php-8.5"
     case mysql57 = "mysql-5.7"
     case mysql84 = "mysql-8.4"
     case mailpit
 
     public var id: String { rawValue }
+    public var phpRuntimeID: String? {
+        switch self { case .php74, .php84, .php85: rawValue; default: nil }
+    }
+    public var runtimeID: String {
+        switch self {
+        case .apache: "apache-2.4"
+        case .nginx: "nginx-1.30"
+        case .mailpit: "mailpit-1.31.1"
+        default: rawValue
+        }
+    }
 }
 
 public enum ServicePhase: String, Codable, Sendable {
@@ -318,7 +365,8 @@ public enum ServicePhase: String, Codable, Sendable {
     case failed
 }
 
-public struct ServiceFailure: Codable, Hashable, Error, Sendable {
+public struct ServiceFailure: Codable, Hashable, LocalizedError, Sendable {
+    public var errorDescription: String? { message + (logExcerpt.map { "\n" + $0 } ?? "") }
     public var message: String
     public var exitCode: Int32?
     public var failedProbe: String?

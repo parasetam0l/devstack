@@ -17,7 +17,7 @@ struct SitesView: View {
             }
             if model.configuration.sites.isEmpty {
                 SurfacePanel {
-                    EmptyWorkspace(symbol: "globe", title: "Your projects belong here", description: "Add an existing project folder to give it a local domain and trusted HTTPS.", actionTitle: "Add a Site") { state.editingSite = newSite() }
+                    EmptyWorkspace(symbol: "globe", title: "Your projects belong here", description: "Add a project folder to configure its domain, PHP version, and HTTPS.", actionTitle: "Add a Site") { state.editingSite = newSite() }
                 }
             } else {
                 HStack(spacing: 12) {
@@ -69,8 +69,8 @@ struct SitesView: View {
         let id = UUID()
         var number = 1
         let hosts = Set(model.configuration.sites.map(\.hostname))
-        while hosts.contains("site-\(number).devstack.test") { number += 1 }
-        return SiteDefinition(id: id, name: "", hostname: "site-\(number).devstack.test", documentRoot: "", logs: SiteLogPaths(access: model.paths.logs.appendingPathComponent("site-\(id.uuidString)-access.log").path, error: model.paths.logs.appendingPathComponent("site-\(id.uuidString)-error.log").path))
+        while hosts.contains("site-\(number).localhost") { number += 1 }
+        return SiteDefinition(id: id, name: "", hostname: "site-\(number).localhost", documentRoot: "", phpRuntimeID: model.configuration.defaultPHPRuntimeID, logs: SiteLogPaths(access: model.paths.logs.appendingPathComponent("site-\(id.uuidString)-access.log").path, error: model.paths.logs.appendingPathComponent("site-\(id.uuidString)-error.log").path))
     }
 }
 
@@ -101,7 +101,7 @@ private struct SiteRow: View {
                 StatusBadge(title: site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP "))
                 StatusBadge(title: site.tlsEnabled ? "HTTPS" : "HTTP", color: site.tlsEnabled ? DevStackDesign.accent : .secondary)
             }
-            Button { model.openURL("\(site.tlsEnabled ? "https" : "http")://\(site.hostname)") } label: { Image(systemName: "arrow.up.right.square") }
+            Button { model.openURL(model.siteURL(site)) } label: { Image(systemName: "arrow.up.right.square") }
                 .buttonStyle(.borderless).help("Open \(site.name)").accessibilityLabel("Open \(site.name)")
             Menu {
                 Button("Edit Site…", systemImage: "pencil", action: edit)
@@ -138,7 +138,6 @@ struct SiteEditor: View {
                 FeatureIcon(symbol: "globe")
                 VStack(alignment: .leading, spacing: 4) {
                     Text(isNew ? "New Site" : "Edit Site").font(.system(size: 21, weight: .bold, design: .rounded))
-                    Text("Give your project a place on this Mac.").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
             }.padding(24)
@@ -154,7 +153,7 @@ struct SiteEditor: View {
                             Button("Choose…", action: chooseFolder)
                         }
                     }
-                    Text("Select the folder Apache should serve, such as your project's public directory.")
+                    Text("Select your project's document root, such as its public directory.")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 Section("Local domain") {
@@ -164,13 +163,12 @@ struct SiteEditor: View {
                     } else if HostnameValidator.shadowsPublicDomain(editor.site.hostname) {
                         Label("This domain can shadow a public website. A .test domain is recommended.", systemImage: "exclamationmark.triangle").font(.system(size: 11)).foregroundStyle(.orange)
                     }
-                    Toggle("Trusted HTTPS", isOn: $editor.site.tlsEnabled)
+                    Toggle("HTTPS", isOn: $editor.site.tlsEnabled)
                     Text("DevStack creates a local certificate for this domain.").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 Section("PHP runtime") {
                     Picker("Version", selection: phpRuntimeBinding) {
-                        Text("PHP 8.5.11").tag("php-8.5").disabled(!model.runtimeIsAvailable("php-8.5"))
-                        Text(model.runtimeIsAvailable("php-7.4") ? "PHP 7.4.33 · Legacy" : "PHP 7.4 · Not installed").tag("php-7.4").disabled(!model.runtimeIsAvailable("php-7.4"))
+                        ForEach(model.availablePHPRuntimes) { runtime in Text("PHP \(runtime.version)").tag(runtime.id) }
                     }
                     if editor.site.phpRuntimeID == "php-7.4" {
                         Label("End-of-life. Use only for legacy compatibility.", systemImage: "exclamationmark.triangle").font(.system(size: 11)).foregroundStyle(.orange)
@@ -230,7 +228,7 @@ struct SiteEditor: View {
     }
     private func chooseFolder() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
-        panel.message = "Choose the folder Apache should serve."
+        panel.message = "Choose the folder to serve."
         if panel.runModal() == .OK, let url = panel.url {
             editor.site.documentRoot = url.path
             if editor.site.name.isEmpty { editor.site.name = url.lastPathComponent }

@@ -1,6 +1,7 @@
 import DevStackCore
 import Foundation
 import ServiceManagement
+import Security
 
 struct PrivilegedHelperClient: @unchecked Sendable {
     private let service = SMAppService.daemon(plistName: "app.devstack.desktop.helper.plist")
@@ -10,7 +11,19 @@ struct PrivilegedHelperClient: @unchecked Sendable {
     var isRegistered: Bool { service.status == .enabled }
     var registrationStatus: SMAppService.Status { service.status }
 
+    var canAuthenticate: Bool {
+        var code: SecStaticCode?
+        var info: CFDictionary?
+        guard SecStaticCodeCreateWithPath(Bundle.main.bundleURL as CFURL, [], &code) == errSecSuccess,
+              let code, SecCodeCopySigningInformation(code, [], &info) == errSecSuccess,
+              let dictionary = info as? [String: Any] else { return false }
+        return dictionary[kSecCodeInfoTeamIdentifier as String] is String
+    }
+
     func register() throws {
+        guard canAuthenticate else {
+            throw NSError(domain: "app.devstack.desktop.helper", code: 2, userInfo: [NSLocalizedDescriptionKey: "System integration requires a Developer ID signed release. This development build can run services on ports 8080 and 8443."])
+        }
         guard service.status != .enabled, service.status != .requiresApproval else { return }
         try service.register()
     }

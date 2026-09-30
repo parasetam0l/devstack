@@ -8,6 +8,7 @@ public struct DiagnosticContext: Sendable {
     public var helperStatus: PrivilegedHelperStatus?
     public var expectedHostnames: [String]
     public var serviceStates: [ServiceState]
+    public var requiredRuntimeIDs: Set<String>
     public var selectedDatabase: DatabaseEngine
 
     public init(
@@ -18,6 +19,7 @@ public struct DiagnosticContext: Sendable {
         helperStatus: PrivilegedHelperStatus? = nil,
         expectedHostnames: [String] = [],
         serviceStates: [ServiceState] = [],
+        requiredRuntimeIDs: Set<String> = [],
         selectedDatabase: DatabaseEngine = .mysql84
     ) {
         self.paths = paths
@@ -28,6 +30,7 @@ public struct DiagnosticContext: Sendable {
         self.expectedHostnames = expectedHostnames
         self.serviceStates = serviceStates
         self.selectedDatabase = selectedDatabase
+        self.requiredRuntimeIDs = requiredRuntimeIDs
     }
 }
 
@@ -58,7 +61,7 @@ public struct DevStackDoctor: Sendable {
         progress?("Checking ports and local domain mappings…")
         results.append(contentsOf: portResults(context: context))
         results.append(hostsResult(expected: context.expectedHostnames))
-        results.append(contentsOf: runtimeResults(context.runtimeManifests, paths: context.paths, progress: progress))
+        results.append(contentsOf: runtimeResults(context.runtimeManifests, paths: context.paths, required: context.requiredRuntimeIDs, progress: progress))
         progress?("Validating configuration and certificates…")
         results.append(contentsOf: configurationResults(context))
         results.append(contentsOf: certificateResults(context))
@@ -95,8 +98,8 @@ public struct DevStackDoctor: Sendable {
             severity = .warning
             evidence = "Registered but did not return authenticated status."
         case (nil, false):
-            severity = .error
-            evidence = "Not installed"
+            severity = .warning
+            evidence = "Unavailable. Services can run on high ports; standard ports and system host mappings require an authorized signed helper."
         }
         return .init(
             id: "privileged-helper",
@@ -163,8 +166,9 @@ public struct DevStackDoctor: Sendable {
 
     private func portResults(context: DiagnosticContext) -> [DiagnosticResult] {
         let selectedDatabaseService: ServiceKind = context.selectedDatabase == .mysql57 ? .mysql57 : .mysql84
+        let webService: ServiceKind = context.serviceStates.contains { $0.service == .nginx && $0.phase == .running } ? .nginx : .apache
         let owners: [(Int, ServiceKind)] = [
-            (80, .apache), (443, .apache), (8080, .apache), (8443, .apache),
+            (80, webService), (443, webService), (8080, webService), (8443, webService),
             (3306, selectedDatabaseService), (1025, .mailpit), (8025, .mailpit)
         ]
         var phases: [ServiceKind: ServicePhase] = [:]
@@ -177,7 +181,7 @@ public struct DevStackDoctor: Sendable {
                     timeout: 5
                 )
                 let occupied = result.exitCode == 0 && !result.standardOutput.isEmpty
-                let expected = phases[service] == .running
+                let expected = phases[service] == .running && (port > 443 || context.helperInstalled)
                 let severity: DiagnosticSeverity = expected ? (occupied ? .info : .error) : (occupied ? .warning : .info)
                 let evidence = occupied ? redact(result.standardOutput) : "Available"
                 return .init(
@@ -196,6 +200,10 @@ public struct DevStackDoctor: Sendable {
     }
 
     private func hostsResult(expected: [String]) -> DiagnosticResult {
+        let expected = expected.filter { $0 != "localhost" && !$0.hasSuffix(".localhost") }
+        if expected.isEmpty {
+            return .init(id: "hosts", title: "Local domain resolution", severity: .info, evidence: "The configured .localhost domains resolve through macOS without hosts-file edits.")
+        }
         do {
             let hosts = try String(contentsOfFile: "/etc/hosts", encoding: .utf8)
             let missing = expected.filter { !hosts.localizedCaseInsensitiveContains($0) }
@@ -215,10 +223,26 @@ public struct DevStackDoctor: Sendable {
         }
     }
 
-    private func runtimeResults(_ manifests: [RuntimeManifest], paths: DevStackPaths, progress: (@Sendable (String) -> Void)?) -> [DiagnosticResult] {
+    private func runtimeResults(_ manifests: [RuntimeManifest], paths: DevStackPaths, required: Set<String>, progress: (@Sendable (String) -> Void)?) -> [DiagnosticResult] {
         manifests.map { manifest in
             progress?("Inspecting \(manifest.id)…")
-            let roots = [paths.builtInRuntimes.appendingPathComponent(manifest.id), paths.importedRuntimes.appendingPathComponent(manifest.id)]
+            if manifest.kind == .phpExtension {
+                let owners = manifest.build?.dependencies.filter { $0.hasPrefix("php-") } ?? []
+                let installed = owners.compactMap { id -> URL? in
+                    let roots = [paths.importedRuntimes.appendingPathComponent(id), paths.builtInRuntimes.appendingPathComponent(id)]
+                    return roots.first { FileManager.default.fileExists(atPath: $0.appendingPathComponent("bin/php").path) }
+                }
+                guard !installed.isEmpty else {
+                    return .init(id: "runtime-\(manifest.id)", title: manifest.id, severity: .warning, evidence: "The owning PHP runtime is not installed.")
+                }
+                let failures = installed.flatMap { root in auditRuntimeBinaries(at: root, manifest: manifest) }
+                let missing = installed.flatMap { root in manifest.entryPoints.values.filter { !FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path) } }
+                let healthy = failures.isEmpty && missing.isEmpty
+                return .init(id: "runtime-\(manifest.id)", title: "Extension \(manifest.id)", severity: healthy ? .info : .error,
+                    evidence: healthy ? "Module and signature verified for \(installed.map(\.lastPathComponent).joined(separator: ", "))." : (failures + missing).joined(separator: "\n"),
+                    remediation: healthy ? nil : "Reinstall the affected PHP runtime and extension.")
+            }
+            let roots = [paths.importedRuntimes.appendingPathComponent(manifest.id), paths.builtInRuntimes.appendingPathComponent(manifest.id)]
             let root = roots.first { FileManager.default.fileExists(atPath: $0.path) }
             let missing = manifest.entryPoints.values.filter { relative in
                 guard let root else { return true }
@@ -228,7 +252,7 @@ public struct DevStackDoctor: Sendable {
                 return .init(
                     id: "runtime-\(manifest.id)",
                     title: "Runtime \(manifest.id)",
-                    severity: .error,
+                    severity: manifest.supportState == .conditional && !required.contains(manifest.id) ? .warning : .error,
                     evidence: "Missing: \(missing.joined(separator: ", "))",
                     remediation: "Reinstall DevStack or import a valid signed runtime pack."
                 )
@@ -247,7 +271,7 @@ public struct DevStackDoctor: Sendable {
     private func auditRuntimeBinaries(at root: URL, manifest: RuntimeManifest) -> [String] {
         let verifier = RuntimePackVerifier(trustedPublicKeys: [:], requireSignature: false, runner: runner)
         var candidates = Set(manifest.entryPoints.values.map { root.appendingPathComponent($0) })
-        if let enumerator = FileManager.default.enumerator(
+        if manifest.kind != .phpExtension, let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
             options: [.skipsHiddenFiles]
@@ -282,7 +306,9 @@ public struct DevStackDoctor: Sendable {
             ["-t", "-f", apacheConfig.path],
             true
         ))
-        for runtimeID in ["php-7.4", "php-8.5"] {
+        checks.append(("config-nginx", "Nginx configuration", context.paths.builtInRuntimes.appendingPathComponent("nginx-1.30/sbin/nginx"),
+            ["-t", "-p", context.paths.generatedNginx.path + "/", "-c", context.paths.generatedNginx.appendingPathComponent("nginx.conf").path], true))
+        for runtimeID in ["php-7.4", "php-8.4", "php-8.5"] {
             let config = context.paths.generatedPHP.appendingPathComponent("\(runtimeID)-fpm.conf")
             checks.append((
                 "config-\(runtimeID)", "\(runtimeID) FPM configuration",
@@ -319,7 +345,9 @@ public struct DevStackDoctor: Sendable {
                 )
             }
             do {
-                let result = try runner.runChecked(executable: executable, arguments: arguments, timeout: 30)
+                let result = try runner.runChecked(executable: executable, arguments: arguments,
+                    environment: RuntimeEnvironment.services(openssl: context.paths.builtInRuntimes.appendingPathComponent("openssl-3.5"),
+                        imageMagick: context.paths.builtInRuntimes.appendingPathComponent("imagemagick-7.1"), phpConfiguration: context.paths.generatedPHP), timeout: 30)
                 let output = (result.standardError + result.standardOutput).trimmingCharacters(in: .whitespacesAndNewlines)
                 let evidence = output.isEmpty || !reportsOutput ? "Syntax valid" : redact(String(output.prefix(2_000)))
                 return .init(id: id, title: title, severity: .info, evidence: evidence)
@@ -339,7 +367,8 @@ public struct DevStackDoctor: Sendable {
         let missing = certificates.filter { !FileManager.default.fileExists(atPath: $0.path) }
         let expiring = certificates.filter { certificate in
             guard FileManager.default.fileExists(atPath: certificate.path) else { return false }
-            guard let result = try? runner.run(executable: openssl, arguments: ["x509", "-checkend", "2592000", "-noout", "-in", certificate.path], timeout: 10)
+            guard let result = try? runner.run(executable: openssl, arguments: ["x509", "-checkend", "2592000", "-noout", "-in", certificate.path],
+                environment: RuntimeEnvironment.openssl(at: context.paths.builtInRuntimes.appendingPathComponent("openssl-3.5")), timeout: 10)
             else { return true }
             return result.exitCode != 0
         }

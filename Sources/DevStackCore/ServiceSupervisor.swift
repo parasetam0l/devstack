@@ -39,13 +39,28 @@ public struct ServiceSpecification: Sendable {
 }
 
 public actor ServiceSupervisor {
+    private struct ProcessRecord: Codable {
+        let pid: Int32
+        let executable: String
+        let uid: UInt32
+        let startedSeconds: UInt64
+        let startedMicroseconds: UInt64
+    }
+    private var records: [ServiceKind: ProcessRecord] = [:]
+    private let recordsURL: URL?
     private var processes: [ServiceKind: Process] = [:]
     private var logHandles: [ServiceKind: FileHandle] = [:]
     private var states: [ServiceKind: ServiceState] = Dictionary(
         uniqueKeysWithValues: ServiceKind.allCases.map { ($0, ServiceState(service: $0)) }
     )
 
-    public init() {}
+    public init(recordsURL: URL? = nil) {
+        self.recordsURL = recordsURL
+        if let recordsURL, let data = try? Data(contentsOf: recordsURL),
+           let saved = try? JSONDecoder().decode([ServiceKind: ProcessRecord].self, from: data) {
+            records = saved
+        }
+    }
 
     public func state(for service: ServiceKind) -> ServiceState {
         reconcile(service)
@@ -59,10 +74,13 @@ public actor ServiceSupervisor {
 
     public func start(_ specification: ServiceSpecification) async throws {
         reconcile(specification.kind)
-        if processes[specification.kind]?.isRunning == true { return }
+        if states[specification.kind]?.phase == .running { return }
         transition(specification.kind, to: .starting)
 
         do {
+            if case .tcpLoopback = specification.readinessProbe, probe(specification.readinessProbe) {
+                throw ServiceFailure(message: "The service port is already in use.", recoveryAction: "Stop the conflicting server or change its port before starting this service.")
+            }
             try FileManager.default.createDirectory(at: specification.logFile.deletingLastPathComponent(), withIntermediateDirectories: true)
             if !FileManager.default.fileExists(atPath: specification.logFile.path) {
                 FileManager.default.createFile(atPath: specification.logFile.path, contents: nil)
@@ -79,6 +97,12 @@ public actor ServiceSupervisor {
             process.standardError = logHandle
             try process.run()
 
+            guard let record = processRecord(pid: process.processIdentifier, executable: specification.executable) else {
+                process.terminate()
+                throw ServiceFailure(message: "Could not verify service process ownership.")
+            }
+            records[specification.kind] = record
+            persistRecords(for: specification.kind)
             processes[specification.kind] = process
             logHandles[specification.kind] = logHandle
             let deadline = Date().addingTimeInterval(specification.readinessTimeout)
@@ -106,48 +130,110 @@ public actor ServiceSupervisor {
             if let process = processes.removeValue(forKey: specification.kind), process.isRunning {
                 process.terminate()
             }
+            records.removeValue(forKey: specification.kind)
+            persistRecords(for: specification.kind)
             try? logHandles.removeValue(forKey: specification.kind)?.close()
-            let failure = (error as? ServiceFailure) ?? ServiceFailure(message: error.localizedDescription)
+            var failure = (error as? ServiceFailure) ?? ServiceFailure(message: error.localizedDescription)
+            if let data = try? Data(contentsOf: specification.logFile) {
+                failure.logExcerpt = String(decoding: data.suffix(2_000), as: UTF8.self)
+            }
             states[specification.kind] = ServiceState(service: specification.kind, phase: .failed, failure: failure)
             throw failure
         }
     }
 
-    public func stop(_ service: ServiceKind, timeout: TimeInterval = 8) {
-        guard let process = processes[service] else {
+    public func stop(_ service: ServiceKind, timeout: TimeInterval = 8) async {
+        reconcile(service)
+        guard let record = records[service], owns(record) else {
             transition(service, to: .stopped)
             return
         }
-        transition(service, to: .stopping, pid: process.processIdentifier)
-        if process.isRunning { process.interrupt() }
+        transition(service, to: .stopping, pid: record.pid)
+        kill(record.pid, service == .nginx ? SIGQUIT : SIGTERM)
         let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
+        while owns(record) && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(100))
         }
-        if process.isRunning {
-            process.terminate()
-            Thread.sleep(forTimeInterval: 0.2)
-        }
-        if process.isRunning {
-            kill(process.processIdentifier, SIGKILL)
-        }
-        process.waitUntilExit()
+        if owns(record) { kill(record.pid, SIGKILL) }
+        if let process = processes[service] { process.waitUntilExit() }
         processes.removeValue(forKey: service)
+        records.removeValue(forKey: service)
+        persistRecords(for: service)
         try? logHandles.removeValue(forKey: service)?.close()
         transition(service, to: .stopped)
     }
 
-    public func stopAll() {
-        for service in ServiceKind.allCases.reversed() { stop(service) }
+    public func stopAll() async {
+        for service in ServiceKind.allCases.reversed() { await stop(service) }
+    }
+
+    public func reload(_ service: ServiceKind) throws {
+        reconcile(service)
+        guard let record = records[service], owns(record) else { return }
+        guard kill(record.pid, service.phpRuntimeID == nil ? SIGHUP : SIGUSR2) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    private func processRecord(pid: Int32, executable: URL) -> ProcessRecord? {
+        var info = proc_bsdinfo()
+        let count = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+        guard count == MemoryLayout<proc_bsdinfo>.size, info.pbi_uid == getuid() else { return nil }
+        return ProcessRecord(pid: pid, executable: executable.resolvingSymlinksInPath().path, uid: info.pbi_uid,
+                             startedSeconds: info.pbi_start_tvsec, startedMicroseconds: info.pbi_start_tvusec)
+    }
+
+    private func owns(_ record: ProcessRecord) -> Bool {
+        guard let actual = processRecord(pid: record.pid, executable: URL(fileURLWithPath: record.executable)),
+              actual.uid == record.uid, actual.startedSeconds == record.startedSeconds,
+              actual.startedMicroseconds == record.startedMicroseconds else { return false }
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        let length = proc_pidpath(record.pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return false }
+        let path = buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+        return URL(fileURLWithPath: path).resolvingSymlinksInPath().path == record.executable
+    }
+
+    private func persistRecords(for service: ServiceKind) {
+        guard let recordsURL else { return }
+        var saved = records
+        if let data = try? Data(contentsOf: recordsURL), let latest = try? JSONDecoder().decode([ServiceKind: ProcessRecord].self, from: data) {
+            saved = latest
+            saved[service] = records[service]
+        }
+        do { try AtomicFileWriter.write(try JSONEncoder().encode(saved), to: recordsURL, permissions: 0o600) }
+        catch { /* A failed write cannot authorize signalling a different process. */ }
+    }
+
+    private func wasStoppedByAnotherSupervisor(_ service: ServiceKind) -> Bool {
+        guard let recordsURL, let data = try? Data(contentsOf: recordsURL),
+              let saved = try? JSONDecoder().decode([ServiceKind: ProcessRecord].self, from: data) else { return false }
+        return saved[service] == nil
     }
 
     private func reconcile(_ service: ServiceKind) {
-        guard let process = processes[service] else { return }
+        guard let process = processes[service] else {
+            if let record = records[service] {
+                if owns(record) {
+                    if states[service]?.phase != .stopping {
+                        states[service] = ServiceState(service: service, phase: .running, pid: record.pid)
+                    }
+                } else {
+                    records.removeValue(forKey: service)
+                    persistRecords(for: service)
+                    transition(service, to: .stopped)
+                }
+            }
+            return
+        }
         if !process.isRunning {
+            let externallyStopped = wasStoppedByAnotherSupervisor(service)
             let code = process.terminationStatus
             processes.removeValue(forKey: service)
+            records.removeValue(forKey: service)
+            persistRecords(for: service)
             try? logHandles.removeValue(forKey: service)?.close()
-            if states[service]?.phase == .stopping || code == 0 {
+            if states[service]?.phase == .stopping || code == 0 || externallyStopped {
                 transition(service, to: .stopped)
             } else {
                 states[service] = ServiceState(
@@ -190,4 +276,3 @@ public actor ServiceSupervisor {
         }
     }
 }
-

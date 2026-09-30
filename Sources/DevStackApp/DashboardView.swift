@@ -11,28 +11,31 @@ struct DashboardView: View {
                 Spacer()
             }
 
-            if !model.helperInstalled {
-                HStack(spacing: 14) {
-                    FeatureIcon(symbol: "lock.shield")
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("System integration required").font(.system(size: 13, weight: .semibold))
-                        Text("Set up the helper to enable domains and HTTPS.").font(.system(size: 12)).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Set Up…") { model.selectedSection = .settings; Task { await model.installHelper() } }.buttonStyle(.glass).disabled(model.isBusy)
-                }.padding(16).background(DevStackDesign.accent.opacity(0.055), in: RoundedRectangle(cornerRadius: 16))
-            }
-
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Services").font(.system(size: 15, weight: .semibold))
-                    Spacer()
-                    StatusBadge(title: model.hasRunningServices ? "Running" : "Stopped", color: model.hasRunningServices ? DevStackDesign.success : .secondary, dot: true)
-                }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 12)], spacing: 12) {
-                    ForEach(model.visibleServiceStates) { state in
-                        Button { model.selectedLogService = state.service; model.selectedSection = .logs } label: { ServiceTile(state: state) }
-                            .buttonStyle(.plain).help("Read \(state.service.displayName) logs")
+                Text("Services").font(.system(size: 15, weight: .semibold))
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 16) {
+                    ServiceControl(title: "Web Server", service: model.configuration.selectedWebServer.service,
+                        detail: model.helperInstalled ? "HTTP 80 · HTTPS 443" : "HTTP 8080 · HTTPS 8443") {
+                        Picker("Web server", selection: Binding(get: { model.configuration.selectedWebServer }, set: { server in Task { await model.selectWebServer(server) } })) {
+                            ForEach(WebServer.allCases) { server in
+                                Text(server.displayName).tag(server).disabled(!model.runtimeIsAvailable(server.service.runtimeID))
+                            }
+                        }
+                    }
+                    ServiceControl(title: "PHP", service: ServiceKind(rawValue: model.configuration.defaultPHPRuntimeID) ?? .php85,
+                        detail: "Default for new sites and Terminal") {
+                        PHPVersionPicker()
+                    }
+                    ServiceControl(title: "Database", service: model.configuration.selectedDatabase == .mysql84 ? .mysql84 : .mysql57,
+                        detail: "127.0.0.1:3306") {
+                        Picker("Database engine", selection: Binding(get: { model.configuration.selectedDatabase }, set: { model.selectedDatabaseBinding = $0 })) {
+                            ForEach(DatabaseEngine.allCases, id: \.self) { engine in
+                                Text(engine.displayName).tag(engine).disabled(!model.runtimeIsAvailable(engine.rawValue))
+                            }
+                        }
+                    }
+                    ServiceControl(title: "Mail", service: .mailpit, detail: "SMTP 1025 · Inbox 8025") {
+                        Text("Mailpit").font(.system(size: 15, weight: .medium)).frame(height: 28, alignment: .leading)
                     }
                 }
             }
@@ -68,7 +71,7 @@ struct DashboardView: View {
                                 Spacer()
                                 StatusBadge(title: site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP "))
                                 StatusBadge(title: site.tlsEnabled ? "HTTPS" : "HTTP", color: site.tlsEnabled ? DevStackDesign.success : .secondary)
-                                Button { model.openURL("\(site.tlsEnabled ? "https" : "http")://\(site.hostname)") } label: { Image(systemName: "arrow.up.right") }
+                                Button { model.openURL(model.siteURL(site)) } label: { Image(systemName: "arrow.up.right") }
                                     .buttonStyle(.borderless).help("Open \(site.name)").accessibilityLabel("Open \(site.name)")
                             }.padding(.vertical, 2)
                         }
@@ -91,30 +94,62 @@ struct DashboardView: View {
 
 }
 
-private struct ServiceTile: View {
-    @Environment(\.colorScheme) private var colorScheme
-    let state: ServiceState
+private struct ServiceControl<Selector: View>: View {
+    @EnvironmentObject private var model: AppModel
+    let title: String
+    let service: ServiceKind
+    let detail: String
+    @ViewBuilder var selector: Selector
+    private var state: ServiceState { model.serviceState(service) }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            HStack {
-                Image(systemName: state.service.icon).font(.system(size: 20, weight: .light)).foregroundStyle(state.phase == .running ? DevStackDesign.success : .secondary)
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(spacing: 10) {
+                Image(systemName: service.icon).font(.system(size: 17, weight: .medium)).foregroundStyle(DevStackDesign.accent)
+                Text(title).font(.system(size: 13, weight: .semibold))
                 Spacer()
-                Circle().fill(state.phase.color).frame(width: 6, height: 6)
+                StatusBadge(title: state.phase.rawValue.capitalized, color: state.phase.color, dot: true)
             }
-            VStack(alignment: .leading, spacing: 4) {
-                Text(state.service.displayName).font(.system(size: 14, weight: .semibold)).foregroundStyle(.primary)
-                Text(state.service.endpoint).font(.system(size: 10)).foregroundStyle(.secondary)
+            selector.pickerStyle(.menu).labelsHidden().controlSize(.large)
+                .disabled(model.isBusy).frame(maxWidth: .infinity, alignment: .leading)
+            HStack {
+                Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer(minLength: 12)
+                Button(state.phase == .running ? "Stop" : "Start") {
+                    Task {
+                        if state.phase == .running { await model.stopService(service) }
+                        else { await model.startService(service) }
+                    }
+                }.buttonStyle(DevStackGlassButtonStyle())
+                    .disabled(model.isBusy || !model.runtimeIsAvailable(service.runtimeID))
+                    .accessibilityLabel("\(state.phase == .running ? "Stop" : "Start") \(service.displayName)")
+                Menu {
+                    Button("Open Logs") { model.selectedLogService = service; model.selectedSection = .logs }
+                    Button("Restart") { Task { await model.restartService(service) } }
+                        .disabled(model.isBusy || state.phase != .running)
+                    if service.phpRuntimeID != nil {
+                        Divider()
+                        Button("Extensions…") { model.selectedSection = .php }
+                        ForEach(model.serviceStates.filter { $0.service.phpRuntimeID != nil && $0.service != service && $0.phase == .running }) { other in
+                            Button("Stop \(other.service.displayName)") { Task { await model.stopService(other.service) } }
+                        }
+                    }
+                } label: { Image(systemName: "ellipsis") }
+                    .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("\(title) actions")
             }
-            HStack(spacing: 5) {
-                Text(state.phase.rawValue.capitalized).font(.system(size: 11, weight: .medium)).foregroundStyle(state.phase.color)
-                Spacer(minLength: 0)
-                if let pid = state.pid { Text("\(pid)").font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary) }
+        }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
+            .glassEffect(.regular, in: .rect(cornerRadius: 20))
+    }
+}
+
+struct PHPVersionPicker: View {
+    @EnvironmentObject private var model: AppModel
+    var body: some View {
+        Picker("PHP version", selection: Binding(get: { model.configuration.defaultPHPRuntimeID }, set: { id in Task { await model.selectPHP(id) } })) {
+            ForEach(model.availablePHPRuntimes) { runtime in
+                Text("PHP \(runtime.version)").tag(runtime.id)
             }
-        }
-        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
-        .background(colorScheme == .dark ? Color(red: 0.115, green: 0.135, blue: 0.175) : .white, in: RoundedRectangle(cornerRadius: 14))
-        .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(state.phase == .failed ? Color.red.opacity(0.25) : .primary.opacity(0.06), lineWidth: 1) }
-        .accessibilityElement(children: .combine)
+        }.pickerStyle(.menu).disabled(model.isBusy)
     }
 }
 

@@ -26,7 +26,10 @@ struct RootView: View {
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
             }
-            .navigationSplitViewColumnWidth(min: 195, ideal: 218, max: 260)
+            .padding(10)
+            .glassEffect(.regular, in: .rect(cornerRadius: 20))
+            .padding(8)
+            .navigationSplitViewColumnWidth(min: 210, ideal: 238, max: 270)
         } detail: {
             VStack(spacing: 0) {
                 selectedPage.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -40,18 +43,24 @@ struct RootView: View {
                     Button(action: stackAction) {
                         HStack(spacing: 6) {
                             if model.isBusy { ProgressView().controlSize(.mini) }
-                            else { Image(systemName: model.hasRunningServices ? "stop.fill" : "play.fill").font(.system(size: 10)) }
-                            Text(model.isBusy ? "Working…" : model.hasRunningServices ? "Stop Stack" : model.helperInstalled ? "Start Stack" : "Set Up Stack")
+                            else { Image(systemName: model.stackIsRunning ? "stop.fill" : "play.fill").font(.system(size: 10)) }
+                            Text(model.isBusy ? "Working…" : model.stackIsRunning ? "Stop Stack" : "Start Stack")
                         }
                     }
                     .buttonStyle(.glassProminent)
                     .disabled(model.isBusy)
-                    .help(model.helperInstalled || model.hasRunningServices ? "Start or stop your local services" : "Complete system setup before starting")
+                    .help("Start or stop the stack")
+                    if model.hasRunningServices && !model.stackIsRunning {
+                        Button("Stop Stack", systemImage: "stop.fill") { Task { await model.stopAll() } }
+                            .disabled(model.isBusy)
+                    }
                 }
             }
         }
+        .background(WindowBackdrop().ignoresSafeArea())
         .tint(DevStackDesign.accent)
-        .preferredColorScheme(model.appearance.colorScheme)
+        .onAppear { model.applyAppearance() }
+        .onChange(of: model.appearance) { _, _ in model.applyAppearance() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await model.refreshHelperStatus() }
         }
@@ -109,8 +118,7 @@ struct RootView: View {
     }
 
     private func stackAction() {
-        if model.hasRunningServices { Task { await model.stopAll() } }
-        else if !model.helperInstalled { model.selectedSection = .settings; Task { await model.installHelper() } }
+        if model.stackIsRunning { Task { await model.stopAll() } }
         else { Task { await model.startAll() } }
     }
 

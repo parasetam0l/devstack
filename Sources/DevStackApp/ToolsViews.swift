@@ -8,13 +8,18 @@ struct PHPView: View {
     @EnvironmentObject private var model: AppModel
     var body: some View {
         WorkspacePage {
-            PageHeading(title: "PHP", subtitle: "Choose the capabilities your projects need. Each version keeps its own extensions.")
-            runtimePanel(id: "php-8.5", title: "PHP 8.5", subtitle: "8.5.11 · The default for new projects", legacy: false)
-            runtimePanel(id: "php-7.4", title: "PHP 7.4", subtitle: "7.4.33 · For existing legacy projects", legacy: true)
+            HStack {
+                PageHeading(title: "PHP", subtitle: "Extensions apply to the selected version. Sites keep their own PHP settings.")
+                Spacer()
+                PHPVersionPicker().labelsHidden().controlSize(.large).frame(width: 200)
+            }
+            runtimePanel(id: model.configuration.defaultPHPRuntimeID,
+                title: "PHP " + (model.availablePHPRuntimes.first { $0.id == model.configuration.defaultPHPRuntimeID }?.version ?? ""),
+                subtitle: "Default for new sites and Terminal", legacy: model.configuration.defaultPHPRuntimeID == "php-7.4")
             SurfacePanel(title: "Runtime details") {
                 DisclosureGroup("Sources, licenses, and build information") {
                     VStack(alignment: .leading, spacing: 14) {
-                        ForEach(model.runtimeManifests.filter { $0.kind == .php || $0.kind == .phpExtension }) { manifest in
+                        ForEach(model.runtimeManifests.filter { $0.id == model.configuration.defaultPHPRuntimeID || ($0.kind == .phpExtension && $0.dependencyPaths.contains(model.configuration.defaultPHPRuntimeID)) }) { manifest in
                             RuntimeDetailsRow(manifest: manifest)
                         }
                     }.padding(.top, 12)
@@ -63,10 +68,12 @@ struct DatabaseView: View {
     var body: some View {
         WorkspacePage {
             HStack {
-                PageHeading(title: "Database", subtitle: "Local MySQL, with simple connection details and built-in backups.")
+                PageHeading(title: "Database", subtitle: "")
                 Spacer()
-                Button("Open phpMyAdmin", systemImage: "arrow.up.right") { model.openURL("https://phpmyadmin.devstack.test") }
-                    .buttonStyle(.glass).disabled(!model.serviceIsRunning(.apache) || !running)
+                Button("Open Adminer", systemImage: "arrow.up.right") { model.openURL(model.toolURL("adminer")) }
+                    .buttonStyle(.glass).disabled((!model.serviceIsRunning(.apache) && !model.serviceIsRunning(.nginx)) || !running)
+                Button("Open phpMyAdmin", systemImage: "arrow.up.right") { model.openURL(model.toolURL("phpmyadmin")) }
+                    .buttonStyle(.glass).disabled((!model.serviceIsRunning(.apache) && !model.serviceIsRunning(.nginx)) || !running)
             }
             SurfacePanel {
                 HStack(spacing: 12) {
@@ -159,21 +166,21 @@ struct MailpitView: View {
     @StateObject private var state = MailpitViewState()
     var body: some View {
         WorkspacePage {
-            PageHeading(title: "Mail Inbox", subtitle: "Development emails stay here, safely on your Mac.")
+            PageHeading(title: "Mail Inbox", subtitle: "")
             SurfacePanel {
                 HStack(spacing: 14) {
                     FeatureIcon(symbol: "tray")
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Mailpit").font(.system(size: 16, weight: .semibold))
-                        Text("A local inbox for every project.").font(.system(size: 12)).foregroundStyle(.secondary)
+                        Text("SMTP capture on port 1025.").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                     Spacer()
                     StatusBadge(title: model.serviceIsRunning(.mailpit) ? "Capturing mail" : "Stopped", color: model.serviceIsRunning(.mailpit) ? DevStackDesign.accent : .secondary, dot: true)
                 }
-                EmptyWorkspace(symbol: "envelope.open", title: "See what your app sends", description: "Send a test email from your project, then open the inbox to inspect its content and headers.")
+                EmptyWorkspace(symbol: "envelope.open", title: "Captured messages", description: "Open the inbox to inspect messages, attachments, and headers.")
                 HStack {
-                    Button("Open Inbox", systemImage: "arrow.up.right") { model.openURL("https://mailpit.devstack.test") }
-                        .buttonStyle(.glassProminent).controlSize(.large).disabled(!model.serviceIsRunning(.mailpit) || !model.serviceIsRunning(.apache))
+                    Button("Open Inbox", systemImage: "arrow.up.right") { model.openURL("http://127.0.0.1:8025") }
+                        .buttonStyle(.glassProminent).controlSize(.large).disabled(!model.serviceIsRunning(.mailpit))
                     Spacer()
                     Button("Clear Inbox…", systemImage: "trash", role: .destructive) { state.isConfirmingClear = true }
                         .disabled(!model.serviceIsRunning(.mailpit) || model.isBusy)
@@ -182,7 +189,7 @@ struct MailpitView: View {
             SurfacePanel(title: "Connect your app", subtitle: "No SMTP authentication or encryption is needed on loopback.") {
                 CopyValueRow(label: "SMTP host", value: "127.0.0.1")
                 CopyValueRow(label: "SMTP port", value: "1025")
-                CopyValueRow(label: "Inbox URL", value: "https://mailpit.devstack.test")
+                CopyValueRow(label: "Inbox URL", value: "http://127.0.0.1:8025")
                 Divider()
                 Text("PHP mail() is configured automatically. Mailpit captures messages locally and does not relay them to recipients.")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
@@ -363,7 +370,7 @@ struct SettingsView: View {
                         Text(model.helperSetupState.message).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
-                    if model.helperInstalled { StatusBadge(title: "Installed", color: DevStackDesign.accent, dot: true) }
+                    if model.helperIsRegistered { StatusBadge(title: model.helperInstalled ? "Ready" : "Registered", color: model.helperInstalled ? DevStackDesign.success : .orange, dot: true) }
                     else {
                         Button(model.helperSetupState.actionTitle) { Task { await model.installHelper() } }.buttonStyle(.glassProminent).disabled(model.isBusy)
                     }
@@ -375,10 +382,22 @@ struct SettingsView: View {
                     }
                 }.toggleStyle(.switch).controlSize(.small)
                     .accessibilityLabel("Open DevStack at login")
-                if model.helperInstalled {
+                if model.helperIsRegistered {
                     Button("Remove System Integration…", role: .destructive) { state.confirmRemove = true }.font(.system(size: 11)).disabled(model.isBusy || model.hasRunningServices)
                     if model.hasRunningServices { Text("Stop the stack before removing system integration.").font(.system(size: 11)).foregroundStyle(.secondary) }
                 }
+            }
+            SurfacePanel(title: "HTTPS certificates") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(model.localCATrusted ? "Trusted for this account" : "Certificate trust required").font(.system(size: 13, weight: .medium))
+                        Text("DevStack issues a separate certificate for each site. macOS asks you to authorize the development CA.").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(model.localCATrusted ? "Trusted" : "Trust DevStack CA…") { Task { await model.trustHTTPS() } }
+                        .buttonStyle(.glass).disabled(model.isBusy || model.localCATrusted)
+                }
+                Button("Show Certificates") { NSWorkspace.shared.open(model.paths.certificates) }.buttonStyle(.borderless)
             }
             SurfacePanel(title: "Offline runtimes", subtitle: "Import a signed pack from your Mac or removable media.") {
                 HStack {
