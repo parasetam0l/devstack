@@ -52,6 +52,7 @@ enum NavigationSection: String, CaseIterable, Identifiable {
     case database = "Database"
     case ssl = "SSL"
     case mailpit = "Mail Inbox"
+    case localDNS = "Local DNS"
     case logs = "Logs"
     case doctor = "Doctor"
     case settings = "Settings"
@@ -66,6 +67,7 @@ enum NavigationSection: String, CaseIterable, Identifiable {
         case .database: "cylinder.split.1x2"
         case .ssl: "lock.shield"
         case .mailpit: "envelope"
+        case .localDNS: "wifi.router"
         case .logs: "doc.text.magnifyingglass"
         case .doctor: "stethoscope"
         case .settings: "gearshape"
@@ -527,6 +529,11 @@ final class AppModel: ObservableObject {
     /// High ports with .localhost domains run without it.
     var requiresHelperForCurrentConfig: Bool {
         configuration.ports.requiresHelper || !hostnamesNeedingHostsFile.isEmpty
+    }
+
+    /// Hostnames the local DNS responder answers (deduplicated, sorted).
+    var localNetworkHostnames: [String] {
+        Array(Set(configuration.sites.map(\.hostname) + Self.managementHostnames)).sorted()
     }
 
     var localNetworkAddress: String? { LocalNetwork.primaryIPv4Address() }

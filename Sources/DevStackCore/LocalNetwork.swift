@@ -2,12 +2,23 @@ import Darwin
 import Foundation
 
 public enum LocalNetwork {
-    /// The primary LAN IPv4 address (Wi-Fi or Ethernet), when one is active.
-    public static func primaryIPv4Address() -> String? {
+    public struct LocalAddress: Hashable, Sendable {
+        public let interface: String
+        public let address: String
+
+        public init(interface: String, address: String) {
+            self.interface = interface
+            self.address = address
+        }
+    }
+
+    /// Every active private IPv4 address (Wi-Fi, Ethernet, bridges), Wi-Fi and
+    /// Ethernet interfaces first.
+    public static func activeIPv4Addresses() -> [LocalAddress] {
         var pointer: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&pointer) == 0, let first = pointer else { return nil }
+        guard getifaddrs(&pointer) == 0, let first = pointer else { return [] }
         defer { freeifaddrs(pointer) }
-        var candidates: [(name: String, address: String)] = []
+        var candidates: [LocalAddress] = []
         for interface in sequence(first: first, next: { $0.pointee.ifa_next }) {
             let flags = Int32(interface.pointee.ifa_flags)
             guard flags & IFF_UP != 0, flags & IFF_RUNNING != 0, flags & IFF_LOOPBACK == 0 else { continue }
@@ -17,9 +28,20 @@ public enum LocalNetwork {
             let address = String(decoding: host.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
             guard isPrivateIPv4(address), !address.hasPrefix("127."), !address.hasPrefix("169.254.") else { continue }
             let name = String(decoding: UnsafeRawBufferPointer(start: interface.pointee.ifa_name, count: Int(strlen(interface.pointee.ifa_name))), as: UTF8.self)
-            candidates.append((name, address))
+            candidates.append(LocalAddress(interface: name, address: address))
         }
-        return candidates.first(where: { $0.name.hasPrefix("en") })?.address ?? candidates.first?.address
+        return candidates.sorted { lhs, rhs in
+            let lhsPrimary = lhs.interface.hasPrefix("en")
+            let rhsPrimary = rhs.interface.hasPrefix("en")
+            if lhsPrimary != rhsPrimary { return lhsPrimary }
+            return lhs.interface < rhs.interface
+        }
+    }
+
+    /// The primary LAN IPv4 address (Wi-Fi or Ethernet), when one is active.
+    public static func primaryIPv4Address() -> String? {
+        let addresses = activeIPv4Addresses()
+        return addresses.first(where: { $0.interface.hasPrefix("en") })?.address ?? addresses.first?.address
     }
 
     public static func isPrivateIPv4(_ address: String) -> Bool {

@@ -144,7 +144,7 @@ private struct LocalDNSServiceControl: View {
         HStack(spacing: 7) {
             Image(systemName: "wifi.router").foregroundStyle(.secondary).frame(width: 16)
             Text("Local DNS").font(.system(size: 12, weight: .medium)).lineLimit(1).frame(width: 80, alignment: .leading)
-            Text(model.localNetworkAddress.map { "\($0):53" } ?? "No network")
+            Text(model.localNetworkAddress ?? "No network")
                 .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                 .lineLimit(1).frame(width: 140, alignment: .leading)
             Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
@@ -164,7 +164,7 @@ private struct LocalDNSServiceControl: View {
                 .accessibilityLabel(running ? "Stop local DNS" : "Start local DNS")
                 .frame(width: 55)
             Menu {
-                Button("Local network settings…") { model.selectedSection = .settings }
+                Button("Open Local DNS…") { model.selectedSection = .localDNS }
                 if let address = model.localNetworkAddress {
                     Button("Copy DNS address") {
                         NSPasteboard.general.clearContents()

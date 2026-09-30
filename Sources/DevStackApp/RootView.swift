@@ -20,7 +20,7 @@ struct RootView: View {
                 }.padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 10)
                 List(selection: $model.selectedSection) {
                     Section("Workspace") {
-                        ForEach(Array(NavigationSection.allCases.prefix(6))) { section in sidebarRow(section) }
+                        ForEach(Array(NavigationSection.allCases.prefix(7))) { section in sidebarRow(section) }
                     }
                     Section("Tools") {
                         ForEach(Array(NavigationSection.allCases.suffix(3))) { section in sidebarRow(section) }
@@ -115,6 +115,7 @@ struct RootView: View {
         case .database: DatabaseView()
         case .ssl: SSLView()
         case .mailpit: MailpitView()
+        case .localDNS: LocalDNSView()
         case .logs: LogsView()
         case .doctor: DoctorView()
         case .settings: SettingsView()

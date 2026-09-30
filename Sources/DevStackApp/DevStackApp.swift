@@ -30,7 +30,7 @@ struct DevStackApp: App {
             CommandMenu("Workspace") {
                 ForEach(Array(NavigationSection.allCases.enumerated()), id: \.element.id) { index, section in
                     Button(section.rawValue) { model.selectedSection = section }
-                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))))
+                        .keyboardShortcut(KeyEquivalent(Character(index < 9 ? String(index + 1) : "0")))
                 }
                 Divider()
                 #if DEBUG
