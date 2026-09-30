@@ -86,21 +86,6 @@ private final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtoc
         }
     }
 
-    func trustLocalCA(_ request: Data, withReply reply: @escaping (Data?, NSError?) -> Void) {
-        perform(reply) {
-            let proposed = try self.decoder.decode(LocalCARequest.self, from: request)
-            let certificate = try PrivilegedRequestValidator.localCA(proposed)
-            guard SecCertificateCreateWithData(nil, certificate.certificateDER as CFData) != nil else {
-                throw PrivilegedRequestValidationError.invalidCertificate
-            }
-            try FileManager.default.createDirectory(at: self.stateDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
-            let destination = self.stateDirectory.appendingPathComponent("DevStack-Local-CA.der")
-            try self.writeRootFile(certificate.certificateDER, to: destination, permissions: 0o644)
-            _ = try self.runSecurity(["add-trusted-cert", "-d", "-r", "trustRoot", "-k", "/Library/Keychains/System.keychain", destination.path])
-            return try self.encodeSuccess()
-        }
-    }
-
     func removeManagedState(withReply reply: @escaping (Data?, NSError?) -> Void) {
         perform(reply) {
             let original = try String(contentsOf: self.hostsURL, encoding: .utf8)
@@ -108,11 +93,10 @@ private final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtoc
             try self.writeRootFile(Data((replacement + "\n").utf8), to: self.hostsURL, permissions: 0o644)
             try self.forwarder.apply(PortForwardingConfiguration(enabled: false))
             self.dnsResponder.stop()
+            // Legacy cleanup: earlier builds stored a CA copy here after a
+            // failed system-trust attempt (a daemon cannot authorize that).
             let certificate = self.stateDirectory.appendingPathComponent("DevStack-Local-CA.der")
-            if FileManager.default.fileExists(atPath: certificate.path) {
-                _ = try? self.runSecurity(["remove-trusted-cert", "-d", certificate.path])
-                try? FileManager.default.removeItem(at: certificate)
-            }
+            try? FileManager.default.removeItem(at: certificate)
             return try self.encodeSuccess()
         }
     }
@@ -120,11 +104,9 @@ private final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtoc
     func status(withReply reply: @escaping (Data?, NSError?) -> Void) {
         perform(reply) {
             let hosts = (try? String(contentsOf: self.hostsURL, encoding: .utf8)) ?? ""
-            let certificate = self.stateDirectory.appendingPathComponent("DevStack-Local-CA.der")
             let status = PrivilegedHelperStatus(
                 hostMappingsInstalled: hosts.contains(PrivilegedHelperConstants.hostsBeginMarker),
                 portForwardingEnabled: self.forwarder.isEnabled,
-                localCATrusted: FileManager.default.fileExists(atPath: certificate.path),
                 version: "0.1.0",
                 dnsEnabled: self.dnsResponder.isEnabled,
                 dnsAnswerAddress: self.dnsResponder.answerAddress,
@@ -155,22 +137,6 @@ private final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtoc
         } else {
             try FileManager.default.moveItem(at: temporary, to: destination)
         }
-    }
-
-    private func runSecurity(_ arguments: [String]) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        try process.run()
-        process.waitUntilExit()
-        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        guard process.terminationStatus == 0 else {
-            throw NSError(domain: "app.devstack.desktop.helper", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: output])
-        }
-        return output
     }
 }
 

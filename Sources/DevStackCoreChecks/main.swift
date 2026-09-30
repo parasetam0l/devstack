@@ -428,7 +428,7 @@ enum DevStackCoreChecks {
         try AtomicFileWriter.write("#!/bin/sh\necho 'Syntax OK'\n", to: fakeApache, permissions: 0o755)
         try AtomicFileWriter.write("# generated httpd.conf\n", to: paths.generatedApache.appendingPathComponent("httpd.conf"), permissions: 0o644)
 
-        let helperStatus = PrivilegedHelperStatus(hostMappingsInstalled: true, portForwardingEnabled: true, localCATrusted: false, version: "1.0")
+        let helperStatus = PrivilegedHelperStatus(hostMappingsInstalled: true, portForwardingEnabled: true, version: "1.0")
         let failedMySQL = ServiceFailure(message: "Service exited unexpectedly.", exitCode: 1, recoveryAction: "Restart MySQL and inspect its log.")
         let report = DevStackDoctor().run(
             context: DiagnosticContext(

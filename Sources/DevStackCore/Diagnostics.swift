@@ -6,6 +6,7 @@ public struct DiagnosticContext: Sendable {
     public var applicationURL: URL?
     public var helperInstalled: Bool
     public var helperStatus: PrivilegedHelperStatus?
+    public var certificateTrusted: Bool
     public var expectedHostnames: [String]
     public var serviceStates: [ServiceState]
     public var requiredRuntimeIDs: Set<String>
@@ -20,6 +21,7 @@ public struct DiagnosticContext: Sendable {
         applicationURL: URL? = nil,
         helperInstalled: Bool = false,
         helperStatus: PrivilegedHelperStatus? = nil,
+        certificateTrusted: Bool = false,
         expectedHostnames: [String] = [],
         serviceStates: [ServiceState] = [],
         requiredRuntimeIDs: Set<String> = [],
@@ -33,6 +35,7 @@ public struct DiagnosticContext: Sendable {
         self.applicationURL = applicationURL
         self.helperInstalled = helperInstalled
         self.helperStatus = helperStatus
+        self.certificateTrusted = certificateTrusted
         self.expectedHostnames = expectedHostnames
         self.serviceStates = serviceStates
         self.selectedDatabase = selectedDatabase
@@ -134,9 +137,9 @@ public struct DevStackDoctor: Sendable {
             .init(
                 id: "ca-trust",
                 title: "Local CA trust",
-                severity: status.localCATrusted ? .info : .warning,
-                evidence: status.localCATrusted ? "The public DevStack CA is trusted." : "The DevStack CA is not trusted.",
-                remediation: status.localCATrusted ? nil : "Start DevStack or reinstall the helper to trust the public local CA certificate."
+                severity: context.certificateTrusted ? .info : .warning,
+                evidence: context.certificateTrusted ? "The public DevStack CA is trusted for this user." : "The DevStack CA is not trusted for this user.",
+                remediation: context.certificateTrusted ? nil : "Trust the public local CA from the SSL tab; user trust needs no administrator password."
             ),
             .init(
                 id: "local-dns",

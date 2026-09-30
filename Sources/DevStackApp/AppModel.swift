@@ -356,6 +356,7 @@ final class AppModel: ObservableObject {
             applicationURL: Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.bundleURL : nil,
             helperInstalled: helperInstalled,
             helperStatus: helperStatus,
+            certificateTrusted: localCATrusted,
             expectedHostnames: configuration.sites.map(\.hostname) + ["phpmyadmin.localhost", "mailpit.localhost", "adminer.localhost"],
             serviceStates: serviceStates,
             requiredRuntimeIDs: Set(configuration.sites.map(\.phpRuntimeID)).union(configuration.selectedDatabaseServices.map(\.runtimeID)).union(["php-8.5"]),
@@ -882,17 +883,22 @@ final class AppModel: ObservableObject {
             try certificates.ensureCertificates(for: TLSHosts)
             try certificates.refreshTrustBundle()
         }.value
+        // User trust is enough for browser HTTPS on this account and needs no
+        // administrator authorization, so it can be installed automatically.
+        // System-wide trust cannot be set from the privileged helper: macOS
+        // requires an interactive authorization prompt that a launchd daemon
+        // has no way to present (SecTrustSettingsSetTrustSettings fails with
+        // "no user interaction was possible"). Best effort here; the SSL tab
+        // still offers the explicit action.
+        if !certificates.isTrusted() {
+            try? await Task.detached { try certificates.trustForCurrentUser() }.value
+        }
         localCATrusted = certificates.isTrusted()
         guard helperInstalled else { return }
         let hostnames = configuration.sites.map(\.hostname) + managementHosts
         try await helper.applyHostMappings(hostnames.map { HostMapping(hostname: $0) })
         try await applyPrivilegedNetworking(hostnames: hostnames)
-        var status = try await helper.status()
-        if !status.localCATrusted {
-            try await helper.trustLocalCA(certificates.caCertificateDER())
-            status.localCATrusted = true
-        }
-        helperStatus = status
+        helperStatus = try await helper.status()
         helperInstalled = true
     }
 

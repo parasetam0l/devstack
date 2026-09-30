@@ -69,13 +69,6 @@ struct PrivilegedHelperClient: @unchecked Sendable {
         }
     }
 
-    func trustLocalCA(_ certificateDER: Data) async throws {
-        let request = try encoder.encode(LocalCARequest(certificateDER: certificateDER))
-        let _: HelperAcknowledgement = try await call { proxy, reply in
-            proxy.trustLocalCA(request, withReply: reply)
-        }
-    }
-
     func removeManagedState() async throws {
         let _: HelperAcknowledgement = try await call { proxy, reply in
             proxy.removeManagedState(withReply: reply)
