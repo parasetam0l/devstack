@@ -198,7 +198,7 @@ struct SiteEditor: View {
                     .disabled(editor.isSaving || !canSave)
             }
         }.font(.system(size: 12)).controlSize(.small).padding(18)
-        .frame(width: 580).tint(DevStackDesign.accent)
+        .frame(width: 580).tint(Color(nsColor: .controlAccentColor))
         .alert("Use legacy PHP 7.4?", isPresented: $editor.isConfirmingLegacyRuntime) {
             Button("Use PHP 7.4", role: .destructive) { editor.site.phpRuntimeID = "php-7.4" }
             Button("Cancel", role: .cancel) {}

@@ -33,10 +33,14 @@ struct DatabaseServiceControl: View {
     }
 
     private func databaseRow<Selector: View>(title: String, service: ServiceKind?, endpoint: String, @ViewBuilder selector: () -> Selector) -> some View {
-        HStack(spacing: 7) {
+        let active = service.map { model.serviceIsRunning($0) } ?? false
+        return HStack(spacing: 7) {
             Image(systemName: "externaldrive").foregroundStyle(.secondary).frame(width: 16)
             Text(title).fontWeight(.medium).lineLimit(1).frame(width: 80, alignment: .leading)
-            selector().pickerStyle(.menu).labelsHidden().controlSize(.small).disabled(model.isBusy).frame(width: 140, alignment: .leading)
+            selector().pickerStyle(.menu).labelsHidden().controlSize(.small)
+                .disabled(model.isBusy || active)
+                .help(active ? "Stop the service before changing its version." : "Change the \(title.lowercased()) version.")
+                .frame(width: 140, alignment: .leading)
             Text(service == nil ? "Excluded from stack" : endpoint).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                 .layoutPriority(-1)
             Spacer(minLength: 4)

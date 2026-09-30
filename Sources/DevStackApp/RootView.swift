@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import DevStackCore
 import SwiftUI
@@ -73,7 +74,7 @@ struct RootView: View {
         }
         .toolbar(removing: .sidebarToggle)
         .background(WindowBackdrop().ignoresSafeArea())
-        .tint(DevStackDesign.accent)
+        .tint(Color(nsColor: .controlAccentColor))
         .controlSize(.small)
         .onAppear { model.applyAppearance() }
         .onChange(of: model.appearance) { _, _ in model.applyAppearance() }

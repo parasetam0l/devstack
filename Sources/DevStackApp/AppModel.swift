@@ -1063,7 +1063,8 @@ final class AppModel: ObservableObject {
     }
 
     func selectWebServer(_ server: WebServer) async {
-        guard !isBusy, server != configuration.selectedWebServer else { return }
+        guard !isBusy, server != configuration.selectedWebServer,
+              !serviceIsRunning(configuration.selectedWebServer.service) else { return }
         isBusy = true
         defer { isBusy = false }
         let previous = configuration.selectedWebServer
@@ -1090,7 +1091,8 @@ final class AppModel: ObservableObject {
     }
 
     func selectPHP(_ runtimeID: String) async {
-        guard !isBusy, runtimeIsAvailable(runtimeID), runtimeID != configuration.defaultPHPRuntimeID else { return }
+        guard !isBusy, runtimeIsAvailable(runtimeID), runtimeID != configuration.defaultPHPRuntimeID,
+              !serviceIsRunning(ServiceKind(rawValue: configuration.defaultPHPRuntimeID) ?? .php85) else { return }
         let previous = configuration.defaultPHPRuntimeID
         configuration.defaultPHPRuntimeID = runtimeID
         do { try generateConfiguration(); try await store.save(configuration) }
@@ -1163,7 +1165,8 @@ final class AppModel: ObservableObject {
 
     private func selectDatabase(_ engine: DatabaseEngine) async {
         guard !isBusy, engine != configuration.selectedDatabase,
-              engine == .none || runtimeIsAvailable(engine.rawValue) else { return }
+              engine == .none || runtimeIsAvailable(engine.rawValue),
+              !(configuration.selectedDatabase.service.map { serviceIsRunning($0) } ?? false) else { return }
         isBusy = true
         defer { isBusy = false }
         let previous = configuration.selectedDatabase
@@ -1191,7 +1194,8 @@ final class AppModel: ObservableObject {
 
     func selectPostgreSQL(_ engine: PostgreSQLEngine) async {
         guard !isBusy, engine != configuration.selectedPostgreSQL,
-              engine == .none || runtimeIsAvailable(engine.rawValue) else { return }
+              engine == .none || runtimeIsAvailable(engine.rawValue),
+              !serviceIsRunning(.postgresql18) else { return }
         isBusy = true
         defer { isBusy = false }
         let previous = configuration.selectedPostgreSQL

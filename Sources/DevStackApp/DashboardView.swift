@@ -97,7 +97,9 @@ private struct ServiceControl<Selector: View>: View {
             Image(systemName: service.icon).foregroundStyle(.secondary).frame(width: 16)
             Text(title).font(.system(size: 12, weight: .medium)).lineLimit(1).frame(width: 80, alignment: .leading)
             selector.pickerStyle(.menu).labelsHidden().controlSize(.small)
-                .disabled(model.isBusy).frame(width: 140, alignment: .leading)
+                .disabled(model.isBusy || state.phase == .running)
+                .help(state.phase == .running ? "Stop the service before changing its version." : "Change \(title.lowercased())")
+                .frame(width: 140, alignment: .leading)
             Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                 .layoutPriority(-1)
             Spacer(minLength: 4)
@@ -135,7 +137,13 @@ struct PHPVersionPicker: View {
             ForEach(model.availablePHPRuntimes) { runtime in
                 Text("PHP \(runtime.version)").tag(runtime.id)
             }
-        }.pickerStyle(.menu).disabled(model.isBusy)
+        }.pickerStyle(.menu)
+            .disabled(model.isBusy || defaultRuntimeIsRunning)
+            .help(defaultRuntimeIsRunning ? "Stop PHP before changing the default version." : "Choose the default PHP runtime.")
+    }
+
+    private var defaultRuntimeIsRunning: Bool {
+        model.serviceIsRunning(ServiceKind(rawValue: model.configuration.defaultPHPRuntimeID) ?? .php85)
     }
 }
 
