@@ -179,6 +179,7 @@ struct HelperNoticeSheet: View {
             }
             if !blocking {
                 Toggle("Do not show this again", isOn: $suppress).toggleStyle(.checkbox).controlSize(.small)
+                    .disabled(model.isBusy)
             }
             HStack {
                 Spacer()
@@ -187,22 +188,35 @@ struct HelperNoticeSheet: View {
                         if suppress { await model.dismissHelperNotice() } else { model.helperNotice = nil }
                     }
                 }
+                .disabled(model.isBusy)
                 if model.isPreviewBuild {
                     Button("Open /Applications Build…") {
                         model.helperNotice = nil
                         model.openApplicationsBuild()
                     }.buttonStyle(DevStackGlassButtonStyle())
+                    .disabled(model.isBusy)
                 }
-                Button("Set Up Helper…") {
+                Button {
                     Task {
-                        if suppress { await model.dismissHelperNotice() } else { model.helperNotice = nil }
+                        // Stay open: disable everything with a loader until
+                        // installHelper finishes. Only close on success (or
+                        // persist "do not show again" when checked).
                         await model.installHelper()
+                        if suppress { await model.dismissHelperNotice() }
+                        else if model.helperInstalled { model.helperNotice = nil }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        if model.isBusy { ProgressView().controlSize(.mini) }
+                        Text(model.isBusy ? "Setting Up…" : "Set Up Helper…")
                     }
                 }.buttonStyle(DevStackProminentButtonStyle())
+                .disabled(model.isBusy)
             }
         }
         .padding(20)
         .frame(width: 480)
+        .interactiveDismissDisabled(model.isBusy)
     }
 }
 
