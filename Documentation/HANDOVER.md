@@ -1,110 +1,72 @@
-# DevStack progress handover
+# DevStack morning handover
 
-Verified on 29 September 2026, Europe/Istanbul, from the repository, local artifacts, build logs, and executable checks.
+Verified 30 September 2026 on Apple Silicon macOS 27.0.1 (Europe/Istanbul).
 
-## Current checkpoint
+## Usable build
 
-The application source and runtime build pipeline are implemented, and a local preview app and DMG exist. This is not yet a distributable, fully tested offline release.
+The installed application is `/Applications/DevStack.app`. The final app is `.build/release/DevStack.app`; its 387 MiB disk image is `.build/release/DevStack-0.1.0-arm64.dmg`. This is an ad-hoc development build, not a Developer ID/notarized distribution.
 
-- Workspace: `/Users/serkan/Desktop/localhost`
-- Branch: `main`
-- Implementation checkpoint before this document: `ebd7add` — `fix: compile legacy PHP intl as C++17 for ICU 78`
-- Working tree was clean at inspection.
-- Specification: `implementation-plan.md`
-- Build instructions: `Documentation/RuntimeBuild.md`
-- Prior chat: “Plan standalone MAMP Pro clone”. Its last recorded turn ended at a usage limit; the repository and artifacts contain later progress, so use this filesystem checkpoint when resuming.
-- Preserve the established practice of committing each completed step separately.
+The modern stack works on this computer using loopback HTTP 8080 and HTTPS 8443. Apache is selected by default; Nginx is bundled and remains disabled until selected. PHP 8.5 is the default for new sites and Terminal. Existing sites keep their own PHP version.
 
-## Agreed product scope
+## Included runtimes
 
-DevStack is an MIT-licensed native SwiftUI application, bundle ID `app.devstack.desktop`, for Apple Silicon macOS 27+. A fresh offline installation must work without Homebrew, MacPorts, Rosetta, or first-run downloads.
-
-PHP 8.5.11 and MySQL 8.4.11 are the defaults. PHP 7.4.33 and MySQL 5.7.44 are legacy options requiring successful native feasibility gates. The selected scope uses custom hostnames and ports 80/443 through a privileged helper. Mailpit, phpMyAdmin, Composer, SSL, diagnostics, and signed offline runtime imports are included. MariaDB and MailHog are outside the agreed scope.
-
-## Implemented in source
-
-- Swift package and Xcode workspace with app, core library, privileged helper, runtime packager, and `DevStackCoreChecks` products.
-- SwiftUI Dashboard, Sites, PHP, Database, Mailpit, Logs, Doctor, and Settings screens; menu-bar controls, login-item registration, and quit/service-stop confirmation.
-- Persistent configuration, hostname validation, Apache/PHP-FPM/MySQL configuration generation, subprocess supervision, readiness checks, and captured logs.
-- Typed XPC helper operations for managed hosts, loopback port forwarding, CA trust, and cleanup, with client authentication and constrained inputs.
-- Local CA/leaf certificate generation and renewal, separate MySQL data directories, initialization, development credentials, and SQL backup/import/export/reset workflows.
-- Runtime provenance/EOL UI, extension controls, managed shell/environment actions, Composer self-update protection, and Mailpit controls.
-- Signed runtime-pack creation/import verification, checksum and Mach-O inspection, Doctor diagnostics, and redacted support export.
-- Locked source/dependency/build-tool manifests; fetch, build, relocation, audit, license, SBOM, legacy-gate, signing, and DMG scripts.
-
-These are implemented code paths. End-to-end behavior with the packaged stack remains to be verified.
-
-## Runtime and artifact state
-
-| Component | Staged payload | Included in current preview |
+| Component | Version | Verified behavior |
 | --- | --- | --- |
-| Apache 2.4.68 | Version command passed | Yes |
-| PHP 8.5.11 CLI/FPM | CLI version command passed | Yes |
-| MySQL 8.4.11 | `mysqld --version` passed, native arm64 | Yes |
-| OpenSSL 3.5.8 | Version command passed | Yes |
-| Mailpit 1.31.1 | Binary present and executable | Yes |
-| phpMyAdmin 5.2.3 | Files present | Yes |
-| Composer 2.10.3 | Files present | Yes |
-| ImageMagick 7.1.2-32 | Files present | Yes |
-| PHP 7.4.33 | CLI version command passed; gate not established | No |
-| MySQL 5.7.44 | No staged runtime | No |
-| Xdebug, Redis, Imagick PHP modules | Missing from both staged PHP runtimes | No |
+| Apache | 2.4.68 | Site routing, both PHP versions, HTTPS, management tools |
+| Nginx | 1.30.5 | Same ports, live switching, HTTPS, FastCGI, management tools |
+| PHP | 8.5.11 and 8.4.26 | Independent FPM pools, per-site selection, CLI |
+| MySQL | 8.4.11 | First-run initialization, authenticated connections, SQL export/import |
+| Mailpit | 1.31.1 | SMTP capture from PHP mail(), inbox API |
+| phpMyAdmin | 5.2.3 | Login page served through both web servers |
+| Adminer | 6.1.1 | Login page served through both web servers |
+| OpenSSL | 3.5.8 | CA and leaf generation, certificate verification |
+| Composer | 2.10.3 | Managed wrapper, selected PHP and immutable bundled PHAR |
+| Xdebug / Redis / Imagick | 3.5.3 / 6.3.0 / 3.8.1 | ABI-specific modules for both PHP versions; Xdebug loads, Redis class and PNG operations work |
+| ImageMagick | 7.1.2-32 | PNG/JPEG delegates and explicit installed configuration paths |
 
-The runtime table distinguishes executable smoke checks from full integration or regression tests.
+PHP 7.4 and MySQL 5.7 are not shipped. Their native feasibility gates did not pass. The PHP Redis extension is included; a Redis server is not bundled.
 
-Artifacts:
+## Implemented behavior
 
-- `.build/release/DevStack.app`
-- `.build/release/DevStack-0.1.0-arm64.dmg` — 861,744,729 bytes, approximately 822 MiB; modified at 22:52 Istanbul time on 29 September.
-- Staged runtimes: `.build/Runtimes/`
-- Isolated dependencies: `.build/runtime-dependencies/`
-- Source/build trees: `.build/runtime-work/`
-- Cached sources: `.build/runtime-cache/`
-- Build logs: `.build/logs/`
-- Generated notices/SBOM: `ThirdPartyNotices/` and `SBOM/`
+- Native Liquid Glass panels, controls, sidebar, and desktop backdrop; teal accent; simple solid icon and matching menu-bar symbol; window width capped at 1400 points.
+- One Apache/Nginx selector and one PHP selector, with separate Start/Stop/Restart/Logs actions for each service.
+- Site creation, live apply, deletion without deleting project files, dedicated PHP pools, HTTPS certificates and request limits.
+- Durable process identity journal with PID/executable/user/start-time validation; owned-process recovery across app launches; independent service controls and startup rollback.
+- MySQL backups, streamed SQL import/export, separate data directories, and interrupted first-run credential recovery.
+- Extension controls, managed Terminal environment, Composer and MySQL wrappers, diagnostics and support export.
+- Imported runtime directory resolution, signed runtime-pack verification, typed privileged helper operations.
 
-The app and DMG have ad-hoc signatures and no TeamIdentifier. Deep/strict app signature verification passed, which confirms local signature integrity, not Developer ID distribution readiness. Offline Gatekeeper acceptance has not been established.
+## Verification evidence
 
-No runtime build processes were active during inspection. The development app was running; backend services were not observed in the process check.
+`DevStackCoreChecks` passes. `DevStackRuntimeChecks` passes against the exact final packaged payload (evidence `/tmp/dvs-check-2966263D`): isolated MySQL initialization/authentication/export/import, Apache and Nginx HTTPS, PHP 8.4/8.5, Imagick PNG, Redis, Xdebug loading, phpMyAdmin/Adminer rendering, Mailpit delivery, and independent service stop after ownership recovery.
 
-Build outputs, caches, notices, and SBOM directories are ignored by Git. A repository clone will need to rebuild these artifacts or receive them separately.
+The installed app was also tested through native UI: Start Stack completed within a few seconds; Apache→Nginx→Apache preserved other services; Mailpit and PHP could start/stop independently; a PHP 8.4 `verification.localhost` site was created live, returned its version through certificate-verified HTTPS, and was removed while keeping its files. Defaults were restored to Apache/PHP 8.5. No Desktop permission prompt appeared during the successful installed-app run.
 
-## Verification and unresolved build failures
+The Desktop-access defects were real compiled-path lookups: SwiftPM resources, OpenSSL configuration/certificates, ImageMagick configuration, and MySQL defaults/character sets/client plug-ins. Packaged resource lookup, explicit environment/pool configuration, the ImageMagick patch, and MySQL arguments/wrappers now resolve installed paths.
 
-- Re-ran `.build/out/Products/Release/DevStackCoreChecks`: **all checks passed**.
-- Re-ran version commands successfully for staged Apache, PHP 8.5, PHP 7.4, MySQL 8.4, and OpenSSL.
-- `.build/logs/build-runtimes-final.log` ends with a successful relocation/runtime audit. That audit predates the latest PHP 7.4 payload; it does not verify all current staged files.
-- `.build/logs/build-runtimes-php74.log` ends with a build-time loader failure for bare `libicuio.78.dylib`, followed by `ext/phar/phar.php` Error 134. An installed PHP 7.4 CLI now runs, but the log is not evidence of a completed build or passing gate.
-- `.build/logs/package-release.log` ends with an app-signing “No such file or directory” failure. The later app/DMG artifacts exist and the current app signature verifies; that older log does not document their successful packaging.
-- Full applicable upstream suites, legacy gates, helper installation, site serving, database switching, mail delivery, and clean-machine offline acceptance are not established by these checks.
-- The selected developer directory is `/Library/Developer/CommandLineTools`; full Xcode is not selected.
+Targeted PHP upstream tests passed with zero failures: 1,369 passed/855 skipped for PHP 8.4 and 1,395 passed/895 skipped for PHP 8.5. These covered OpenSSL, curl, hash, PHAR, mysqli, PDO MySQL, GD and ZIP. Database-dependent cases skipped in that upstream run were covered separately by runtime integration.
 
-## Remaining implementation work found during inspection
+The broad overnight suites did **not** pass. PHP 8.5 reported 92 failures out of 22,124 cases; PHP 8.4 did not finish its summary. Failures included JIT memory protection, platform iconv behavior and conflicting test ports. PHP debugger watchpoint children remained alive and the computer experienced severe memory pressure and a freeze. A restart cleared them. Broad suites were stopped; automated recipes now exclude phpdbg watchpoint tests, run serially, and use `scripts/run-bounded-check.py` for time, CPU, RSS, wired-memory limits and process-group cleanup. Timeout and orphan-child cleanup behavior were verified. Generated PHP configuration explicitly disables JIT.
 
-1. **Imported runtime selection:** packs install into Application Support and their manifests enter the catalog, but configuration generation, required-runtime checks, and service launch still resolve through `paths.builtInRuntimes`, with hard-coded PHP 7.4/8.5 IDs. Connect imported runtime paths and manifest-driven versions to actual execution.
-2. **Crash recovery:** `ServiceSupervisor` tracks current `Process` objects in memory. Its reconciliation handles exits within the current session; cross-launch PID/executable/UID identity reconciliation remains to be implemented.
-3. **Site updates and rollback:** `saveSite` restores stored/generated configuration on error but does not restore previously applied privileged host mappings. `deleteSite` currently saves and regenerates configuration without applying host changes or reloading live Apache. Complete and test the running-site update transaction.
+Logs are under `.build/logs/`: `core-checks.log`, `runtime-integration.log`, `runtime-integration-final.log`, `php84-regression.log`, `php85-regression.log`, `php85-full-suite.log`, `php84-full-suite.log`, `package-release-final.log`. Build products and logs are ignored by Git.
 
-## Next steps
+## Concrete limitations
 
-1. Resolve the PHP 7.4 build-time ICU loader issue, complete its build, and audit the current staged payload. Build ABI-specific Xdebug, Redis, and Imagick modules for both PHP versions.
-2. Build native MySQL 5.7 and run its initialization/transaction/restart-integrity gate. Run the PHP 7.4/OpenSSL regression and extension gate before including legacy runtimes.
-3. Complete the application gaps above and test the modern stack end to end, then both PHP versions and both database engines, including phpMyAdmin, HTTPS, and PHP mail capture.
-4. Run all required upstream suites and review recorded dependency-suite failures. Preview suite deferral is not release validation.
-5. Repackage with a Developer ID Application identity and notarization profile; verify signatures, stapling, and Gatekeeper behavior.
-6. Perform the full acceptance run on a fresh macOS 27 Apple Silicon installation with networking disabled.
+1. No Developer ID identity or notarization credentials are installed. Production helper authentication remains fail-closed. This build cannot enable privileged custom-host mappings or ports 80/443. `.localhost` and ports 8080/8443 work without the helper.
+2. The CA is generated but has not been authorized in macOS trust settings. Browser-trusted HTTPS requires the user to use Settings → Trust DevStack CA and complete the native macOS authorization. Certificate verification itself passed using the generated CA.
+3. Broad upstream regression acceptance, complete extension upstream suites, offline Gatekeeper acceptance and a fresh-machine offline run remain unverified. JIT and legacy runtimes are not supported by this build.
+4. Only MySQL 8.4 is shipped. There is no tested MySQL 5.7 switching path in the delivered payload.
 
-Packaging currently removes a staged legacy runtime when its feasibility gate fails. Preserve a needed staging copy before invoking `scripts/package-release.sh` during troubleshooting.
+Do not label this a production-complete MAMP Pro replacement. The requested modern local stack is functional, with distribution and acceptance work still outstanding.
 
-## Resume commands
+## Resume safely
+
+Keep one bounded check running at a time. Do not repeat broad PHP/phpdbg suites on this host. Do not grant Desktop access to work around compiled-path bugs. Do not weaken helper signature requirements for an ad-hoc app. Do not delete user data under Application Support or Logs during cleanup.
 
 ```sh
 cd /Users/serkan/Desktop/localhost
-export PATH="$PWD/.build/build-tools/bin:$PATH"
-git status --short --branch
-scripts/build-status.sh
-swift build --build-system native --jobs 4
-swift run --build-system native DevStackCoreChecks
+swift build --build-system native --jobs 2
+/usr/bin/python3 scripts/run-bounded-check.py --seconds 30 -- .build/arm64-apple-macosx/debug/DevStackCoreChecks
+# Stop the app stack before this integration check; it uses loopback ports 3306, 8080, 8443 and 8025.
+/usr/bin/python3 scripts/run-bounded-check.py --seconds 120 -- .build/arm64-apple-macosx/debug/DevStackRuntimeChecks .build/Runtimes
 ```
-
-Use targeted runtime builds while resolving failures; `scripts/build-runtimes.sh all` recreates component build trees. See `Documentation/RuntimeBuild.md` for the full pipeline. Do not delete user data under `~/Library/Application Support/DevStack` or logs under `~/Library/Logs/DevStack` as part of a build cleanup.

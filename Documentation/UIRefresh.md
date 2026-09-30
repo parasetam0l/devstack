@@ -1,9 +1,11 @@
-# Interface refresh verification
+# Interface verification
 
-Native SwiftUI sidebar, Liquid Glass controls, blue accents, restrained solid content panels, simple app icon and matching template menu bar symbol. App content width is capped at 1400 points with a 1040-point page content column. Site search, inline domain validation, disabled unavailable runtimes, destructive action confirmations, log filtering/pause/copy, diagnostic progress and ZIP support export are wired to actual operations.
+DevStack uses native SwiftUI Liquid Glass panels, interactive glass controls, a glass sidebar, and an AppKit behind-window desktop backdrop. The title bar follows the same surface. Appearance follows System, Light, or Dark through native window appearance; colors use a dynamic teal accent matching the solid icon. The menu-bar symbol uses the icon's three-layer stack and terminal glyph. Window content is capped at 1400 points, with a 1040-point page column.
 
-Verified on macOS 27.0.1 using the app accessibility tree and screenshots: all eight navigation routes, new-site form, invalid host validation, log filter/pause, theme selection, missing-runtime controls, and real setup failure presentation. Core checks passed after the refresh.
+The dashboard has four service controls: Web Server, PHP, Database, and Mail. Apache/Nginx and PHP versions are selected with native menus. Individual Start/Stop, Restart and Logs actions operate on real services. PHP extensions share one selected-runtime panel. Each site retains its own PHP selection.
 
-The packaged resource accessor now resolves Contents/Resources. SwiftPM's generated accessor had fallen back to build files on Desktop, blocking first launch behind TCC access. Packaged builds fail explicitly if resources are missing instead of reading the build directory.
+Verified through native accessibility and screenshots on macOS 27.0.1: app launch, stack startup, Apache/Nginx switching, Mailpit/PHP individual controls, PHP selection, live HTTPS site creation/removal, navigation, validation, and theme handling. See HANDOVER.md for runtime evidence and limitations.
 
-The local preview is ad-hoc signed. ServiceManagement registration returns Operation not permitted on this build. The app surfaces this failure and handles requiresApproval by opening Login Items & Extensions. Developer ID signing and notarization remain necessary for the production privileged daemon.
+The packaged app resolves resources from Contents/Resources and never falls back to SwiftPM files on Desktop. Runtime configuration and MySQL client resources also use installed paths. The successful installed-app startup did not display a Desktop permission prompt.
+
+An ad-hoc build reports unavailable privileged integration honestly; registration does not imply that the helper authenticated. Browser CA trust remains a separate macOS authorization action.
