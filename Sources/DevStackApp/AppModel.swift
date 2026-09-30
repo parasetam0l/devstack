@@ -196,21 +196,17 @@ final class AppModel: ObservableObject {
         do {
             try paths.createRequiredDirectories()
             configuration = try await store.load()
-            // The default site document root moved from Application Support to
-            // ~/DevStack so project files are visible and user-editable.
+            // The default site document root lives at ~/DevStack/localhost;
+            // migrate earlier roots (Application Support/DefaultSite and the
+            // short-lived ~/DevStack root) in place.
             if let index = configuration.sites.firstIndex(where: { $0.hostname == "localhost" }) {
-                let legacyRoot = paths.applicationSupport.appendingPathComponent("DefaultSite", isDirectory: true)
-                if configuration.sites[index].documentRoot == legacyRoot.path, paths.defaultSiteRoot.path != legacyRoot.path {
-                    let legacyIndex = legacyRoot.appendingPathComponent("index.php")
-                    if !FileManager.default.fileExists(atPath: paths.defaultSiteRoot.path) {
-                        try? FileManager.default.moveItem(at: legacyRoot, to: paths.defaultSiteRoot)
-                    } else if !FileManager.default.fileExists(atPath: paths.defaultSiteRoot.appendingPathComponent("index.php").path),
-                              FileManager.default.fileExists(atPath: legacyIndex.path) {
-                        try? FileManager.default.moveItem(at: legacyIndex, to: paths.defaultSiteRoot.appendingPathComponent("index.php"))
-                    }
-                    if (try? FileManager.default.contentsOfDirectory(atPath: legacyRoot.path))?.isEmpty == true {
-                        try? FileManager.default.removeItem(at: legacyRoot)
-                    }
+                let currentRoot = configuration.sites[index].documentRoot
+                let legacyRoots = [
+                    paths.applicationSupport.appendingPathComponent("DefaultSite", isDirectory: true).path,
+                    paths.defaultSiteRoot.deletingLastPathComponent().path
+                ]
+                if legacyRoots.contains(currentRoot), currentRoot != paths.defaultSiteRoot.path {
+                    migrateDefaultSiteContents(from: URL(fileURLWithPath: currentRoot), to: paths.defaultSiteRoot)
                     configuration.sites[index].documentRoot = paths.defaultSiteRoot.path
                     try await store.save(configuration)
                     DefaultSiteContent.refreshPlaceholderIndex(in: paths.defaultSiteRoot, hostname: "localhost", isDefaultSite: true)
@@ -251,6 +247,25 @@ final class AppModel: ObservableObject {
             if !helperInstalled, !configuration.helperNoticeDismissed, !isReviewMode { helperNotice = .welcome }
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Moves the contents of an earlier default-site root into the current one,
+    /// preserving user files. The legacy folder is removed only when empty.
+    private func migrateDefaultSiteContents(from legacy: URL, to destination: URL) {
+        let fileManager = FileManager.default
+        guard legacy.standardizedFileURL != destination.standardizedFileURL,
+              fileManager.fileExists(atPath: legacy.path) else { return }
+        try? fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+        for entry in (try? fileManager.contentsOfDirectory(atPath: legacy.path)) ?? [] {
+            let source = legacy.appendingPathComponent(entry)
+            let target = destination.appendingPathComponent(entry)
+            guard source.standardizedFileURL != destination.standardizedFileURL,
+                  !fileManager.fileExists(atPath: target.path) else { continue }
+            try? fileManager.moveItem(at: source, to: target)
+        }
+        if (try? fileManager.contentsOfDirectory(atPath: legacy.path))?.isEmpty == true {
+            try? fileManager.removeItem(at: legacy)
         }
     }
 

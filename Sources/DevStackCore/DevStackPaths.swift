@@ -6,9 +6,9 @@ public struct DevStackPaths: Sendable {
     public let applicationSupport: URL
     public let logs: URL
     public let builtInRuntimes: URL
-    /// Document root of the built-in localhost default site. It lives in the
-    /// home folder so project files stay visible and user-editable, unlike app
-    /// state under Application Support.
+    /// Document root of the built-in localhost default site. It lives under
+    /// `~/DevStack` so project files stay visible and user-editable, unlike
+    /// app state under Application Support.
     public let defaultSiteRoot: URL
 
     public init(
@@ -23,7 +23,8 @@ public struct DevStackPaths: Sendable {
         self.applicationSupport = applicationSupport ?? supportBase.appendingPathComponent("DevStack", isDirectory: true)
         self.logs = logs ?? logsBase.appendingPathComponent("DevStack", isDirectory: true)
         self.builtInRuntimes = builtInRuntimes ?? Bundle.main.resourceURL?.appendingPathComponent("Runtimes", isDirectory: true) ?? URL(fileURLWithPath: "/Applications/DevStack.app/Contents/Resources/Runtimes")
-        self.defaultSiteRoot = defaultSiteRoot ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("DevStack", isDirectory: true)
+        self.defaultSiteRoot = defaultSiteRoot
+            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("DevStack", isDirectory: true).appendingPathComponent("localhost", isDirectory: true)
     }
 
     public var configurationFile: URL { applicationSupport.appendingPathComponent("configuration.json") }
