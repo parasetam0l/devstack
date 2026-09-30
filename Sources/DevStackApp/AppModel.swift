@@ -196,6 +196,19 @@ final class AppModel: ObservableObject {
         do {
             try paths.createRequiredDirectories()
             configuration = try await store.load()
+            // The default site always exists so localhost/127.0.0.1 have a
+            // working page and unmatched hostnames never hit phpMyAdmin.
+            if !configuration.sites.contains(where: { $0.hostname == "localhost" }) {
+                let defaultSite = SiteDefinition.defaultSite(paths: paths, phpRuntimeID: configuration.defaultPHPRuntimeID)
+                configuration.sites.append(defaultSite)
+                try await store.save(configuration)
+                DefaultSiteContent.ensurePlaceholderIndex(
+                    in: URL(fileURLWithPath: defaultSite.documentRoot),
+                    hostname: defaultSite.hostname,
+                    isDefaultSite: true
+                )
+                try? generateConfiguration()
+            }
             runtimeManifests = try loadRuntimeLock()
             let loginItemEnabled = SMAppService.mainApp.status == .enabled
             if configuration.startAtLogin != loginItemEnabled {
@@ -213,11 +226,21 @@ final class AppModel: ObservableObject {
 
     func saveSite(_ site: SiteDefinition) async throws {
         var site = site
+        // The default site keeps its hostname; only its folder and settings
+        // can change.
+        if configuration.sites.contains(where: { $0.id == site.id && $0.hostname == "localhost" }) {
+            site.hostname = "localhost"
+        }
         site.hostname = try HostnameValidator.validate(site.hostname, existing: configuration.sites.filter { $0.id != site.id }.map(\.hostname))
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: site.documentRoot, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: site.documentRoot])
         }
+        DefaultSiteContent.ensurePlaceholderIndex(
+            in: URL(fileURLWithPath: site.documentRoot),
+            hostname: site.hostname,
+            isDefaultSite: site.hostname == "localhost"
+        )
         var sites = configuration.sites
         if let index = sites.firstIndex(where: { $0.id == site.id }) { sites[index] = site }
         else { sites.append(site) }
@@ -225,6 +248,7 @@ final class AppModel: ObservableObject {
     }
 
     func deleteSite(_ site: SiteDefinition) async {
+        guard site.hostname != "localhost" else { return }
         do { try await applySites(configuration.sites.filter { $0.id != site.id }) }
         catch { errorMessage = error.localizedDescription }
     }
@@ -878,7 +902,7 @@ final class AppModel: ObservableObject {
             openssl: runtimeDirectory("openssl-3.5").appendingPathComponent("bin/openssl")
         )
         let managementHosts = Self.managementHostnames
-        let TLSHosts = configuration.sites.filter(\.tlsEnabled).map(\.hostname) + managementHosts
+        let TLSHosts = configuration.sites.filter { $0.tlsEnabled || $0.hostname == "localhost" }.map(\.hostname) + managementHosts
         try await Task.detached {
             try certificates.ensureCertificates(for: TLSHosts)
             try certificates.refreshTrustBundle()
@@ -895,7 +919,7 @@ final class AppModel: ObservableObject {
         }
         localCATrusted = certificates.isTrusted()
         guard helperInstalled else { return }
-        let hostnames = configuration.sites.map(\.hostname) + managementHosts
+        let hostnames = (configuration.sites.map(\.hostname) + managementHosts).filter { $0 != "localhost" }
         try await helper.applyHostMappings(hostnames.map { HostMapping(hostname: $0) })
         try await applyPrivilegedNetworking(hostnames: hostnames)
         helperStatus = try await helper.status()
@@ -1158,7 +1182,7 @@ final class AppModel: ObservableObject {
     }
 
     var managedTLSHostnames: Set<String> {
-        Set(configuration.sites.filter(\.tlsEnabled).map(\.hostname) + ["phpmyadmin.localhost", "adminer.localhost", "mailpit.localhost", "postgresql.localhost"])
+        Set(configuration.sites.filter { $0.tlsEnabled || $0.hostname == "localhost" }.map(\.hostname) + ["localhost", "phpmyadmin.localhost", "adminer.localhost", "mailpit.localhost", "postgresql.localhost"])
     }
 
     func refreshCertificates() async {

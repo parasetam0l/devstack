@@ -3,7 +3,42 @@ import Foundation
 extension ConfigurationRenderer {
     public func nginxConfiguration(sites: [SiteDefinition]) throws -> String {
         let root = runtimeDirectory("nginx-1.30")
-        var servers = try sites.sorted { $0.hostname < $1.hostname }.map { site in
+        var servers: [String] = []
+        // The default site is the first server on both ports so localhost,
+        // 127.0.0.1 and unmatched hostnames never fall through to phpMyAdmin.
+        if let defaultSite = sites.first(where: { $0.hostname == "localhost" }) {
+            let webRoot = try nginxQuote(defaultSite.documentRoot)
+            let socket = try nginxQuote("unix:" + paths.phpSocket(runtimeID: defaultSite.phpRuntimeID, siteID: defaultSite.id).path)
+            let locations = """
+                root \(webRoot);
+                index index.php index.html;
+                access_log \(try nginxQuote(defaultSite.logs.access));
+                error_log \(try nginxQuote(defaultSite.logs.error));
+                location / { try_files $uri $uri/ /index.php?$query_string; }
+                location ~ \\.php$ {
+                    try_files $uri =404;
+                    include \(try nginxQuote(root.appendingPathComponent("conf/fastcgi_params").path));
+                    fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                    fastcgi_pass \(socket);
+                }
+                location ~ /\\. { deny all; }
+            """
+            servers.append("""
+            server {
+                listen 127.0.0.1:\(ports.webHTTPListen); listen [::1]:\(ports.webHTTPListen);
+                server_name localhost 127.0.0.1 _;
+                \(locations)
+            }
+            server {
+                listen 127.0.0.1:\(ports.webHTTPSListen) ssl; listen [::1]:\(ports.webHTTPSListen) ssl;
+                server_name localhost 127.0.0.1 _;
+                ssl_certificate \(try nginxQuote(paths.certificate(for: "localhost").path));
+                ssl_certificate_key \(try nginxQuote(paths.privateKey(for: "localhost").path));
+                \(locations)
+            }
+            """)
+        }
+        servers.append(contentsOf: try sites.filter { $0.hostname != "localhost" }.sorted { $0.hostname < $1.hostname }.map { site in
             _ = try HostnameValidator.validate(site.hostname)
             let hostname = site.hostname
             let webRoot = try nginxQuote(site.documentRoot)
@@ -45,7 +80,7 @@ extension ConfigurationRenderer {
                 \(locations)
             }
             """
-        }
+        })
         servers.append("""
         server {
             listen 127.0.0.1:\(ports.webHTTPListen); listen [::1]:\(ports.webHTTPListen);

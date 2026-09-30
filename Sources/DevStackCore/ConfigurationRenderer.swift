@@ -41,7 +41,13 @@ public struct ConfigurationRenderer: Sendable {
         let moduleDirectory = apache.appendingPathComponent("modules")
         let mpm = moduleDirectory.appendingPathComponent("mod_mpm_event.so")
         let mpmDirective = FileManager.default.fileExists(atPath: mpm.path) ? "LoadModule mpm_event_module \(quote(mpm.path))" : ""
-        let siteBlocks = try sites.sorted { $0.hostname < $1.hostname }.map(apacheVirtualHost).joined(separator: "\n\n")
+        // The default site is emitted first so it is the default server for
+        // both ports; unmatched hostnames land on it instead of phpMyAdmin.
+        let orderedSites = sites.sorted { lhs, rhs in
+            if (lhs.hostname == "localhost") != (rhs.hostname == "localhost") { return lhs.hostname == "localhost" }
+            return lhs.hostname < rhs.hostname
+        }
+        let siteBlocks = try orderedSites.map(apacheVirtualHost).joined(separator: "\n\n")
         let phpMyAdminCertificate = quote(paths.certificate(for: "phpmyadmin.localhost").path)
         let phpMyAdminKey = quote(paths.privateKey(for: "phpmyadmin.localhost").path)
         let mailpitCertificate = quote(paths.certificate(for: "mailpit.localhost").path)
@@ -310,6 +316,35 @@ public struct ConfigurationRenderer: Sendable {
                 </FilesMatch>
             </Directory>
         """
+
+        // The default site always serves content on both ports (no redirect)
+        // so localhost, 127.0.0.1 and unmatched hostnames never fall through
+        // to the web server's built-in default page.
+        if hostname == "localhost" {
+            return """
+            <VirtualHost *:\(ports.webHTTPListen)>
+                ServerName localhost
+                ServerAlias 127.0.0.1
+                DocumentRoot \(root)
+                ErrorLog \(errorLog)
+                CustomLog \(accessLog) combined
+                \(directory)
+            </VirtualHost>
+
+            <VirtualHost *:\(ports.webHTTPSListen)>
+                ServerName localhost
+                ServerAlias 127.0.0.1
+                DocumentRoot \(root)
+                ErrorLog \(errorLog)
+                CustomLog \(accessLog) combined
+                SSLEngine on
+                SSLCertificateFile \(quote(paths.certificate(for: hostname).path))
+                SSLCertificateKeyFile \(quote(paths.privateKey(for: hostname).path))
+                Header always set X-Content-Type-Options "nosniff"
+                \(directory)
+            </VirtualHost>
+            """
+        }
 
         let httpBehavior = site.tlsEnabled
             ? "Redirect permanent / https://\(hostname)\(ports.webHTTPS == 443 ? "" : ":\(ports.webHTTPS)")/"

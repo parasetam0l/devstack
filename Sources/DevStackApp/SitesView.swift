@@ -94,6 +94,7 @@ private struct SiteRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
                     Text(site.name).font(.system(size: 12, weight: .semibold))
+                    if site.hostname == "localhost" { StatusBadge(title: "Default", color: DevStackDesign.accent) }
                     if site.phpRuntimeID == "php-7.4" { StatusBadge(title: "Legacy", color: .orange) }
                 }
                 Text(site.hostname).font(.system(size: 12)).foregroundStyle(.secondary)
@@ -112,7 +113,9 @@ private struct SiteRow: View {
                     NSPasteboard.general.clearContents(); NSPasteboard.general.setString("\(site.tlsEnabled ? "https" : "http")://\(site.hostname)", forType: .string)
                 }
                 Divider()
-                Button("Remove Site…", systemImage: "trash", role: .destructive, action: delete)
+                if site.hostname != "localhost" {
+                    Button("Remove Site…", systemImage: "trash", role: .destructive, action: delete)
+                }
             } label: { Image(systemName: "ellipsis") }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 22).help("Site actions").accessibilityLabel("Actions for \(site.name)")
         }.padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading)
@@ -152,6 +155,7 @@ struct SiteEditor: View {
                 GridRow {
                     Text("Hostname").foregroundStyle(.secondary)
                     TextField("project.localhost", text: $editor.site.hostname).textContentType(.URL)
+                        .disabled(isDefaultSite)
                 }
                 GridRow {
                     Text("PHP version").foregroundStyle(.secondary)
@@ -161,9 +165,12 @@ struct SiteEditor: View {
                 }
                 GridRow {
                     Text("SSL").foregroundStyle(.secondary)
-                    Toggle("HTTPS", isOn: $editor.site.tlsEnabled).toggleStyle(.switch)
+                    Toggle("HTTPS", isOn: $editor.site.tlsEnabled).toggleStyle(.switch).disabled(isDefaultSite)
                 }
             }.textFieldStyle(.roundedBorder)
+            if isDefaultSite {
+                Label("The default site always serves localhost and 127.0.0.1 over HTTP and HTTPS.", systemImage: "info.circle").foregroundStyle(.secondary)
+            }
             if let validationError {
                 Label(validationError, systemImage: "exclamationmark.circle").foregroundStyle(.red)
             } else if HostnameValidator.shadowsPublicDomain(editor.site.hostname) {
@@ -198,6 +205,8 @@ struct SiteEditor: View {
         } message: { Text("PHP 7.4 no longer receives security fixes. Use it only for legacy compatibility on this Mac.") }
         .interactiveDismissDisabled(editor.isSaving)
     }
+
+    private var isDefaultSite: Bool { editor.site.hostname == "localhost" }
 
     private var validationError: String? {
         guard !editor.site.hostname.isEmpty else { return nil }

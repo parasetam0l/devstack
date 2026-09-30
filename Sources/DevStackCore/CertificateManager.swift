@@ -68,11 +68,13 @@ public struct CertificateManager: Sendable {
         let generatedKey = work.appendingPathComponent("key.pem")
         let generatedCertificate = work.appendingPathComponent("certificate.pem")
         let extensionFile = work.appendingPathComponent("extensions.cnf")
+        // The default site also answers on the loopback IP literals.
+        let subjectAltNames = hostname == "localhost" ? "DNS:localhost, IP:127.0.0.1, IP:::1" : "DNS:\(hostname)"
         try AtomicFileWriter.write("""
         basicConstraints=critical,CA:FALSE
         keyUsage=critical,digitalSignature,keyEncipherment
         extendedKeyUsage=serverAuth
-        subjectAltName=DNS:\(hostname)
+        subjectAltName=\(subjectAltNames)
         """, to: extensionFile, permissions: 0o600)
 
         _ = try runner.runChecked(

@@ -37,6 +37,8 @@ public struct DevStackPaths: Sendable {
         return URL(fileURLWithPath: "/tmp/devstack-\(getuid())-\(digest)", isDirectory: true)
     }
     public var certificates: URL { applicationSupport.appendingPathComponent("Certificates", isDirectory: true) }
+    /// Document root of the built-in localhost default site.
+    public var defaultSiteRoot: URL { applicationSupport.appendingPathComponent("DefaultSite", isDirectory: true) }
     public var mailpit: URL { applicationSupport.appendingPathComponent("Mailpit", isDirectory: true) }
     public var mailpitDatabase: URL { mailpit.appendingPathComponent("mailpit.db") }
     public var backups: URL { applicationSupport.appendingPathComponent("Backups", isDirectory: true) }
@@ -59,7 +61,7 @@ public struct DevStackPaths: Sendable {
             generatedPHP.appendingPathComponent("conf.d", isDirectory: true),
             importedRuntimes, databases, generatedPostgreSQL, sockets, certificates, phpMyAdmin,
             phpMyAdmin.appendingPathComponent("tmp", isDirectory: true),
-            certificates.appendingPathComponent("sites", isDirectory: true), mailpit, backups
+            certificates.appendingPathComponent("sites", isDirectory: true), mailpit, backups, defaultSiteRoot
         ]
         var socketInfo = stat()
         if lstat(sockets.path, &socketInfo) == 0 {
