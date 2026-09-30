@@ -11,18 +11,33 @@ struct PrivilegedHelperClient: @unchecked Sendable {
     var isRegistered: Bool { service.status == .enabled }
     var registrationStatus: SMAppService.Status { service.status }
 
-    var canAuthenticate: Bool {
+    /// Signing Team ID of the running app, when present.
+    var teamIdentifier: String? {
         var code: SecStaticCode?
         var info: CFDictionary?
         guard SecStaticCodeCreateWithPath(Bundle.main.bundleURL as CFURL, [], &code) == errSecSuccess,
               let code, SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-              let dictionary = info as? [String: Any] else { return false }
-        return dictionary[kSecCodeInfoTeamIdentifier as String] is String
+              let dictionary = info as? [String: Any] else { return nil }
+        return dictionary[kSecCodeInfoTeamIdentifier as String] as? String
     }
 
+    /// True when running from the installed signed release rather than a
+    /// build directory, DerivedData, or preview staging path.
+    var isRunningFromApplications: Bool {
+        Bundle.main.bundleURL.path.hasPrefix("/Applications/")
+    }
+
+    var runningBundlePath: String { Bundle.main.bundleURL.path }
+
+    var canAuthenticate: Bool { teamIdentifier != nil }
+
+    /// Fail-closed: ad-hoc / unsigned / preview builds can never drive the
+    /// privileged helper, no matter what. The error tells the user exactly
+    /// which build they launched and which one to open instead.
     func register() throws {
         guard canAuthenticate else {
-            throw NSError(domain: "app.devstack.desktop.helper", code: 2, userInfo: [NSLocalizedDescriptionKey: "System integration requires a Developer ID signed release. This build cannot manage the hosts file or privileged ports."])
+            throw NSError(domain: "app.devstack.desktop.helper", code: 2, userInfo: [NSLocalizedDescriptionKey:
+                "This build (\(runningBundlePath)) is ad-hoc signed and cannot drive the helper. Quit it and open /Applications/DevStack.app (Developer ID signed) instead."])
         }
         guard service.status != .enabled, service.status != .requiresApproval else { return }
         try service.register()

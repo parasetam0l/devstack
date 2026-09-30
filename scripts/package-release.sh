@@ -72,6 +72,25 @@ done < <(/usr/bin/python3 "$repository_root/scripts/mach-o-files.py" "$applicati
 /usr/bin/codesign --force "${signing_options[@]}" --entitlements "$repository_root/Packaging/DevStack.entitlements" --sign "$identity" "$application"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$application"
 
+# The helper's XPC trust requires app and helper to share one Developer ID Team.
+# Catch a mismatched / ad-hoc sign here instead of a silent helper failure later.
+if [[ "$identity" != "-" ]]; then
+    app_team=$(/usr/bin/codesign -dv "$application" 2>&1 | /usr/bin/sed -n 's/^TeamIdentifier=//p' | head -n 1)
+    helper_team=$(/usr/bin/codesign -dv "$application/Contents/Library/LaunchServices/DevStackPrivilegedHelper" 2>&1 | /usr/bin/sed -n 's/^TeamIdentifier=//p' | head -n 1)
+    [[ -n "${app_team:-}" && "$app_team" != "not set" ]] || { echo "App has no TeamIdentifier after signing." >&2; exit 70; }
+    [[ "$app_team" == "$helper_team" ]] || { echo "Team mismatch: app=$app_team helper=$helper_team. Helper XPC trust would fail." >&2; exit 70; }
+    /usr/bin/plutil -lint "$application/Contents/Library/LaunchDaemons/app.devstack.desktop.helper.plist" >/dev/null
+    /usr/bin/python3 - "$application/Contents/Library/LaunchDaemons/app.devstack.desktop.helper.plist" <<'EOF'
+import plistlib, sys
+with open(sys.argv[1], 'rb') as f: info = plistlib.load(f)
+assert info.get("Label") == "app.devstack.desktop.helper", "Label"
+assert info.get("MachServices", {}).get("app.devstack.desktop.helper") is True, "MachServices"
+assert info.get("BundleProgram") == "Contents/Library/LaunchServices/DevStackPrivilegedHelper", "BundleProgram"
+assert "app.devstack.desktop" in info.get("AssociatedBundleIdentifiers", []), "AssociatedBundleIdentifiers"
+EOF
+    echo "Signed: $identity (Team $app_team). App and helper teams match." >&2
+fi
+
 dmg="$staging_root/DevStack-0.1.0-arm64.dmg"
 dmg_root="$staging_root/dmg-root"
 rm -rf "$dmg_root"
@@ -97,3 +116,5 @@ for artifact in DevStack.app DevStack-0.1.0-arm64.dmg; do
     mv "$staging_root/$artifact" "$release_root/$artifact"
 done
 echo "Release image: $release_root/DevStack-0.1.0-arm64.dmg"
+echo "Next: copy DevStack.app to /Applications via the DMG, open it from Finder (not swift run / preview)," >&2
+echo "then Settings → System integration → Set Up and approve in Login Items & Extensions." >&2

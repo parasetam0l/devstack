@@ -42,6 +42,16 @@ echo "Preview application: $application"
 if [[ "${DEVSTACK_INSTALL_PREVIEW:-0}" == "1" ]]; then
     destination="/Applications/DevStack.app"
     [[ -w /Applications ]] || { echo "Applications is not writable." >&2; exit 73; }
+    # Never clobber a Developer ID signed install with an ad-hoc preview:
+    # that silently breaks the helper (ad-hoc has no Team ID, fail-closed).
+    if [[ -d "$destination" ]] && /usr/bin/codesign -dv "$destination" 2>&1 | /usr/bin/grep -q "TeamIdentifier="; then
+        team=$(/usr/bin/codesign -dv "$destination" 2>&1 | /usr/bin/sed -n 's/^TeamIdentifier=//p' | head -n 1)
+        if [[ -n "$team" && "$team" != "not set" ]]; then
+            echo "Refusing: $destination is signed (Team $team). Installing an ad-hoc preview over it would break the helper." >&2
+            echo "Quit preview, open /Applications/DevStack.app for helper work, or delete the signed install first if you really mean it." >&2
+            exit 74
+        fi
+    fi
     installed_stage="/Applications/.DevStack-$build_stamp.app"
     ditto "$application" "$installed_stage"
     /usr/bin/codesign --verify --deep --strict "$installed_stage"
@@ -49,5 +59,7 @@ if [[ "${DEVSTACK_INSTALL_PREVIEW:-0}" == "1" ]]; then
         mv "$destination" "$preview_root/previous/Installed-DevStack-$build_stamp.app"
     fi
     mv "$installed_stage" "$destination"
-    echo "Installed preview: $destination"
+    echo "Installed preview (ad-hoc, helper unavailable): $destination" >&2
+    echo "For helper work use the Developer ID signed release in /Applications/DevStack.app." >&2
 fi
+echo "Preview is ad-hoc signed: helper stays unavailable by design. Launch /Applications/DevStack.app for helper work." >&2

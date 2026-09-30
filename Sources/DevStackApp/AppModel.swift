@@ -393,6 +393,23 @@ final class AppModel: ObservableObject {
 
     var helperIsRegistered: Bool { helper.registrationStatus == .enabled || helper.registrationStatus == .requiresApproval }
 
+    /// Which build the user actually launched. The helper only works from the
+    /// Developer ID signed /Applications install; preview / DerivedData builds
+    /// are ad-hoc by design and stay fail-closed.
+    var runningBundlePath: String { helper.runningBundlePath }
+    var runningTeamID: String? { helper.teamIdentifier }
+    var isRunningSignedRelease: Bool { helper.canAuthenticate && helper.isRunningFromApplications }
+    var isPreviewBuild: Bool { !helper.isRunningFromApplications }
+
+    func openApplicationsBuild() {
+        let url = URL(fileURLWithPath: "/Applications/DevStack.app")
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.open(url)
+        } else {
+            errorMessage = "No signed install found at /Applications/DevStack.app. Install it from the release DMG first."
+        }
+    }
+
     func dismissHelperNotice() async {
         helperNotice = nil
         guard !configuration.helperNoticeDismissed else { return }
@@ -496,7 +513,9 @@ final class AppModel: ObservableObject {
         guard !isReviewMode else { return }
         guard helper.canAuthenticate else {
             helperInstalled = false; helperStatus = nil
-            helperSetupState = .unavailable("Ad-hoc build: helper unavailable. High ports with .localhost still work; custom domains and 80/443 need a Developer ID signed release.")
+            // Path-aware: most "helper unavailable" reports are just the user
+            // running the ad-hoc preview instead of the signed install.
+            helperSetupState = .unavailable("You are running \(helper.runningBundlePath) (ad-hoc, no Team ID). Quit this build and open /Applications/DevStack.app for the helper; 8080/8443 with .localhost work here without it.")
             return
         }
         switch helper.registrationStatus {
