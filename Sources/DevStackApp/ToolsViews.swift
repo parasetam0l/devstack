@@ -9,7 +9,7 @@ struct PHPView: View {
     var body: some View {
         WorkspacePage {
             HStack {
-                PageHeading(title: "PHP", subtitle: "")
+                PageHeading(title: "PHP", subtitle: "Default runtime and extensions.")
                 Spacer()
                 PHPVersionPicker().labelsHidden().controlSize(.small).frame(width: 200)
             }
@@ -70,7 +70,7 @@ struct DatabaseView: View {
     var body: some View {
         WorkspacePage {
             HStack {
-                PageHeading(title: "Database", subtitle: "")
+                PageHeading(title: "Database", subtitle: "Connections, backups and engine selection.")
                 Spacer()
                 Button("Open Adminer", systemImage: "arrow.up.right") {
                     model.openURL(model.toolURL("adminer") + (state.postgreSQL ? "/?pgsql=127.0.0.1%3A\(model.configuration.ports.postgresqlListen)&username=devstack&db=postgres" : "/?server=127.0.0.1%3A\(model.configuration.ports.mysqlListen)&username=root"))
@@ -152,7 +152,7 @@ struct MailpitView: View {
     @StateObject private var state = MailpitViewState()
     var body: some View {
         WorkspacePage {
-            PageHeading(title: "Mail Inbox", subtitle: "")
+            PageHeading(title: "Mail Inbox", subtitle: "Captured outgoing mail.")
             SurfacePanel {
                 HStack(spacing: 8) {
                     FeatureIcon(symbol: "tray")
@@ -202,7 +202,7 @@ struct LogsView: View {
         GeometryReader { geometry in
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                PageHeading(title: "Logs", subtitle: "")
+                PageHeading(title: "Logs", subtitle: "Service output.")
                 Spacer()
                 Button { NSWorkspace.shared.activateFileViewerSelecting([model.paths.logs]) } label: { Image(systemName: "folder") }.buttonStyle(DevStackGlassButtonStyle()).help("Show logs folder").accessibilityLabel("Show logs folder")
                 Button(action: refresh) { Image(systemName: "arrow.clockwise") }.buttonStyle(DevStackGlassButtonStyle()).help("Refresh logs").accessibilityLabel("Refresh logs")
@@ -267,7 +267,7 @@ struct DoctorView: View {
     var body: some View {
         WorkspacePage {
             HStack {
-                PageHeading(title: "Doctor", subtitle: "")
+                PageHeading(title: "Doctor", subtitle: "Health checks and support bundle.")
                 Spacer()
                 Button("Export…", systemImage: "square.and.arrow.up", action: exportBundle).buttonStyle(DevStackGlassButtonStyle()).disabled(model.diagnosticReport == nil || model.isRunningDoctor)
                 Button {
@@ -275,7 +275,7 @@ struct DoctorView: View {
                 } label: {
                     if model.isRunningDoctor { HStack { ProgressView().controlSize(.mini); Text("Checking…") } }
                     else { Label("Run Checks", systemImage: "stethoscope") }
-                }.buttonStyle(DevStackGlassButtonStyle()).disabled(model.isRunningDoctor)
+                }.buttonStyle(DevStackProminentButtonStyle()).disabled(model.isRunningDoctor)
             }
             if model.isRunningDoctor {
                 HStack(spacing: 10) {
@@ -350,7 +350,7 @@ struct SettingsView: View {
     @StateObject private var state = SettingsViewState()
     var body: some View {
         WorkspacePage {
-            PageHeading(title: "Settings", subtitle: "")
+            PageHeading(title: "Settings", subtitle: "Appearance, helper, ports and runtimes.")
             SurfacePanel {
                 HStack {
                     Label("Appearance", systemImage: "circle.lefthalf.filled").fontWeight(.medium)
@@ -529,13 +529,18 @@ private struct PortsEditor: View {
                 .frame(width: 84)
                 .disabled(model.hasRunningServices || model.isBusy)
             if let value = UInt16(text.wrappedValue), value > 0, value < 1024 {
-                Text(verbatim: isWebPort
-                    ? "Uses the helper · site URLs drop the port"
-                    : "Uses the helper · forwards to \(String(fallback))")
+                Text(verbatim: helperHint(publicPort: value, fallback: fallback, isWebPort: isWebPort))
                     .font(.system(size: 10)).foregroundStyle(.orange)
             }
             Spacer()
         }
+    }
+
+    private func helperHint(publicPort: UInt16, fallback: UInt16, isWebPort: Bool) -> String {
+        if isWebPort, publicPort == 80 || publicPort == 443 {
+            return "Uses the helper · site URLs drop the port"
+        }
+        return "Uses the helper · forwards to \(fallback)"
     }
 
     private func useDevPorts() {

@@ -7,7 +7,7 @@ struct DashboardView: View {
     var body: some View {
         WorkspacePage {
             HStack {
-                PageHeading(title: "Dashboard", subtitle: "")
+                PageHeading(title: "Dashboard", subtitle: "Services, sites and tools at a glance.")
                 Spacer()
             }
 
@@ -37,7 +37,7 @@ struct DashboardView: View {
                     if !model.configuration.sites.isEmpty {
                         Button("View All") { model.selectedSection = .sites }.buttonStyle(.borderless)
                     }
-                    Button { model.requestNewSite() } label: { Label("New Site", systemImage: "plus") }.buttonStyle(DevStackGlassButtonStyle())
+                    Button { model.requestNewSite() } label: { Label("New Site", systemImage: "plus") }.buttonStyle(DevStackProminentButtonStyle())
                 }
                 if model.configuration.sites.isEmpty {
                     HStack(spacing: 8) {
@@ -93,14 +93,15 @@ private struct ServiceControl<Selector: View>: View {
     private var state: ServiceState { model.serviceState(service) }
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: service.icon).foregroundStyle(.secondary).frame(width: 18)
-            Text(title).font(.system(size: 12, weight: .medium)).frame(width: 78, alignment: .leading)
+        HStack(spacing: 7) {
+            Image(systemName: service.icon).foregroundStyle(.secondary).frame(width: 16)
+            Text(title).font(.system(size: 12, weight: .medium)).frame(width: 68, alignment: .leading)
             selector.pickerStyle(.menu).labelsHidden().controlSize(.small)
-                .disabled(model.isBusy).frame(width: 175, alignment: .leading)
-            Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                .disabled(model.isBusy).frame(width: 140, alignment: .leading)
+            Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                .layoutPriority(-1)
             Spacer(minLength: 4)
-            StatusBadge(title: state.phase.rawValue.capitalized, color: state.phase.color, dot: true, dotColor: state.phase.dotColor).frame(width: 76, alignment: .trailing)
+            StatusBadge(title: state.phase.rawValue.capitalized, color: state.phase.color, dot: true, dotColor: state.phase.dotColor).frame(minWidth: 64, alignment: .trailing)
             Button(state.phase == .running ? "Stop" : "Start") {
                 Task {
                     if state.phase == .running { await model.stopService(service) }

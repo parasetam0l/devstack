@@ -60,11 +60,11 @@ struct RootView: View {
                             Text(model.isBusy ? "Working…" : model.stackIsRunning ? "Stop Stack" : "Start Stack")
                         }
                     }
-                    .buttonStyle(DevStackGlassButtonStyle())
+                    .buttonStyle(DevStackProminentButtonStyle())
                     .disabled(model.isBusy)
-                    .help("Start or stop the stack")
+                    .help(model.stackIsRunning ? "Stop all services" : "Start with current ports; 8080/8443 work without the helper")
                     if model.hasRunningServices && !model.stackIsRunning {
-                        Button("Stop Stack", systemImage: "stop.fill") { Task { await model.stopAll() } }
+                        Button("Stop All", systemImage: "stop.fill") { Task { await model.stopAll() } }
                             .buttonStyle(DevStackGlassButtonStyle())
                             .disabled(model.isBusy)
                     }
@@ -159,12 +159,14 @@ struct HelperNoticeSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 Image(systemName: "lock.shield.fill").font(.system(size: 22)).foregroundStyle(DevStackDesign.accent)
-                Text(blocking ? "Approve the helper to start" : "DevStack needs a helper")
+                Text(blocking ? "Helper needed for this config" : "Optional helper")
                     .font(.system(size: 15, weight: .semibold))
             }
-            Text("The background helper adds your site hostnames to the system hosts file and lets the web server answer on ports 80 and 443. Everything else keeps running on DevStack's own ports (8080 and 8443 by default).")
+            Text("High ports (8080/8443) with .localhost domains run without the helper. The helper is only needed for custom hostnames needing /etc/hosts entries and for privileged ports below 1024.")
                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Text("Approve DevStack in System Settings → General → Login Items & Extensions. The stack cannot start until the helper is ready.")
+            Text(blocking
+                ? "Current ports or hostnames need the helper. Switch to 8080/8443 with .localhost to run without it, or approve the helper."
+                : "Approve DevStack in System Settings → General → Login Items & Extensions to enable custom domains and 80/443.")
                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if case .unavailable(let reason) = model.helperSetupState {
                 Text(reason).font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
@@ -184,7 +186,7 @@ struct HelperNoticeSheet: View {
                         if suppress { await model.dismissHelperNotice() } else { model.helperNotice = nil }
                         await model.installHelper()
                     }
-                }.buttonStyle(DevStackGlassButtonStyle())
+                }.buttonStyle(DevStackProminentButtonStyle())
             }
         }
         .padding(20)

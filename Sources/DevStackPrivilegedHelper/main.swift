@@ -127,7 +127,8 @@ private final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtoc
                 localCATrusted: FileManager.default.fileExists(atPath: certificate.path),
                 version: "0.1.0",
                 dnsEnabled: self.dnsResponder.isEnabled,
-                dnsAnswerAddress: self.dnsResponder.answerAddress
+                dnsAnswerAddress: self.dnsResponder.answerAddress,
+                dnsFailure: self.dnsResponder.failureDescription
             )
             return try self.encoder.encode(status)
         }
@@ -198,19 +199,29 @@ private final class LoopbackForwarder: @unchecked Sendable {
             // A LAN binding covers loopback too, so it replaces the loopback binding for that port.
             bindings[entry.publicPort] = ForwardBinding(port: entry.publicPort, upstream: entry.upstreamPort, localSourcesOnly: true)
         }
-        for binding in bindings.values {
-            if binding.localSourcesOnly {
-                try startListener(host: "0.0.0.0", binding: binding)
-            } else {
-                for host in ["127.0.0.1", "::1"] {
-                    try startListener(host: host, binding: binding)
+        guard !bindings.isEmpty else { return }
+        var started: [NWListener] = []
+        do {
+            for binding in bindings.values {
+                if binding.localSourcesOnly {
+                    started.append(try makeListener(host: "0.0.0.0", binding: binding))
+                } else {
+                    for host in ["127.0.0.1", "::1"] {
+                        started.append(try makeListener(host: host, binding: binding))
+                    }
                 }
             }
+        } catch {
+            started.forEach { $0.cancel() }
+            listeners.removeAll()
+            isEnabled = false
+            throw error
         }
+        listeners = started
         isEnabled = true
     }
 
-    private func startListener(host: String, binding: ForwardBinding) throws {
+    private func makeListener(host: String, binding: ForwardBinding) throws -> NWListener {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: binding.port)!)
         let listener = try NWListener(using: parameters)
@@ -222,7 +233,11 @@ private final class LoopbackForwarder: @unchecked Sendable {
             self?.accept(incoming, upstreamPort: binding.upstream)
         }
         listener.start(queue: queue)
-        listeners.append(listener)
+        return listener
+    }
+
+    private func startListener(host: String, binding: ForwardBinding) throws {
+        listeners.append(try makeListener(host: host, binding: binding))
     }
 
     private static func hostDescription(_ endpoint: NWEndpoint) -> String {

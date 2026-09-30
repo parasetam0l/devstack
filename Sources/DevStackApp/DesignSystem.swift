@@ -266,3 +266,14 @@ struct DevStackGlassButtonStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
     }
 }
+
+struct DevStackProminentButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 13).padding(.vertical, 5)
+            .glassEffect(.regular.tint(DevStackDesign.accent.opacity(0.35)).interactive(), in: .capsule)
+            .opacity(enabled ? 1 : 0.5)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+    }
+}

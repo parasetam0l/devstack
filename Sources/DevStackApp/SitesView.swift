@@ -10,10 +10,10 @@ struct SitesView: View {
     var body: some View {
         WorkspacePage {
             HStack(alignment: .center) {
-                PageHeading(title: "Sites", subtitle: "")
+                PageHeading(title: "Sites", subtitle: "A local domain and a dedicated PHP pool for every project.")
                 Spacer()
                 Button { state.editingSite = newSite() } label: { Label("New Site", systemImage: "plus") }
-                    .buttonStyle(DevStackGlassButtonStyle()).controlSize(.small)
+                    .buttonStyle(DevStackProminentButtonStyle()).controlSize(.small)
             }
             if model.configuration.sites.isEmpty {
                 SurfacePanel {

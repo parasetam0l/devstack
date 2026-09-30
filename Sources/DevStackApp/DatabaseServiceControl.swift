@@ -33,16 +33,17 @@ struct DatabaseServiceControl: View {
     }
 
     private func databaseRow<Selector: View>(title: String, service: ServiceKind?, endpoint: String, @ViewBuilder selector: () -> Selector) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "externaldrive").foregroundStyle(.secondary).frame(width: 18)
-            Text(title).fontWeight(.medium).frame(width: 78, alignment: .leading)
-            selector().pickerStyle(.menu).labelsHidden().controlSize(.small).disabled(model.isBusy).frame(width: 175, alignment: .leading)
-            Text(service == nil ? "Excluded from stack" : endpoint).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+        HStack(spacing: 7) {
+            Image(systemName: "externaldrive").foregroundStyle(.secondary).frame(width: 16)
+            Text(title).fontWeight(.medium).frame(width: 68, alignment: .leading)
+            selector().pickerStyle(.menu).labelsHidden().controlSize(.small).disabled(model.isBusy).frame(width: 140, alignment: .leading)
+            Text(service == nil ? "Excluded from stack" : endpoint).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                .layoutPriority(-1)
             Spacer(minLength: 4)
             if let service {
                 let running = model.serviceIsRunning(service)
                 let state = model.serviceState(service)
-                StatusBadge(title: state.phase.rawValue.capitalized, color: state.phase.color, dot: true, dotColor: state.phase.dotColor).frame(width: 76, alignment: .trailing)
+                StatusBadge(title: state.phase.rawValue.capitalized, color: state.phase.color, dot: true, dotColor: state.phase.dotColor).frame(minWidth: 64, alignment: .trailing)
                 Button(running ? "Stop" : "Start") {
                     Task { if running { await model.stopService(service) } else { await model.startService(service) } }
                 }.buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy || !model.runtimeIsAvailable(service.runtimeID))

@@ -122,13 +122,14 @@ public struct DevStackDoctor: Sendable {
 
     private func helperStatusResults(_ status: PrivilegedHelperStatus?, context: DiagnosticContext) -> [DiagnosticResult] {
         guard let status else { return [] }
+        let forwardingNeedsHelper = !context.ports.forwardings.isEmpty
         return [
             .init(
                 id: "helper-port-forwarding",
                 title: "Privileged port forwarding",
-                severity: status.portForwardingEnabled ? .info : .warning,
-                evidence: status.portForwardingEnabled ? "Loopback forwarding is enabled." : "Disabled",
-                remediation: status.portForwardingEnabled ? nil : "Start DevStack to enable its loopback-only forwarders."
+                severity: status.portForwardingEnabled ? .info : (forwardingNeedsHelper ? .warning : .info),
+                evidence: status.portForwardingEnabled ? "Loopback forwarding is enabled." : (forwardingNeedsHelper ? "Privileged ports configured but no forwarder is active." : "No privileged ports configured; high ports work without forwarding."),
+                remediation: status.portForwardingEnabled ? nil : (forwardingNeedsHelper ? "Start DevStack to enable its loopback-only forwarders." : nil)
             ),
             .init(
                 id: "ca-trust",
@@ -140,13 +141,13 @@ public struct DevStackDoctor: Sendable {
             .init(
                 id: "local-dns",
                 title: "Local DNS server",
-                severity: status.dnsEnabled ? .info : (context.localNetworkAccess ? .warning : .info),
-                evidence: status.dnsEnabled
-                    ? "Answering DevStack hostnames with \(status.dnsAnswerAddress ?? "the LAN address"); other queries are forwarded to the system resolvers."
-                    : "Disabled.",
-                remediation: status.dnsEnabled ? nil : (context.localNetworkAccess
+                severity: status.dnsFailure != nil ? .error : (status.dnsEnabled ? .info : (context.localNetworkAccess ? .warning : .info)),
+                evidence: status.dnsFailure ?? (status.dnsEnabled
+                    ? "Answering DevStack hostnames with \(status.dnsAnswerAddress ?? "the LAN address") over UDP+TCP; other queries are forwarded to the system resolvers."
+                    : "Disabled."),
+                remediation: status.dnsFailure ?? (status.dnsEnabled ? nil : (context.localNetworkAccess
                     ? "Local network access is enabled in Settings but the helper is not answering on port 53."
-                    : "Enable Local network access in Settings to serve DevStack hostnames to phones.")
+                    : "Enable Local network access in Settings to serve DevStack hostnames to phones."))
             )
         ]
     }

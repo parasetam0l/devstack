@@ -22,7 +22,7 @@ enum HelperSetupState: Equatable {
 
     var message: String {
         switch self {
-        case .notInstalled: "Administrator approval enables the hosts file and ports 80 and 443."
+        case .notInstalled: "Optional for 8080/8443 and .localhost. Required for custom domains and ports 80/443."
         case .requiresApproval: "Approve DevStack in System Settings → General → Login Items & Extensions."
         case .connecting: "Connecting to the helper…"
         case .ready: "Authorized and responding."
@@ -294,7 +294,9 @@ final class AppModel: ObservableObject {
         isBusy = true
         defer { isBusy = false }
         await refreshHelperStatus()
-        guard helperInstalled else {
+        // High ports + .localhost run without the helper. Only block when
+        // privileged ports or custom hostnames actually need it.
+        if !helperInstalled, requiresHelperForCurrentConfig {
             helperNotice = .startBlocked
             return
         }
@@ -429,6 +431,17 @@ final class AppModel: ObservableObject {
 
     static let managementHostnames = ["phpmyadmin.localhost", "mailpit.localhost", "adminer.localhost", "postgresql.localhost"]
 
+    /// Hostnames that need /etc/hosts entries (.localhost resolves without edits).
+    var hostnamesNeedingHostsFile: [String] {
+        (configuration.sites.map(\.hostname) + Self.managementHostnames).filter { $0 != "localhost" && !$0.hasSuffix(".localhost") }
+    }
+
+    /// True when the current ports or hostnames need the privileged helper.
+    /// High ports with .localhost domains run without it.
+    var requiresHelperForCurrentConfig: Bool {
+        configuration.ports.requiresHelper || !hostnamesNeedingHostsFile.isEmpty
+    }
+
     var localNetworkAddress: String? { LocalNetwork.primaryIPv4Address() }
 
     var localNetworkLanEntries: [PortForwardingEntry] {
@@ -441,10 +454,14 @@ final class AppModel: ObservableObject {
     /// Keeps the helper's host mappings, loopback/LAN forwarding and local DNS in
     /// sync with the current configuration.
     private func applyPrivilegedNetworking(hostnames: [String]) async throws {
+        let forwardings = configuration.ports.forwardings
+        let lan = localNetworkLanEntries
+        // Don't report forwarding as enabled when there is nothing to forward.
+        let forwardingEnabled = !forwardings.isEmpty || !lan.isEmpty
         try await helper.setPortForwarding(PortForwardingConfiguration(
-            enabled: true,
-            entries: configuration.ports.forwardings,
-            lanEntries: localNetworkLanEntries))
+            enabled: forwardingEnabled,
+            entries: forwardings,
+            lanEntries: lan))
         let answerAddress = localNetworkAddress ?? ""
         try await helper.setDNSConfiguration(DNSConfiguration(
             enabled: configuration.localNetworkAccess && !answerAddress.isEmpty,
@@ -479,7 +496,7 @@ final class AppModel: ObservableObject {
         guard !isReviewMode else { return }
         guard helper.canAuthenticate else {
             helperInstalled = false; helperStatus = nil
-            helperSetupState = .unavailable("System integration requires a Developer ID signed release. This build cannot manage the hosts file or privileged ports.")
+            helperSetupState = .unavailable("Ad-hoc build: helper unavailable. High ports with .localhost still work; custom domains and 80/443 need a Developer ID signed release.")
             return
         }
         switch helper.registrationStatus {
@@ -991,7 +1008,7 @@ final class AppModel: ObservableObject {
         isBusy = true
         defer { isBusy = false }
         await refreshHelperStatus()
-        guard helperInstalled else {
+        if !helperInstalled, requiresHelperForCurrentConfig {
             helperNotice = .startBlocked
             return
         }

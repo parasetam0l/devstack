@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-/// A tiny UDP DNS server for DevStack hostnames.
+/// A tiny DNS server for DevStack hostnames (UDP + TCP on port 53).
 ///
 /// Managed hostnames answer directly with the Mac's LAN address (A records;
 /// AAAA and everything else answer NODATA so remote clients use IPv4). Every
@@ -11,7 +11,8 @@ import Network
 public final class LocalDNSResponder: @unchecked Sendable {
     private let queue = DispatchQueue(label: "app.devstack.desktop.dns")
     private let port: NWEndpoint.Port
-    private var listener: NWListener?
+    private var udpListener: NWListener?
+    private var tcpListener: NWListener?
     private var failure: String?
     private var configuration = DNSConfiguration(enabled: false)
     private var managedNames: Set<String> = []
@@ -21,12 +22,12 @@ public final class LocalDNSResponder: @unchecked Sendable {
         self.port = NWEndpoint.Port(rawValue: port) ?? 53
     }
 
-    public var isEnabled: Bool { listener != nil && failure == nil }
+    public var isEnabled: Bool { (udpListener != nil || tcpListener != nil) && failure == nil }
     public var answerAddress: String? { isEnabled ? configuration.answerAddress : nil }
     public var failureDescription: String? { failure }
-    public var listeningPort: UInt16? { listener?.port?.rawValue }
+    public var listeningPort: UInt16? { udpListener?.port?.rawValue ?? tcpListener?.port?.rawValue }
 
-    /// Applies the configuration. The listener is kept while the service stays
+    /// Applies the configuration. Listeners are kept while the service stays
     /// enabled so changing hostnames never races a rebind of port 53.
     public func apply(_ configuration: DNSConfiguration, upstreams: [String]) throws {
         self.configuration = configuration
@@ -36,61 +37,161 @@ public final class LocalDNSResponder: @unchecked Sendable {
             stop()
             return
         }
-        guard listener == nil else {
+        if udpListener != nil || tcpListener != nil {
             failure = nil
             return
         }
-        let parameters = NWParameters.udp
+        do {
+            let udp = try makeListener(proto: .udp)
+            let tcp = try makeListener(proto: .tcp)
+            self.udpListener = udp
+            self.tcpListener = tcp
+            self.failure = nil
+        } catch {
+            stop()
+            self.failure = error.localizedDescription
+            throw error
+        }
+    }
+
+    public func stop() {
+        udpListener?.cancel()
+        tcpListener?.cancel()
+        udpListener = nil
+        tcpListener = nil
+        failure = nil
+    }
+
+    private enum Proto { case udp, tcp }
+
+    private func makeListener(proto: Proto) throws -> NWListener {
+        let parameters: NWParameters = proto == .udp ? .udp : .tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "0.0.0.0", port: port)
         let listener = try NWListener(using: parameters)
         listener.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state {
-                self?.queue.async { self?.failure = "\(error)" }
+                self?.queue.async { [weak self] in self?.failure = "\(error)" }
+            } else if case .cancelled = state {
+                // Intentional stop clears in stop(); unexpected cancel surfaces.
+                self?.queue.async { [weak self] in
+                    guard let self, self.udpListener != nil || self.tcpListener != nil else { return }
+                    if self.failure == nil { self.failure = "DNS listener cancelled unexpectedly." }
+                }
             }
         }
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.accept(connection)
+        if proto == .udp {
+            listener.newConnectionHandler = { [weak self] connection in self?.acceptUDP(connection) }
+        } else {
+            listener.newConnectionHandler = { [weak self] connection in self?.acceptTCP(connection) }
         }
         listener.start(queue: queue)
-        self.listener = listener
+        return listener
     }
 
-    public func stop() {
-        listener?.cancel()
-        listener = nil
-        failure = nil
-    }
+    // MARK: - UDP (one datagram per receive, loop for reuse)
 
-    private func accept(_ connection: NWConnection) {
+    private func acceptUDP(_ connection: NWConnection) {
         guard LocalNetwork.isLocalSource(Self.hostDescription(connection.endpoint)) else {
             connection.cancel()
             return
         }
         connection.start(queue: queue)
+        receiveUDP(on: connection)
+    }
+
+    private func receiveUDP(on connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, _, error in
-            guard let self, let data, !data.isEmpty, error == nil else {
+            guard let self else { connection.cancel(); return }
+            if error != nil {
+                // ECONNRESET etc. on UDP flow: drop this flow, listener stays up.
                 connection.cancel()
                 return
             }
-            self.respond(to: data, on: connection)
+            guard let data, !data.isEmpty else {
+                // Empty read: keep waiting for a real query.
+                self.receiveUDP(on: connection)
+                return
+            }
+            self.respondUDP(to: data, on: connection)
         }
     }
 
-    private func respond(to query: Data, on connection: NWConnection) {
+    private func respondUDP(to query: Data, on connection: NWConnection) {
         guard let question = DNSMessage.parseQuestion(query) else {
-            forward(query, upstreamIndex: 0, on: connection)
+            forward(query, upstreamIndex: 0, on: connection, isTCP: false)
             return
         }
         if managedNames.contains(question.name) {
-            send(DNSMessage.localResponse(for: question, address: configuration.answerAddress), on: connection)
+            sendUDP(DNSMessage.localResponse(for: question, address: configuration.answerAddress), on: connection)
             return
         }
-        forward(query, upstreamIndex: 0, on: connection)
+        forward(query, upstreamIndex: 0, on: connection, isTCP: false)
     }
 
-    private func forward(_ query: Data, upstreamIndex: Int, on connection: NWConnection) {
+    private func sendUDP(_ response: Data, on connection: NWConnection) {
+        connection.send(content: response, completion: .contentProcessed { [weak self] _ in
+            // Keep the flow open for further queries instead of one-shot cancel.
+            self?.receiveUDP(on: connection)
+        })
+    }
+
+    // MARK: - TCP (2-byte length prefix, loop for pipelining)
+
+    private func acceptTCP(_ connection: NWConnection) {
+        guard LocalNetwork.isLocalSource(Self.hostDescription(connection.endpoint)) else {
+            connection.cancel()
+            return
+        }
+        connection.start(queue: queue)
+        receiveTCPLength(on: connection)
+    }
+
+    private func receiveTCPLength(on connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 2, maximumLength: 2) { [weak self] data, _, _, error in
+            guard let self else { connection.cancel(); return }
+            guard error == nil, let data, data.count == 2 else { connection.cancel(); return }
+            let length = Int(data[0]) << 8 | Int(data[1])
+            guard length > 0, length <= 65_535 else { connection.cancel(); return }
+            self.receiveTCPBody(length: length, on: connection)
+        }
+    }
+
+    private func receiveTCPBody(length: Int, on connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] data, _, _, error in
+            guard let self else { connection.cancel(); return }
+            guard error == nil, let data, data.count == length else { connection.cancel(); return }
+            self.respondTCP(to: data, on: connection)
+        }
+    }
+
+    private func respondTCP(to query: Data, on connection: NWConnection) {
+        guard let question = DNSMessage.parseQuestion(query) else {
+            forward(query, upstreamIndex: 0, on: connection, isTCP: true)
+            return
+        }
+        if managedNames.contains(question.name) {
+            sendTCP(DNSMessage.localResponse(for: question, address: configuration.answerAddress), on: connection)
+            return
+        }
+        forward(query, upstreamIndex: 0, on: connection, isTCP: true)
+    }
+
+    private func sendTCP(_ response: Data, on connection: NWConnection) {
+        var framed = Data(count: 2)
+        framed[0] = UInt8((response.count >> 8) & 0xFF)
+        framed[1] = UInt8(response.count & 0xFF)
+        framed.append(response)
+        connection.send(content: framed, completion: .contentProcessed { [weak self] _ in
+            self?.receiveTCPLength(on: connection)
+        })
+    }
+
+    // MARK: - Upstream forwarding (always UDP upstream)
+
+    private func forward(_ query: Data, upstreamIndex: Int, on connection: NWConnection, isTCP: Bool) {
         guard upstreamIndex < upstreams.count else {
-            send(DNSMessage.failureResponse(for: DNSMessage.parseQuestion(query), rcode: DNSMessage.rcodeServerFailure), on: connection)
+            let failure = DNSMessage.failureResponse(for: DNSMessage.parseQuestion(query), rcode: DNSMessage.rcodeServerFailure)
+            if isTCP { sendTCP(failure, on: connection) } else { sendUDP(failure, on: connection) }
             return
         }
         let upstream = NWConnection(host: NWEndpoint.Host(upstreams[upstreamIndex]), port: 53, using: .udp)
@@ -98,27 +199,24 @@ public final class LocalDNSResponder: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard state.claim() else { return }
             upstream.cancel()
-            self?.forward(query, upstreamIndex: upstreamIndex + 1, on: connection)
+            self?.forward(query, upstreamIndex: upstreamIndex + 1, on: connection, isTCP: isTCP)
         }
         upstream.stateUpdateHandler = { [weak self] update in
             guard case .ready = update else { return }
-            upstream.send(content: query, completion: .contentProcessed { _ in
-                upstream.receive(minimumIncompleteLength: 1, maximumLength: 65_535) { data, _, _, error in
-                    guard let self, state.claim() else { return }
+            upstream.send(content: query, completion: .contentProcessed { [weak self] _ in
+                upstream.receive(minimumIncompleteLength: 1, maximumLength: 65_535) { [weak self] data, _, _, error in
+                    guard state.claim() else { return }
+                    guard let strongSelf = self else { return }
                     if let data, !data.isEmpty, error == nil {
-                        self.send(data, on: connection)
+                        if isTCP { strongSelf.sendTCP(data, on: connection) } else { strongSelf.sendUDP(data, on: connection) }
                     } else {
-                        self.forward(query, upstreamIndex: upstreamIndex + 1, on: connection)
+                        strongSelf.forward(query, upstreamIndex: upstreamIndex + 1, on: connection, isTCP: isTCP)
                     }
                     upstream.cancel()
                 }
             })
         }
         upstream.start(queue: queue)
-    }
-
-    private func send(_ response: Data, on connection: NWConnection) {
-        connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
     }
 
     private static func hostDescription(_ endpoint: NWEndpoint) -> String {

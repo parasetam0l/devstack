@@ -36,14 +36,32 @@ public struct PrivilegedHelperStatus: Codable, Hashable, Sendable {
     public var version: String
     public var dnsEnabled: Bool
     public var dnsAnswerAddress: String?
+    public var dnsFailure: String?
 
-    public init(hostMappingsInstalled: Bool, portForwardingEnabled: Bool, localCATrusted: Bool, version: String, dnsEnabled: Bool = false, dnsAnswerAddress: String? = nil) {
+    public init(hostMappingsInstalled: Bool, portForwardingEnabled: Bool, localCATrusted: Bool, version: String, dnsEnabled: Bool = false, dnsAnswerAddress: String? = nil, dnsFailure: String? = nil) {
         self.hostMappingsInstalled = hostMappingsInstalled
         self.portForwardingEnabled = portForwardingEnabled
         self.localCATrusted = localCATrusted
         self.version = version
         self.dnsEnabled = dnsEnabled
         self.dnsAnswerAddress = dnsAnswerAddress
+        self.dnsFailure = dnsFailure
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case hostMappingsInstalled, portForwardingEnabled, localCATrusted, version
+        case dnsEnabled, dnsAnswerAddress, dnsFailure
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.hostMappingsInstalled = try c.decode(Bool.self, forKey: .hostMappingsInstalled)
+        self.portForwardingEnabled = try c.decode(Bool.self, forKey: .portForwardingEnabled)
+        self.localCATrusted = try c.decode(Bool.self, forKey: .localCATrusted)
+        self.version = try c.decode(String.self, forKey: .version)
+        self.dnsEnabled = try c.decodeIfPresent(Bool.self, forKey: .dnsEnabled) ?? false
+        self.dnsAnswerAddress = try c.decodeIfPresent(String.self, forKey: .dnsAnswerAddress)
+        self.dnsFailure = try c.decodeIfPresent(String.self, forKey: .dnsFailure)
     }
 }
 

@@ -11,7 +11,7 @@ struct SSLView: View {
     var body: some View {
         WorkspacePage {
             HStack {
-                PageHeading(title: "SSL", subtitle: "")
+                PageHeading(title: "SSL", subtitle: "Local CA and site certificates.")
                 Spacer()
                 Button("Issue Certificate…", systemImage: "plus") { state.hostname = ""; state.issuing = true }.buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy)
                 Button { Task { await model.refreshCertificates() } } label: { Image(systemName: "arrow.clockwise") }
