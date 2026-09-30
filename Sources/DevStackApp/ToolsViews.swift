@@ -638,43 +638,47 @@ private struct PortsDraft: Equatable {
 private struct LocalNetworkEditor: View {
     @EnvironmentObject private var model: AppModel
 
+    private var running: Bool { model.helperStatus?.dnsEnabled == true }
+
     var body: some View {
-        SurfacePanel(title: "Local network", subtitle: "Phones and other devices can use this Mac as DNS for DevStack hostnames. All other domains keep resolving through your normal DNS servers.") {
+        SurfacePanel(title: "Local DNS", subtitle: "Phones and other devices can use this Mac as DNS for DevStack hostnames. All other domains keep resolving through your normal DNS servers.") {
             VStack(alignment: .leading, spacing: 8) {
-                if let address = model.localNetworkAddress {
-                    CopyValueRow(label: "DNS address", value: address)
-                } else {
-                    Text("No active Wi-Fi or Ethernet connection.").font(.system(size: 12)).foregroundStyle(.secondary)
-                }
-                HStack {
-                    Label("Local network access", systemImage: "wifi.router").fontWeight(.medium)
+                HStack(spacing: 8) {
+                    Label("Serve DevStack hostnames", systemImage: "wifi.router").fontWeight(.medium)
                     Spacer()
+                    StatusBadge(
+                        title: model.helperInstalled ? (running ? "Running" : "Stopped") : "Unavailable",
+                        color: model.helperInstalled ? (running ? DevStackDesign.success : .secondary) : .secondary,
+                        dot: true,
+                        dotColor: running ? .green : nil
+                    )
                     Toggle("Local network access", isOn: Binding(
                         get: { model.configuration.localNetworkAccess },
                         set: { enabled in Task { await model.setLocalNetworkAccess(enabled) } }))
                         .labelsHidden().toggleStyle(.switch).controlSize(.small)
                         .disabled(model.isBusy || !model.helperInstalled)
+                        .accessibilityLabel("Local network access")
                 }
-                Text(message)
-                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                if model.configuration.localNetworkAccess, let site = model.configuration.sites.first {
-                    CopyValueRow(label: "Example", value: model.siteURL(site))
+                if let address = model.localNetworkAddress {
+                    CopyValueRow(label: "DNS address", value: address)
+                } else {
+                    Text("No active Wi-Fi or Ethernet connection.").font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+                if let message {
+                    Text(message).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                HStack {
+                    Button("Open Local DNS…", systemImage: "wifi.router") { model.selectedSection = .localDNS }
+                        .buttonStyle(DevStackGlassButtonStyle())
+                    Spacer()
                 }
             }
         }
     }
 
-    private var message: String {
-        guard model.helperInstalled else { return "Requires the helper (Settings → System integration)." }
-        guard let address = model.localNetworkAddress else { return "Connect to Wi-Fi or Ethernet, then enable access for your devices." }
-        if model.configuration.localNetworkAccess {
-            var text = "On each device: Wi-Fi settings → Configure DNS → Manual → \(address)."
-            text += " For HTTPS, open http://\(address):\(model.configuration.ports.webHTTPListen)/devstack-ca.crt on the device and trust the DevStack CA."
-            if model.configuration.sites.contains(where: { $0.hostname.hasSuffix(".localhost") }) {
-                text += " Names ending in .localhost resolve on the device itself, so use a .test domain (e.g. mysite.test) for sites you open from other devices."
-            }
-            return text
-        }
-        return "Enable to serve DevStack hostnames (and their web ports) to other devices on this network."
+    private var message: String? {
+        guard model.helperInstalled else { return "Requires the helper — set it up under System integration above." }
+        guard model.localNetworkAddress != nil else { return "Connect to Wi-Fi or Ethernet, then enable access for your devices." }
+        return nil
     }
 }
