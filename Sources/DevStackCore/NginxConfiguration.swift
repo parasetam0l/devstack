@@ -25,12 +25,12 @@ extension ConfigurationRenderer {
             if site.tlsEnabled {
                 return """
                 server {
-                    listen 127.0.0.1:8080; listen [::1]:8080;
+                    listen 127.0.0.1:\(ports.webHTTPListen); listen [::1]:\(ports.webHTTPListen);
                     server_name \(hostname);
-                    return 302 https://$host\(standardPortsEnabled ? "" : ":8443")$request_uri;
+                    return 302 https://$host\(ports.webHTTPS == 443 ? "" : ":\(ports.webHTTPS)")$request_uri;
                 }
                 server {
-                    listen 127.0.0.1:8443 ssl; listen [::1]:8443 ssl;
+                    listen 127.0.0.1:\(ports.webHTTPSListen) ssl; listen [::1]:\(ports.webHTTPSListen) ssl;
                     server_name \(hostname);
                     ssl_certificate \(try nginxQuote(paths.certificate(for: hostname).path));
                     ssl_certificate_key \(try nginxQuote(paths.privateKey(for: hostname).path));
@@ -40,7 +40,7 @@ extension ConfigurationRenderer {
             }
             return """
             server {
-                listen 127.0.0.1:8080; listen [::1]:8080;
+                listen 127.0.0.1:\(ports.webHTTPListen); listen [::1]:\(ports.webHTTPListen);
                 server_name \(hostname);
                 \(locations)
             }
@@ -48,15 +48,15 @@ extension ConfigurationRenderer {
         }
         servers.append("""
         server {
-            listen 127.0.0.1:8080; listen [::1]:8080;
+            listen 127.0.0.1:\(ports.webHTTPListen); listen [::1]:\(ports.webHTTPListen);
             server_name phpmyadmin.localhost adminer.localhost mailpit.localhost;
-            return 302 https://$host\(standardPortsEnabled ? "" : ":8443")$request_uri;
+            return 302 https://$host\(ports.webHTTPS == 443 ? "" : ":\(ports.webHTTPS)")$request_uri;
         }
         """)
         for (host, runtimeID, pool) in [("phpmyadmin.localhost", "phpmyadmin-5.2.3", "management"), ("adminer.localhost", "adminer-6.1.1", "adminer")] {
             servers.append("""
             server {
-                listen 127.0.0.1:8443 ssl; listen [::1]:8443 ssl;
+                listen 127.0.0.1:\(ports.webHTTPSListen) ssl; listen [::1]:\(ports.webHTTPSListen) ssl;
                 server_name \(host);
                 ssl_certificate \(try nginxQuote(paths.certificate(for: host).path));
                 ssl_certificate_key \(try nginxQuote(paths.privateKey(for: host).path));
@@ -75,12 +75,12 @@ extension ConfigurationRenderer {
         }
         servers.append("""
         server {
-            listen 127.0.0.1:8443 ssl; listen [::1]:8443 ssl;
+            listen 127.0.0.1:\(ports.webHTTPSListen) ssl; listen [::1]:\(ports.webHTTPSListen) ssl;
             server_name mailpit.localhost;
             ssl_certificate \(try nginxQuote(paths.certificate(for: "mailpit.localhost").path));
             ssl_certificate_key \(try nginxQuote(paths.privateKey(for: "mailpit.localhost").path));
             location / {
-                proxy_pass http://127.0.0.1:8025;
+                proxy_pass http://127.0.0.1:\(ports.mailpitInboxListen);
                 proxy_set_header Host $host;
                 proxy_set_header X-Forwarded-Proto https;
             }

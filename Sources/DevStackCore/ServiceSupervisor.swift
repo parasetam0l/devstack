@@ -149,13 +149,21 @@ public actor ServiceSupervisor {
             return
         }
         transition(service, to: .stopping, pid: record.pid)
-        kill(record.pid, service == .nginx ? SIGQUIT : SIGTERM)
+        kill(record.pid, service == .nginx ? SIGQUIT : service == .postgresql18 ? SIGINT : SIGTERM)
         let deadline = Date().addingTimeInterval(timeout)
         while owns(record) && Date() < deadline {
             try? await Task.sleep(for: .milliseconds(100))
         }
         if owns(record) { kill(record.pid, SIGKILL) }
-        if let process = processes[service] { process.waitUntilExit() }
+        // Foundation's waitUntilExit can stall on a cooperative executor after
+        // repeated launches. Ownership polling above is the bounded exit check.
+        let killDeadline = Date().addingTimeInterval(2)
+        while owns(record) && Date() < killDeadline { try? await Task.sleep(for: .milliseconds(50)) }
+        if owns(record) {
+            states[service] = ServiceState(service: service, phase: .failed, pid: record.pid,
+                failure: ServiceFailure(message: "The service did not exit after its shutdown deadline.", recoveryAction: "Inspect its log before retrying Stop."))
+            return
+        }
         processes.removeValue(forKey: service)
         records.removeValue(forKey: service)
         persistRecords(for: service)

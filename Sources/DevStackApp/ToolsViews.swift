@@ -9,20 +9,20 @@ struct PHPView: View {
     var body: some View {
         WorkspacePage {
             HStack {
-                PageHeading(title: "PHP", subtitle: "Extensions apply to the selected version. Sites keep their own PHP settings.")
+                PageHeading(title: "PHP", subtitle: "")
                 Spacer()
-                PHPVersionPicker().labelsHidden().controlSize(.large).frame(width: 200)
+                PHPVersionPicker().labelsHidden().controlSize(.small).frame(width: 200)
             }
             runtimePanel(id: model.configuration.defaultPHPRuntimeID,
                 title: "PHP " + (model.availablePHPRuntimes.first { $0.id == model.configuration.defaultPHPRuntimeID }?.version ?? ""),
                 subtitle: "Default for new sites and Terminal", legacy: model.configuration.defaultPHPRuntimeID == "php-7.4")
             SurfacePanel(title: "Runtime details") {
                 DisclosureGroup("Sources, licenses, and build information") {
-                    VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 8) {
                         ForEach(model.runtimeManifests.filter { $0.id == model.configuration.defaultPHPRuntimeID || ($0.kind == .phpExtension && $0.dependencyPaths.contains(model.configuration.defaultPHPRuntimeID)) }) { manifest in
                             RuntimeDetailsRow(manifest: manifest)
                         }
-                    }.padding(.top, 12)
+                    }.padding(.top, 8)
                 }.font(.system(size: 12))
             }
         }
@@ -30,10 +30,10 @@ struct PHPView: View {
 
     private func runtimePanel(id: String, title: String, subtitle: String, legacy: Bool) -> some View {
         SurfacePanel {
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
                 FeatureIcon(symbol: "chevron.left.forwardslash.chevron.right", color: legacy ? .orange : DevStackDesign.accent)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title).font(.system(size: 16, weight: .semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 13, weight: .semibold))
                     Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -42,16 +42,16 @@ struct PHPView: View {
             if legacy {
                 InfoNotice(symbol: "exclamationmark.triangle", title: "Legacy compatibility", message: "PHP 7.4 no longer receives security fixes. Use it only for older projects that need it.", color: .orange)
             }
-            ForEach(Array([("xdebug", "Xdebug", "Step debugging on 127.0.0.1:9003. Off by default."), ("redis", "Redis", "PHP client extension for a Redis server."), ("imagick", "Imagick", "Image processing with bundled ImageMagick.")].enumerated()), id: \.offset) { index, item in
-                if index > 0 { Divider() }
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(item.1).font(.system(size: 13, weight: .medium))
-                        Text(model.extensionIsAvailable(item.0, runtimeID: id) ? item.2 : "Extension not installed for this runtime.").font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Toggle(item.1, isOn: extensionBinding(item.0, runtimeID: id)).labelsHidden().toggleStyle(.switch).controlSize(.small)
-                        .disabled(!model.runtimeIsAvailable(id) || !model.extensionIsAvailable(item.0, runtimeID: id) || model.isBusy)
+            VStack(spacing: 0) {
+                ForEach(Array([("xdebug", "Xdebug", "Step debugging · 127.0.0.1:9003"), ("redis", "Redis", "Redis client"), ("imagick", "Imagick", "ImageMagick image processing"), ("pgsql", "PostgreSQL", "Native PostgreSQL functions"), ("pdo_pgsql", "PDO PostgreSQL", "PostgreSQL driver for PDO")].enumerated()), id: \.offset) { index, item in
+                    if index > 0 { Divider() }
+                    HStack(spacing: 8) {
+                        Text(item.1).font(.system(size: 12, weight: .medium)).frame(width: 115, alignment: .leading)
+                        Text(model.extensionIsAvailable(item.0, runtimeID: id) ? item.2 : "Not installed for this runtime").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer()
+                        Toggle(item.1, isOn: extensionBinding(item.0, runtimeID: id)).labelsHidden().toggleStyle(.switch).controlSize(.small)
+                            .disabled(!model.runtimeIsAvailable(id) || !model.extensionIsAvailable(item.0, runtimeID: id) || model.isBusy)
+                    }.padding(.vertical, 6)
                 }
             }
         }
@@ -64,101 +64,87 @@ struct PHPView: View {
 struct DatabaseView: View {
     @EnvironmentObject private var model: AppModel
     @StateObject private var state = DatabaseViewState()
-    private var running: Bool { model.serviceIsRunning(model.configuration.selectedDatabase == .mysql57 ? .mysql57 : .mysql84) }
+    private var service: ServiceKind? { state.postgreSQL ? model.configuration.selectedPostgreSQL.service : model.configuration.selectedDatabase.service }
+    private var running: Bool { service.map(model.serviceIsRunning) ?? false }
+    private var webRunning: Bool { model.serviceIsRunning(.apache) || model.serviceIsRunning(.nginx) }
     var body: some View {
         WorkspacePage {
             HStack {
                 PageHeading(title: "Database", subtitle: "")
                 Spacer()
-                Button("Open Adminer", systemImage: "arrow.up.right") { model.openURL(model.toolURL("adminer")) }
-                    .buttonStyle(.glass).disabled((!model.serviceIsRunning(.apache) && !model.serviceIsRunning(.nginx)) || !running)
-                Button("Open phpMyAdmin", systemImage: "arrow.up.right") { model.openURL(model.toolURL("phpmyadmin")) }
-                    .buttonStyle(.glass).disabled((!model.serviceIsRunning(.apache) && !model.serviceIsRunning(.nginx)) || !running)
-            }
-            SurfacePanel {
-                HStack(spacing: 12) {
-                    FeatureIcon(symbol: "externaldrive")
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Database engine").font(.system(size: 15, weight: .semibold))
-                        Text("Each version keeps an independent data directory.").font(.system(size: 12)).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    StatusBadge(title: running ? "Running" : "Stopped", color: running ? DevStackDesign.accent : .secondary, dot: true)
-                }
-                Picker("Active engine", selection: databaseBinding) {
-                    ForEach(DatabaseEngine.allCases, id: \.rawValue) { engine in
-                        Text(engine.displayName + (!model.runtimeIsAvailable(engine.rawValue) ? " · Not installed" : engine.isLegacy ? " · Legacy" : ""))
-                            .tag(engine).disabled(!model.runtimeIsAvailable(engine.rawValue))
-                    }
-                }.disabled(model.isBusy)
-                if model.configuration.selectedDatabase.isLegacy {
-                    InfoNotice(symbol: "exclamationmark.triangle", title: "MySQL 5.7 is end-of-life", message: "Use this engine only when a legacy project needs it. Switching engines keeps your data files separate.", color: .orange)
+                Button("Open Adminer", systemImage: "arrow.up.right") {
+                    model.openURL(model.toolURL("adminer") + (state.postgreSQL ? "/?pgsql=127.0.0.1%3A\(model.configuration.ports.postgresqlListen)&username=devstack&db=postgres" : "/?server=127.0.0.1%3A\(model.configuration.ports.mysqlListen)&username=root"))
+                }.buttonStyle(DevStackGlassButtonStyle()).disabled(!webRunning || !running)
+                if !state.postgreSQL {
+                    Button("Open phpMyAdmin", systemImage: "arrow.up.right") { model.openURL(model.toolURL("phpmyadmin")) }
+                        .buttonStyle(DevStackGlassButtonStyle()).disabled(!webRunning || !running)
                 }
             }
-            SurfacePanel(title: "Local connection", subtitle: "Available to applications on this Mac.") {
-                CopyValueRow(label: "Host", value: "127.0.0.1")
-                CopyValueRow(label: "Port", value: "3306")
-                CopyValueRow(label: "Username", value: "root")
-                CopyValueRow(label: "Password", value: "root")
-                CopyValueRow(label: "Socket", value: model.paths.sockets.appendingPathComponent("mysql.sock").path)
+            DatabaseServiceControl()
+            Picker("Connection and backup tools", selection: $state.postgreSQL) {
+                Text("MySQL").tag(false)
+                Text("PostgreSQL").tag(true)
+            }.pickerStyle(.segmented).labelsHidden().frame(maxWidth: 240).disabled(model.isBusy)
+            SurfacePanel(title: "Connection") {
+                HStack(alignment: .top, spacing: 24) {
+                    VStack(spacing: 8) {
+                        CopyValueRow(label: "Host", value: "127.0.0.1")
+                        CopyValueRow(label: "Port", value: state.postgreSQL ? String(model.configuration.ports.postgresqlListen) : String(model.configuration.ports.mysqlListen))
+                        if state.postgreSQL { CopyValueRow(label: "Database", value: "postgres") }
+                    }.frame(maxWidth: .infinity)
+                    VStack(spacing: 8) {
+                        CopyValueRow(label: "Username", value: state.postgreSQL ? "devstack" : "root")
+                        CopyValueRow(label: "Password", value: state.postgreSQL ? "devstack" : "root")
+                    }.frame(maxWidth: .infinity)
+                }
+                DisclosureGroup("Unix socket") {
+                    CopyValueRow(label: "Socket", value: state.postgreSQL ? model.paths.sockets.path : model.paths.sockets.appendingPathComponent("mysql.sock").path).padding(.top, 6)
+                }.font(.system(size: 11))
+                if service == nil { Text("Choose a version to include this database in Start Stack.").font(.system(size: 11)).foregroundStyle(.secondary) }
             }
-            SurfacePanel(title: "Backup and restore", subtitle: "Import creates a timestamped backup before changing your data.") {
-                HStack(spacing: 12) {
-                    Button("Export Databases…", systemImage: "square.and.arrow.up", action: exportDatabase).buttonStyle(.glass).disabled(model.isBusy || !running)
-                    Button("Import SQL…", systemImage: "arrow.down.doc", action: chooseImportFile).buttonStyle(.glass).disabled(model.isBusy || !running)
+            SurfacePanel(title: "Backup and restore", subtitle: "Import creates a backup before changing your data.") {
+                HStack(spacing: 8) {
+                    Button("Export Databases…", systemImage: "square.and.arrow.up", action: exportDatabase).buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy || !running)
+                    Button("Import SQL…", systemImage: "arrow.down.doc", action: chooseImportFile).buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy || !running)
                     Spacer()
                     Button("Show Backups", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([model.paths.backups]) }.buttonStyle(.borderless)
                 }
-                if !running { Text("Start the stack to export or import databases.").font(.system(size: 11)).foregroundStyle(.secondary) }
-                if let backup = model.lastDatabaseBackup {
-                    Divider()
-                    CopyValueRow(label: "Last backup", value: backup.path)
-                }
+                if !running { Text("Start this database to export or import SQL.").font(.system(size: 11)).foregroundStyle(.secondary) }
+                if let backup = model.lastDatabaseBackup { Divider(); CopyValueRow(label: "Last backup", value: backup.path) }
             }
-            SurfacePanel {
+            if !state.postgreSQL, service != nil {
                 HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Reset database").font(.system(size: 13, weight: .medium))
-                        Text("Archive the current data directory and start fresh.").font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
+                    Text("Reset archives the data directory and starts fresh.").font(.system(size: 11)).foregroundStyle(.secondary)
                     Spacer()
-                    Button("Reset…", role: .destructive) { state.isConfirmingReset = true }.disabled(model.isBusy || !model.runtimeIsAvailable(model.configuration.selectedDatabase.rawValue))
-                }
+                    Button("Reset MySQL…", role: .destructive) { state.confirmingReset = true }.disabled(model.isBusy)
+                }.padding(.horizontal, 4)
             }
         }
-        .alert("Import SQL file?", isPresented: $state.isConfirmingImport, presenting: state.pendingImport) { url in
-            Button("Import", role: .destructive) { state.pendingImport = nil; Task { await model.importDatabase(from: url) } }
+        .alert("Import SQL file?", isPresented: $state.confirmingImport, presenting: state.pendingImport) { url in
+            Button("Import", role: .destructive) { state.pendingImport = nil; Task { await model.importDatabase(from: url, postgreSQL: state.postgreSQL) } }
             Button("Cancel", role: .cancel) { state.pendingImport = nil }
-        } message: { url in Text("DevStack creates a backup before importing \(url.lastPathComponent). Existing databases may be overwritten.") }
-        .alert("Reset \(model.configuration.selectedDatabase.displayName)?", isPresented: $state.isConfirmingReset) {
+        } message: { url in Text("DevStack backs up \(state.postgreSQL ? "PostgreSQL" : "MySQL") before importing \(url.lastPathComponent). The SQL file may overwrite existing data.") }
+        .alert("Reset \(model.configuration.selectedDatabase.displayName)?", isPresented: $state.confirmingReset) {
             Button("Back Up and Reset", role: .destructive) { Task { await model.resetDatabase() } }
             Button("Cancel", role: .cancel) {}
-        } message: { Text("DevStack backs up the current databases, stops the engine, archives its data directory, and creates a clean database with root/root credentials.") }
-        .alert("Use legacy MySQL 5.7?", isPresented: $state.isConfirmingLegacy) {
-            Button("Use MySQL 5.7", role: .destructive) { model.selectedDatabaseBinding = .mysql57 }
-            Button("Cancel", role: .cancel) {}
-        } message: { Text("MySQL 5.7 no longer receives security fixes. Its data stays separate from MySQL 8.4.") }
-    }
-    private var databaseBinding: Binding<DatabaseEngine> {
-        Binding(get: { model.selectedDatabaseBinding }, set: { engine in
-            if engine == .mysql57, model.configuration.selectedDatabase != .mysql57 { state.isConfirmingLegacy = true }
-            else { model.selectedDatabaseBinding = engine }
-        })
+        } message: { Text("DevStack backs up MySQL, archives its data directory, and creates a clean database with root/root credentials.") }
     }
     private func exportDatabase() {
-        let panel = NSSavePanel(); panel.nameFieldStringValue = model.databaseBackupFilename(); panel.allowedContentTypes = [UTType(filenameExtension: "sql") ?? .plainText]; panel.allowsOtherFileTypes = true
-        if panel.runModal() == .OK, let url = panel.url { Task { await model.exportDatabase(to: url) } }
+        let panel = NSSavePanel(); panel.nameFieldStringValue = model.databaseBackupFilename(postgreSQL: state.postgreSQL)
+        panel.allowedContentTypes = [UTType(filenameExtension: "sql") ?? .plainText]
+        if panel.runModal() == .OK, let url = panel.url { Task { await model.exportDatabase(to: url, postgreSQL: state.postgreSQL) } }
     }
     private func chooseImportFile() {
-        let panel = NSOpenPanel(); panel.allowedContentTypes = [UTType(filenameExtension: "sql") ?? .plainText, .plainText]; panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
-        if panel.runModal() == .OK, let url = panel.url { state.pendingImport = url; state.isConfirmingImport = true }
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [UTType(filenameExtension: "sql") ?? .plainText]; panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
+        if panel.runModal() == .OK, let url = panel.url { state.pendingImport = url; state.confirmingImport = true }
     }
 }
+
 @MainActor private final class DatabaseViewState: ObservableObject {
+    @Published var postgreSQL = false
     @Published var pendingImport: URL?
-    @Published var isConfirmingImport = false
-    @Published var isConfirmingReset = false
-    @Published var isConfirmingLegacy = false
+    @Published var confirmingImport = false
+    @Published var confirmingReset = false
 }
 
 struct MailpitView: View {
@@ -168,30 +154,36 @@ struct MailpitView: View {
         WorkspacePage {
             PageHeading(title: "Mail Inbox", subtitle: "")
             SurfacePanel {
-                HStack(spacing: 14) {
+                HStack(spacing: 8) {
                     FeatureIcon(symbol: "tray")
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Mailpit").font(.system(size: 16, weight: .semibold))
-                        Text("SMTP capture on port 1025.").font(.system(size: 12)).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Mailpit").font(.system(size: 13, weight: .semibold))
+                        Text(verbatim: "SMTP capture on port \(model.configuration.ports.mailpitSMTP).").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                     Spacer()
                     StatusBadge(title: model.serviceIsRunning(.mailpit) ? "Capturing mail" : "Stopped", color: model.serviceIsRunning(.mailpit) ? DevStackDesign.accent : .secondary, dot: true)
+                    Button(model.serviceIsRunning(.mailpit) ? "Stop" : "Start") {
+                        Task {
+                            if model.serviceIsRunning(.mailpit) { await model.stopService(.mailpit) }
+                            else { await model.startService(.mailpit) }
+                        }
+                    }.buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy)
+                        .accessibilityLabel(model.serviceIsRunning(.mailpit) ? "Stop Mailpit" : "Start Mailpit")
                 }
-                EmptyWorkspace(symbol: "envelope.open", title: "Captured messages", description: "Open the inbox to inspect messages, attachments, and headers.")
                 HStack {
-                    Button("Open Inbox", systemImage: "arrow.up.right") { model.openURL("http://127.0.0.1:8025") }
-                        .buttonStyle(.glassProminent).controlSize(.large).disabled(!model.serviceIsRunning(.mailpit))
+                    Button("Open Inbox", systemImage: "arrow.up.right") { model.openURL("http://127.0.0.1:\(model.configuration.ports.mailpitInboxListen)") }
+                        .buttonStyle(DevStackGlassButtonStyle()).controlSize(.small).disabled(!model.serviceIsRunning(.mailpit))
                     Spacer()
                     Button("Clear Inbox…", systemImage: "trash", role: .destructive) { state.isConfirmingClear = true }
                         .disabled(!model.serviceIsRunning(.mailpit) || model.isBusy)
                 }
             }
-            SurfacePanel(title: "Connect your app", subtitle: "No SMTP authentication or encryption is needed on loopback.") {
+            SurfacePanel(title: "SMTP connection") {
                 CopyValueRow(label: "SMTP host", value: "127.0.0.1")
-                CopyValueRow(label: "SMTP port", value: "1025")
-                CopyValueRow(label: "Inbox URL", value: "http://127.0.0.1:8025")
+                CopyValueRow(label: "SMTP port", value: String(model.configuration.ports.mailpitSMTP))
+                CopyValueRow(label: "Inbox URL", value: "http://127.0.0.1:\(model.configuration.ports.mailpitInboxListen)")
                 Divider()
-                Text("PHP mail() is configured automatically. Mailpit captures messages locally and does not relay them to recipients.")
+                Text("PHP mail() is configured automatically. SMTP requires no authentication or encryption.")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
             }
         }
@@ -208,21 +200,21 @@ struct LogsView: View {
     @StateObject private var state = LogsViewState()
     var body: some View {
         GeometryReader { geometry in
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                PageHeading(title: "Logs", subtitle: "Follow service output and find the details behind a failure.")
+                PageHeading(title: "Logs", subtitle: "")
                 Spacer()
-                Button { NSWorkspace.shared.activateFileViewerSelecting([model.paths.logs]) } label: { Image(systemName: "folder") }.buttonStyle(.glass).help("Show logs folder").accessibilityLabel("Show logs folder")
-                Button(action: refresh) { Image(systemName: "arrow.clockwise") }.buttonStyle(.glass).help("Refresh logs").accessibilityLabel("Refresh logs")
+                Button { NSWorkspace.shared.activateFileViewerSelecting([model.paths.logs]) } label: { Image(systemName: "folder") }.buttonStyle(DevStackGlassButtonStyle()).help("Show logs folder").accessibilityLabel("Show logs folder")
+                Button(action: refresh) { Image(systemName: "arrow.clockwise") }.buttonStyle(DevStackGlassButtonStyle()).help("Refresh logs").accessibilityLabel("Refresh logs")
             }
-            HStack(spacing: 14) {
+            HStack(spacing: 8) {
                 Picker("Service", selection: $model.selectedLogService) {
                     ForEach(ServiceKind.allCases) { service in Text(service.displayName).tag(service) }
                 }.frame(width: 205)
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField("Filter output", text: $state.filter).textFieldStyle(.plain)
-                }.padding(9).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9)).frame(maxWidth: 300)
+                }.padding(6).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9)).frame(maxWidth: 300)
                 Spacer()
                 Toggle("Live", isOn: $state.live).toggleStyle(.switch).controlSize(.small)
                 Button {
@@ -235,18 +227,18 @@ struct LogsView: View {
                     Text("\(model.selectedLogService.rawValue).log").font(.system(size: 11, design: .monospaced))
                     Spacer()
                     Text(state.live ? "LIVE" : "PAUSED").font(.system(size: 9, weight: .medium)).tracking(1)
-                }.foregroundStyle(.white.opacity(0.5)).padding(13).background(.white.opacity(0.025))
+                }.foregroundStyle(.white.opacity(0.5)).padding(8).background(.white.opacity(0.025))
                 Divider().overlay(.white.opacity(0.06))
                 ScrollView([.horizontal, .vertical]) {
-                    Text(filteredContents.isEmpty ? "No lines match your filter." : filteredContents)
-                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(.white.opacity(0.83)).lineSpacing(5)
-                        .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .topLeading).padding(18)
+                    Text(filteredContents.isEmpty ? (state.filter.isEmpty ? "No log output yet." : "No lines match your filter.") : filteredContents)
+                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(.white.opacity(0.83)).lineSpacing(2)
+                        .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .topLeading).padding(10)
                 }
-            }.background(Color(red: 0.055, green: 0.07, blue: 0.085), in: RoundedRectangle(cornerRadius: 14))
+            }.background(Color(white: 0.065), in: RoundedRectangle(cornerRadius: 14))
                 .clipShape(RoundedRectangle(cornerRadius: 14))
                 .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(.primary.opacity(0.08), lineWidth: 1) }
-        }.padding(28).frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
-        }.background(WorkspaceBackground())
+        }.padding(14).frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
+        }.background(WorkspaceBackground()).controlSize(.small).font(.system(size: 12))
         .onAppear(perform: refresh)
         .onChange(of: model.selectedLogService) { _, _ in refresh() }
         .task(id: state.live) {
@@ -275,26 +267,25 @@ struct DoctorView: View {
     var body: some View {
         WorkspacePage {
             HStack {
-                PageHeading(title: "Doctor", subtitle: "Understand your installation and get a clear next step when something needs attention.")
+                PageHeading(title: "Doctor", subtitle: "")
                 Spacer()
-                Button("Export…", systemImage: "square.and.arrow.up", action: exportBundle).buttonStyle(.glass).disabled(model.diagnosticReport == nil || model.isRunningDoctor)
+                Button("Export…", systemImage: "square.and.arrow.up", action: exportBundle).buttonStyle(DevStackGlassButtonStyle()).disabled(model.diagnosticReport == nil || model.isRunningDoctor)
                 Button {
                     Task { await model.runDoctor() }
                 } label: {
                     if model.isRunningDoctor { HStack { ProgressView().controlSize(.mini); Text("Checking…") } }
                     else { Label("Run Checks", systemImage: "stethoscope") }
-                }.buttonStyle(.glassProminent).disabled(model.isRunningDoctor)
+                }.buttonStyle(DevStackGlassButtonStyle()).disabled(model.isRunningDoctor)
             }
             if model.isRunningDoctor {
                 HStack(spacing: 10) {
                     ProgressView().controlSize(.small)
                     Text(model.diagnosticProgress ?? "Checking your stack…").font(.system(size: 12)).foregroundStyle(.secondary)
                     Spacer()
-                    Text("You can keep using DevStack.").font(.system(size: 11)).foregroundStyle(.tertiary)
-                }.padding(16).background(DevStackDesign.accent.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+                }.padding(10).background(DevStackDesign.accent.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
             }
             if let report = model.diagnosticReport {
-                HStack(spacing: 12) {
+                HStack(spacing: 8) {
                     diagnosticCount(report, severity: .info, title: "Passed")
                     diagnosticCount(report, severity: .warning, title: "Warnings")
                     diagnosticCount(report, severity: .error, title: "Errors")
@@ -306,21 +297,30 @@ struct DoctorView: View {
                 }
                 let results = report.results.filter { !state.attentionOnly || $0.severity != .info }
                 if results.isEmpty { EmptyWorkspace(symbol: "checkmark.seal", title: "No issues in this view", description: "All checks passed. Turn off the filter to see the full report.") }
-                ForEach(results) { result in
-                    SurfacePanel {
-                        HStack(alignment: .top, spacing: 12) {
-                            Image(systemName: result.severity.symbol).font(.system(size: 18)).foregroundStyle(result.severity.color)
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(result.title).font(.system(size: 13, weight: .semibold))
-                                Text(result.evidence).font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
-                                if let remediation = result.remediation {
-                                    Text(remediation).font(.system(size: 12)).foregroundStyle(result.severity.color)
+                SurfacePanel {
+                    VStack(spacing: 0) {
+                        ForEach(Array(results.enumerated()), id: \.element.id) { index, result in
+                            if index > 0 { Divider() }
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: result.severity.symbol).foregroundStyle(result.severity.color).frame(width: 16).padding(.top, 2)
+                                DisclosureGroup {
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(result.evidence).foregroundStyle(.secondary).textSelection(.enabled)
+                                        if let remediation = result.remediation { Text(remediation).foregroundStyle(result.severity.color) }
+                                    }.font(.system(size: 11)).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 4)
+                                } label: {
+                                    HStack {
+                                        Text(result.title).font(.system(size: 12, weight: .medium))
+                                        Spacer()
+                                        Text(result.severity == .info ? "Passed" : result.severity == .warning ? "Warning" : "Error")
+                                            .font(.system(size: 10)).foregroundStyle(result.severity.color)
+                                    }
                                 }
-                            }
+                            }.padding(.vertical, 6)
                         }
                     }
                 }
-            } else {
+            } else if !model.isRunningDoctor {
                 SurfacePanel {
                     EmptyWorkspace(symbol: "stethoscope", title: "Let's check your stack", description: "Doctor checks ports, runtimes, signatures, configuration, and local system integration.", actionTitle: "Run Checks", action: { Task { await model.runDoctor() } })
                         .disabled(model.isRunningDoctor)
@@ -331,12 +331,10 @@ struct DoctorView: View {
     private func diagnosticCount(_ report: DiagnosticReport, severity: DiagnosticSeverity, title: String) -> some View {
         SurfacePanel {
             HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("\(report.results.filter { $0.severity == severity }.count)").font(.system(size: 26, weight: .semibold, design: .rounded))
-                    Text(title).font(.system(size: 11)).foregroundStyle(.secondary)
-                }
+                Image(systemName: severity.symbol).foregroundStyle(severity.color).font(.system(size: 14))
+                Text(title).font(.system(size: 12)).foregroundStyle(.secondary)
                 Spacer()
-                Image(systemName: severity.symbol).foregroundStyle(severity.color).font(.system(size: 20))
+                Text("\(report.results.filter { $0.severity == severity }.count)").font(.system(size: 18, weight: .semibold))
             }
         }
     }
@@ -345,7 +343,7 @@ struct DoctorView: View {
         if panel.runModal() == .OK, let url = panel.url { model.exportSupportBundle(to: url) }
     }
 }
-@MainActor private final class DoctorViewState: ObservableObject { @Published var attentionOnly = false }
+@MainActor private final class DoctorViewState: ObservableObject { @Published var attentionOnly = true }
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
@@ -353,68 +351,51 @@ struct SettingsView: View {
     var body: some View {
         WorkspacePage {
             PageHeading(title: "Settings", subtitle: "")
-            SurfacePanel(title: "Appearance") {
+            SurfacePanel {
                 HStack {
-                    Label("Theme", systemImage: "circle.lefthalf.filled").font(.system(size: 13))
+                    Label("Appearance", systemImage: "circle.lefthalf.filled").fontWeight(.medium)
                     Spacer()
                     Picker("Theme", selection: $model.appearance) {
                         ForEach(AppAppearance.allCases) { appearance in Text(appearance.rawValue).tag(appearance) }
-                    }.labelsHidden().pickerStyle(.segmented).frame(width: 240)
-                }
-            }
-            SurfacePanel(title: "System integration", subtitle: "Enable local domains, standard web ports, and trusted HTTPS.") {
-                HStack(spacing: 12) {
-                    FeatureIcon(symbol: "lock.shield")
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("DevStack Helper").font(.system(size: 13, weight: .medium))
-                        Text(model.helperSetupState.message).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer()
-                    if model.helperIsRegistered { StatusBadge(title: model.helperInstalled ? "Ready" : "Registered", color: model.helperInstalled ? DevStackDesign.success : .orange, dot: true) }
-                    else {
-                        Button(model.helperSetupState.actionTitle) { Task { await model.installHelper() } }.buttonStyle(.glassProminent).disabled(model.isBusy)
-                    }
+                    }.labelsHidden().pickerStyle(.segmented).frame(width: 210)
                 }
                 Divider()
-                Toggle(isOn: Binding(get: { model.configuration.startAtLogin }, set: { enabled in Task { await model.setStartAtLogin(enabled) } })) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Open DevStack at login").font(.system(size: 13))
-                    }
-                }.toggleStyle(.switch).controlSize(.small)
-                    .accessibilityLabel("Open DevStack at login")
-                if model.helperIsRegistered {
-                    Button("Remove System Integration…", role: .destructive) { state.confirmRemove = true }.font(.system(size: 11)).disabled(model.isBusy || model.hasRunningServices)
-                    if model.hasRunningServices { Text("Stop the stack before removing system integration.").font(.system(size: 11)).foregroundStyle(.secondary) }
-                }
-            }
-            SurfacePanel(title: "HTTPS certificates") {
                 HStack {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(model.localCATrusted ? "Trusted for this account" : "Certificate trust required").font(.system(size: 13, weight: .medium))
-                        Text("DevStack issues a separate certificate for each site. macOS asks you to authorize the development CA.").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Label("System integration", systemImage: "lock.shield").fontWeight(.medium)
+                    Spacer()
+                    if model.helperIsRegistered {
+                        StatusBadge(title: model.helperInstalled ? "Ready" : "Not responding", color: model.helperInstalled ? DevStackDesign.success : .orange)
+                        if !model.helperInstalled {
+                            Button("Repair…") { Task { await model.installHelper() } }.buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy)
+                        }
+                        Button("Remove…", role: .destructive) { state.confirmRemove = true }.disabled(model.isBusy || model.hasRunningServices)
+                    } else {
+                        Button(model.helperSetupState.actionTitle) { Task { await model.installHelper() } }.buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy)
                     }
-                    Spacer()
-                    Button(model.localCATrusted ? "Trusted" : "Trust DevStack CA…") { Task { await model.trustHTTPS() } }
-                        .buttonStyle(.glass).disabled(model.isBusy || model.localCATrusted)
                 }
-                Button("Show Certificates") { NSWorkspace.shared.open(model.paths.certificates) }.buttonStyle(.borderless)
-            }
-            SurfacePanel(title: "Offline runtimes", subtitle: "Import a signed pack from your Mac or removable media.") {
+                Text(model.helperSetupState.message).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Toggle("Open DevStack at login", isOn: Binding(get: { model.configuration.startAtLogin }, set: { enabled in Task { await model.setStartAtLogin(enabled) } }))
+                    .toggleStyle(.switch).controlSize(.small)
                 HStack {
-                    Text("Runtime packs are verified before installation.").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Label(model.localCATrusted ? "HTTPS certificates trusted" : "HTTPS certificate trust required", systemImage: "lock.shield").foregroundStyle(.secondary)
                     Spacer()
-                    Button("Import Pack…", systemImage: "shippingbox", action: chooseRuntimePack).buttonStyle(.glass).disabled(model.isBusy)
+                    Button("Manage SSL…") { model.selectedSection = .ssl }.buttonStyle(.borderless)
+                }
+                Divider()
+                HStack {
+                    Label("Runtime packs", systemImage: "shippingbox").fontWeight(.medium)
+                    Spacer()
+                    Button("Import Pack…", action: chooseRuntimePack).buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy)
                 }
                 if !model.configuration.importedRuntimeIDs.isEmpty {
                     Text("Imported: \(model.configuration.importedRuntimeIDs.joined(separator: ", "))").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 DisclosureGroup("Installed runtimes and provenance") {
-                    VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 8) {
                         ForEach(model.runtimeManifests.filter { $0.kind != .phpExtension }) { manifest in RuntimeDetailsRow(manifest: manifest) }
-                    }.padding(.top, 12)
-                }.font(.system(size: 12))
-            }
-            SurfacePanel(title: "Data locations") {
+                    }.padding(.top, 8)
+                }.font(.system(size: 11))
+                Divider()
                 CopyValueRow(label: "App data", value: model.paths.applicationSupport.path)
                 CopyValueRow(label: "Runtimes", value: model.paths.builtInRuntimes.path)
                 CopyValueRow(label: "Logs", value: model.paths.logs.path)
@@ -424,8 +405,10 @@ struct SettingsView: View {
                     Button("Copy Shell Environment", systemImage: "doc.on.clipboard", action: model.copyManagedEnvironmentCommand).buttonStyle(.borderless)
                 }.font(.system(size: 11))
             }
+            PortsEditor()
+            LocalNetworkEditor()
             HStack(spacing: 9) {
-                BrandIcon(size: 42)
+                BrandIcon(size: 28)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("DevStack").font(.system(size: 12, weight: .semibold))
                     Text("\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development") · Apple Silicon · macOS 27+").font(.system(size: 10)).foregroundStyle(.secondary)
@@ -467,5 +450,181 @@ private extension DiagnosticSeverity {
     }
     var color: Color {
         switch self { case .info: DevStackDesign.accent; case .warning: .orange; case .error: .red }
+    }
+}
+
+private struct PortsEditor: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var draft = PortsDraft()
+    @State private var applied = ServicePorts()
+
+    var body: some View {
+        SurfacePanel(title: "Ports", subtitle: model.hasRunningServices
+            ? "Stop the stack to change ports."
+            : "Choose where DevStack services listen. Keep the defaults, or use 80 and 443 to open sites without a port number.") {
+            VStack(alignment: .leading, spacing: 10) {
+                group("Web server") {
+                    portRow("HTTP", text: $draft.webHTTP, fallback: ServicePorts.webHTTPFallback, isWebPort: true)
+                    portRow("HTTPS", text: $draft.webHTTPS, fallback: ServicePorts.webHTTPSFallback, isWebPort: true)
+                }
+                Divider()
+                group("Databases and mail") {
+                    portRow("MySQL", text: $draft.mysql, fallback: ServicePorts.mysqlFallback, isWebPort: false)
+                    portRow("PostgreSQL", text: $draft.postgresql, fallback: ServicePorts.postgresqlFallback, isWebPort: false)
+                    portRow("Mailpit SMTP", text: $draft.mailpitSMTP, fallback: ServicePorts.mailpitSMTPFallback, isWebPort: false)
+                    portRow("Mailpit inbox", text: $draft.mailpitInbox, fallback: ServicePorts.mailpitInboxFallback, isWebPort: false)
+                }
+                if let message = validationMessage {
+                    Label(message, systemImage: validationIsError ? "exclamationmark.triangle" : "lock.shield")
+                        .font(.system(size: 11))
+                        .foregroundStyle(validationIsError ? Color.red : Color.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 8) {
+                    Button("Dev ports") { useDevPorts() }
+                        .buttonStyle(DevStackGlassButtonStyle())
+                        .disabled(model.hasRunningServices || model.isBusy)
+                        .help("Use 8080 and 8443")
+                    Button("Standard ports 80 / 443") { useStandardPorts() }
+                        .buttonStyle(DevStackGlassButtonStyle())
+                        .disabled(model.hasRunningServices || model.isBusy)
+                    Spacer()
+                    Button("Apply") { Task { await apply() } }
+                        .buttonStyle(DevStackGlassButtonStyle())
+                        .disabled(model.hasRunningServices || model.isBusy || draft.ports?.isValid != true || draft.ports == applied)
+                }
+            }
+            .onAppear { sync() }
+            .onChange(of: model.configuration.ports) { _, _ in sync() }
+        }
+    }
+
+    private func group<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+            content()
+        }
+    }
+
+    private var validationMessage: String? {
+        guard let ports = draft.ports else { return "Enter a port from 1 to 65535 for every service." }
+        if !ports.reservedRequests.isEmpty { return "Port 22 is reserved and cannot be assigned to a DevStack service." }
+        if !ports.collisions.isEmpty { return "These ports conflict: \(ports.collisions.map(String.init).joined(separator: ", "))." }
+        if ports.requiresHelper, !model.helperInstalled {
+            return "Approve the helper (Settings → System integration) to use the ports below 1024."
+        }
+        return nil
+    }
+
+    private var validationIsError: Bool {
+        guard let ports = draft.ports else { return true }
+        return !ports.isValid
+    }
+
+    private func portRow(_ title: String, text: Binding<String>, fallback: UInt16, isWebPort: Bool) -> some View {
+        HStack(spacing: 8) {
+            Text(title).font(.system(size: 12)).frame(width: 100, alignment: .leading)
+            TextField("", text: text)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 84)
+                .disabled(model.hasRunningServices || model.isBusy)
+            if let value = UInt16(text.wrappedValue), value > 0, value < 1024 {
+                Text(verbatim: isWebPort
+                    ? "Uses the helper · site URLs drop the port"
+                    : "Uses the helper · forwards to \(String(fallback))")
+                    .font(.system(size: 10)).foregroundStyle(.orange)
+            }
+            Spacer()
+        }
+    }
+
+    private func useDevPorts() {
+        draft.webHTTP = String(ServicePorts.webHTTPFallback)
+        draft.webHTTPS = String(ServicePorts.webHTTPSFallback)
+    }
+
+    private func useStandardPorts() {
+        draft.webHTTP = "80"
+        draft.webHTTPS = "443"
+    }
+
+    private func sync() {
+        applied = model.configuration.ports
+        draft = PortsDraft(model.configuration.ports)
+    }
+
+    private func apply() async {
+        guard let ports = draft.ports else { return }
+        await model.updatePorts(ports)
+        sync()
+    }
+}
+
+private struct PortsDraft: Equatable {
+    var webHTTP = ""
+    var webHTTPS = ""
+    var mysql = ""
+    var postgresql = ""
+    var mailpitSMTP = ""
+    var mailpitInbox = ""
+
+    init() {}
+    init(_ ports: ServicePorts) {
+        webHTTP = String(ports.webHTTP)
+        webHTTPS = String(ports.webHTTPS)
+        mysql = String(ports.mysql)
+        postgresql = String(ports.postgresql)
+        mailpitSMTP = String(ports.mailpitSMTP)
+        mailpitInbox = String(ports.mailpitInbox)
+    }
+
+    var ports: ServicePorts? {
+        guard let webHTTP = UInt16(webHTTP), let webHTTPS = UInt16(webHTTPS), let mysql = UInt16(mysql),
+              let postgresql = UInt16(postgresql), let mailpitSMTP = UInt16(mailpitSMTP), let mailpitInbox = UInt16(mailpitInbox),
+              [webHTTP, webHTTPS, mysql, postgresql, mailpitSMTP, mailpitInbox].allSatisfy({ $0 > 0 }) else { return nil }
+        return ServicePorts(webHTTP: webHTTP, webHTTPS: webHTTPS, mysql: mysql, postgresql: postgresql, mailpitSMTP: mailpitSMTP, mailpitInbox: mailpitInbox)
+    }
+}
+
+private struct LocalNetworkEditor: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        SurfacePanel(title: "Local network", subtitle: "Phones and other devices can use this Mac as DNS for DevStack hostnames. All other domains keep resolving through your normal DNS servers.") {
+            VStack(alignment: .leading, spacing: 8) {
+                if let address = model.localNetworkAddress {
+                    CopyValueRow(label: "DNS address", value: address)
+                } else {
+                    Text("No active Wi-Fi or Ethernet connection.").font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+                HStack {
+                    Label("Local network access", systemImage: "wifi.router").fontWeight(.medium)
+                    Spacer()
+                    Toggle("Local network access", isOn: Binding(
+                        get: { model.configuration.localNetworkAccess },
+                        set: { enabled in Task { await model.setLocalNetworkAccess(enabled) } }))
+                        .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                        .disabled(model.isBusy || !model.helperInstalled)
+                }
+                Text(message)
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if model.configuration.localNetworkAccess, let site = model.configuration.sites.first {
+                    CopyValueRow(label: "Example", value: model.siteURL(site))
+                }
+            }
+        }
+    }
+
+    private var message: String {
+        guard model.helperInstalled else { return "Requires the helper (Settings → System integration)." }
+        guard let address = model.localNetworkAddress else { return "Connect to Wi-Fi or Ethernet, then enable access for your devices." }
+        if model.configuration.localNetworkAccess {
+            var text = "On each device: Wi-Fi settings → Configure DNS → Manual → \(address)."
+            if model.configuration.sites.contains(where: { $0.hostname.hasSuffix(".localhost") }) {
+                text += " Names ending in .localhost resolve on the device itself, so use a .test domain (e.g. mysite.test) for sites you open from other devices."
+            }
+            return text
+        }
+        return "Enable to serve DevStack hostnames (and their web ports) to other devices on this network."
     }
 }

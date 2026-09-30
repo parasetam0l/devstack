@@ -10,33 +10,36 @@ struct SitesView: View {
     var body: some View {
         WorkspacePage {
             HStack(alignment: .center) {
-                PageHeading(title: "Sites", subtitle: "A local domain and a dedicated PHP pool for every project.")
+                PageHeading(title: "Sites", subtitle: "")
                 Spacer()
                 Button { state.editingSite = newSite() } label: { Label("New Site", systemImage: "plus") }
-                    .buttonStyle(.glassProminent).controlSize(.large)
+                    .buttonStyle(DevStackGlassButtonStyle()).controlSize(.small)
             }
             if model.configuration.sites.isEmpty {
                 SurfacePanel {
                     EmptyWorkspace(symbol: "globe", title: "Your projects belong here", description: "Add a project folder to configure its domain, PHP version, and HTTPS.", actionTitle: "Add a Site") { state.editingSite = newSite() }
                 }
             } else {
-                HStack(spacing: 12) {
+                HStack(spacing: 8) {
                     HStack(spacing: 8) {
                         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                         TextField("Find a site", text: $state.search).textFieldStyle(.plain)
                         if !state.search.isEmpty {
                             Button { state.search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }.buttonStyle(.plain).accessibilityLabel("Clear search")
                         }
-                    }.padding(11).glassEffect(.regular, in: .rect(cornerRadius: 12)).frame(maxWidth: 350)
+                    }.padding(7).glassEffect(.regular, in: .rect(cornerRadius: 8)).frame(maxWidth: 350)
                     Spacer()
                     Text("\(filteredSites.count) \(filteredSites.count == 1 ? "site" : "sites")").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 if filteredSites.isEmpty {
                     EmptyWorkspace(symbol: "magnifyingglass", title: "No matching sites", description: "Try a different name, hostname, or folder.")
                 } else {
-                    VStack(spacing: 12) {
-                        ForEach(filteredSites) { site in
-                            SiteRow(site: site, edit: { state.editingSite = site }, delete: { state.deletingSite = site })
+                    SurfacePanel {
+                        VStack(spacing: 0) {
+                            ForEach(Array(filteredSites.enumerated()), id: \.element.id) { index, site in
+                                if index > 0 { Divider() }
+                                SiteRow(site: site, edit: { state.editingSite = site }, delete: { state.deletingSite = site })
+                            }
                         }
                     }
                 }
@@ -86,18 +89,17 @@ private struct SiteRow: View {
     let edit: () -> Void
     let delete: () -> Void
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 8) {
             FeatureIcon(symbol: "globe")
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
-                    Text(site.name).font(.system(size: 14, weight: .semibold))
+                    Text(site.name).font(.system(size: 12, weight: .semibold))
                     if site.phpRuntimeID == "php-7.4" { StatusBadge(title: "Legacy", color: .orange) }
                 }
                 Text(site.hostname).font(.system(size: 12)).foregroundStyle(.secondary)
-                Text(site.documentRoot).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
             }
-            Spacer(minLength: 12)
-            VStack(alignment: .trailing, spacing: 7) {
+            Text(site.documentRoot).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading).help(site.documentRoot)
+            HStack(spacing: 5) {
                 StatusBadge(title: site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP "))
                 StatusBadge(title: site.tlsEnabled ? "HTTPS" : "HTTP", color: site.tlsEnabled ? DevStackDesign.accent : .secondary)
             }
@@ -112,10 +114,8 @@ private struct SiteRow: View {
                 Divider()
                 Button("Remove Site…", systemImage: "trash", role: .destructive, action: delete)
             } label: { Image(systemName: "ellipsis") }
-                .menuStyle(.borderlessButton).frame(width: 22).help("Site actions").accessibilityLabel("Actions for \(site.name)")
-        }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-            .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.055), lineWidth: 1) }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 22).help("Site actions").accessibilityLabel("Actions for \(site.name)")
+        }.padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -133,68 +133,65 @@ struct SiteEditor: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                FeatureIcon(symbol: "globe")
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(isNew ? "New Site" : "Edit Site").font(.system(size: 21, weight: .bold, design: .rounded))
+        VStack(alignment: .leading, spacing: 12) {
+            Text(isNew ? "New Site" : "Edit Site").font(.system(size: 17, weight: .semibold))
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                GridRow {
+                    Text("Name").foregroundStyle(.secondary).frame(width: 90, alignment: .leading)
+                    TextField("My project", text: $editor.site.name)
                 }
-                Spacer()
-            }.padding(24)
-            Divider()
-            Form {
-                Section("Project") {
-                    TextField("Name", text: $editor.site.name, prompt: Text("My project"))
-                    LabeledContent("Project folder") {
-                        HStack {
-                            Text(editor.site.documentRoot.isEmpty ? "Choose your document root" : editor.site.documentRoot)
-                                .font(.system(size: 12)).foregroundStyle(editor.site.documentRoot.isEmpty ? .secondary : .primary)
-                                .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                            Button("Choose…", action: chooseFolder)
-                        }
+                GridRow {
+                    Text("Project folder").foregroundStyle(.secondary)
+                    HStack {
+                        Text(editor.site.documentRoot.isEmpty ? "Choose document root" : editor.site.documentRoot)
+                            .foregroundStyle(editor.site.documentRoot.isEmpty ? .secondary : .primary)
+                            .lineLimit(1).truncationMode(.middle).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                        Button("Choose…", action: chooseFolder).buttonStyle(DevStackGlassButtonStyle())
                     }
-                    Text("Select your project's document root, such as its public directory.")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
-                Section("Local domain") {
-                    TextField("Hostname", text: $editor.site.hostname).textContentType(.URL)
-                    if let validationError {
-                        Label(validationError, systemImage: "exclamationmark.circle").font(.system(size: 11)).foregroundStyle(.red)
-                    } else if HostnameValidator.shadowsPublicDomain(editor.site.hostname) {
-                        Label("This domain can shadow a public website. A .test domain is recommended.", systemImage: "exclamationmark.triangle").font(.system(size: 11)).foregroundStyle(.orange)
-                    }
-                    Toggle("HTTPS", isOn: $editor.site.tlsEnabled)
-                    Text("DevStack creates a local certificate for this domain.").font(.system(size: 11)).foregroundStyle(.secondary)
+                GridRow {
+                    Text("Hostname").foregroundStyle(.secondary)
+                    TextField("project.localhost", text: $editor.site.hostname).textContentType(.URL)
                 }
-                Section("PHP runtime") {
-                    Picker("Version", selection: phpRuntimeBinding) {
+                GridRow {
+                    Text("PHP version").foregroundStyle(.secondary)
+                    Picker("PHP version", selection: phpRuntimeBinding) {
                         ForEach(model.availablePHPRuntimes) { runtime in Text("PHP \(runtime.version)").tag(runtime.id) }
-                    }
-                    if editor.site.phpRuntimeID == "php-7.4" {
-                        Label("End-of-life. Use only for legacy compatibility.", systemImage: "exclamationmark.triangle").font(.system(size: 11)).foregroundStyle(.orange)
-                    }
+                    }.labelsHidden().frame(maxWidth: 180, alignment: .leading)
                 }
-                DisclosureGroup("Advanced PHP settings") {
-                    TextField("Memory limit", text: $editor.site.phpOverrides.memoryLimit)
-                    TextField("Upload limit", text: $editor.site.phpOverrides.uploadMaxFilesize)
-                    TextField("POST limit", text: $editor.site.phpOverrides.postMaxSize)
-                    Stepper("Execution time: \(editor.site.phpOverrides.maxExecutionTime)s", value: $editor.site.phpOverrides.maxExecutionTime, in: 1...3600)
-                    Toggle("Display errors", isOn: $editor.site.phpOverrides.displayErrors)
+                GridRow {
+                    Text("SSL").foregroundStyle(.secondary)
+                    Toggle("HTTPS", isOn: $editor.site.tlsEnabled).toggleStyle(.switch)
                 }
-            }.formStyle(.grouped)
-            if let error = editor.errorMessage {
-                Text(error).font(.system(size: 12)).foregroundStyle(.red).padding(.horizontal, 24).padding(.bottom, 12)
+            }.textFieldStyle(.roundedBorder)
+            if let validationError {
+                Label(validationError, systemImage: "exclamationmark.circle").foregroundStyle(.red)
+            } else if HostnameValidator.shadowsPublicDomain(editor.site.hostname) {
+                Label("This domain can shadow a public website. Prefer .test.", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+            }
+            if editor.site.phpRuntimeID == "php-7.4" {
+                Label("PHP 7.4 is end-of-life. Use only for legacy compatibility.", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
             }
             Divider()
+            DisclosureGroup("Advanced PHP settings") {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                    GridRow { Text("Memory limit").frame(width: 90, alignment: .leading); TextField("Memory limit", text: $editor.site.phpOverrides.memoryLimit) }
+                    GridRow { Text("Upload limit"); TextField("Upload limit", text: $editor.site.phpOverrides.uploadMaxFilesize) }
+                    GridRow { Text("POST limit"); TextField("POST limit", text: $editor.site.phpOverrides.postMaxSize) }
+                    GridRow { Text("Execution time"); Stepper("\(editor.site.phpOverrides.maxExecutionTime)s", value: $editor.site.phpOverrides.maxExecutionTime, in: 1...3600) }
+                    GridRow { Text("Errors"); Toggle("Display errors", isOn: $editor.site.phpOverrides.displayErrors).toggleStyle(.switch) }
+                }.textFieldStyle(.roundedBorder).padding(.top, 8)
+            }
+            if let error = editor.errorMessage { Text(error).foregroundStyle(.red) }
             HStack {
-                if editor.isSaving { ProgressView().controlSize(.small); Text("Saving…").font(.system(size: 12)).foregroundStyle(.secondary) }
+                if editor.isSaving { ProgressView().controlSize(.small); Text("Saving…").foregroundStyle(.secondary) }
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).buttonStyle(.glass).disabled(editor.isSaving)
-                Button(isNew ? "Create Site" : "Save Changes", action: saveSite).keyboardShortcut(.defaultAction).buttonStyle(.glassProminent)
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).buttonStyle(DevStackGlassButtonStyle()).disabled(editor.isSaving)
+                Button(isNew ? "Create Site" : "Save Changes", action: saveSite).keyboardShortcut(.defaultAction).buttonStyle(DevStackGlassButtonStyle())
                     .disabled(editor.isSaving || !canSave)
-            }.padding(20)
-        }
-        .frame(width: 640, height: 690).tint(DevStackDesign.accent)
+            }
+        }.font(.system(size: 12)).controlSize(.small).padding(18)
+        .frame(width: 580).tint(DevStackDesign.accent)
         .alert("Use legacy PHP 7.4?", isPresented: $editor.isConfirmingLegacyRuntime) {
             Button("Use PHP 7.4", role: .destructive) { editor.site.phpRuntimeID = "php-7.4" }
             Button("Cancel", role: .cancel) {}

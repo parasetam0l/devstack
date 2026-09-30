@@ -22,7 +22,7 @@ enum HelperSetupState: Equatable {
 
     var message: String {
         switch self {
-        case .notInstalled: "Administrator approval enables custom domains and standard web ports."
+        case .notInstalled: "Administrator approval enables the hosts file and ports 80 and 443."
         case .requiresApproval: "Approve DevStack in System Settings → General → Login Items & Extensions."
         case .connecting: "Connecting to the helper…"
         case .ready: "Authorized and responding."
@@ -38,11 +38,19 @@ enum HelperSetupState: Equatable {
     }
 }
 
+enum HelperNotice: Equatable {
+    case welcome
+    case startBlocked
+
+    var isBlocking: Bool { self == .startBlocked }
+}
+
 enum NavigationSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case sites = "Sites"
     case php = "PHP"
     case database = "Database"
+    case ssl = "SSL"
     case mailpit = "Mail Inbox"
     case logs = "Logs"
     case doctor = "Doctor"
@@ -56,6 +64,7 @@ enum NavigationSection: String, CaseIterable, Identifiable {
         case .sites: "network"
         case .php: "chevron.left.forwardslash.chevron.right"
         case .database: "cylinder.split.1x2"
+        case .ssl: "lock.shield"
         case .mailpit: "envelope"
         case .logs: "doc.text.magnifyingglass"
         case .doctor: "stethoscope"
@@ -85,10 +94,13 @@ final class AppModel: ObservableObject {
     @Published var isRunningDoctor = false
     @Published var diagnosticProgress: String?
     @Published var errorMessage: String?
+    @Published var certificateSummaries: [CertificateSummary] = []
+    @Published var caSummary: CertificateSummary?
     @Published var localCATrusted = false
     @Published var helperInstalled = false
     @Published var helperStatus: PrivilegedHelperStatus?
     @Published var helperSetupState: HelperSetupState = .notInstalled
+    @Published var helperNotice: HelperNotice?
     @Published var lastDatabaseBackup: URL?
     @Published var isPresentingNewSite = false
     @Published var appearance = AppAppearance(rawValue: UserDefaults.standard.string(forKey: "DevStackAppearance") ?? "") ?? .system {
@@ -172,7 +184,7 @@ final class AppModel: ObservableObject {
 
     var dashboardServices: [ServiceKind] {
         [configuration.selectedWebServer.service, ServiceKind(rawValue: configuration.defaultPHPRuntimeID) ?? .php85,
-         configuration.selectedDatabase == .mysql84 ? .mysql84 : .mysql57, .mailpit]
+         .mailpit] + configuration.selectedDatabaseServices
     }
 
     var selectedDatabaseBinding: DatabaseEngine {
@@ -193,6 +205,7 @@ final class AppModel: ObservableObject {
             await refreshHelperStatus()
             localCATrusted = certificateManager.isTrusted()
             await refreshServiceStates()
+            if !helperInstalled, !configuration.helperNoticeDismissed, !isReviewMode { helperNotice = .welcome }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -280,6 +293,11 @@ final class AppModel: ObservableObject {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
+        await refreshHelperStatus()
+        guard helperInstalled else {
+            helperNotice = .startBlocked
+            return
+        }
         let previouslyRunning = Set((await supervisor.allStates()).filter { $0.phase == .running }.map(\.service))
         do {
             try generateConfiguration()
@@ -287,11 +305,14 @@ final class AppModel: ObservableObject {
             try await prepareCertificatesAndPrivilegedState()
             try await validateWebConfigurations()
             try await startMailpit()
-            let manager = databaseManager
-            let engine = configuration.selectedDatabase
-            let initializedDatabase = try await Task.detached { try manager.initializeIfNeeded(engine) }.value
-            try await startDatabase(engine)
-            if initializedDatabase { try await Task.detached { try manager.configureDevelopmentRootPassword(engine) }.value }
+            if configuration.selectedDatabase != .none {
+                let manager = databaseManager
+                let engine = configuration.selectedDatabase
+                let initializedDatabase = try await Task.detached { try manager.initializeIfNeeded(engine) }.value
+                try await startDatabase(engine)
+                if initializedDatabase { try await Task.detached { try manager.configureDevelopmentRootPassword(engine) }.value }
+            }
+            if configuration.selectedPostgreSQL != .none { try await prepareAndStartPostgreSQL() }
             let phpRuntimes = requiredPHPRuntimes
             for runtimeID in phpRuntimes.sorted() { try await startPHP(runtimeID: runtimeID) }
             try verifyLegacyDatabaseCompatibilityIfNeeded()
@@ -335,8 +356,9 @@ final class AppModel: ObservableObject {
             helperStatus: helperStatus,
             expectedHostnames: configuration.sites.map(\.hostname) + ["phpmyadmin.localhost", "mailpit.localhost", "adminer.localhost"],
             serviceStates: serviceStates,
-            requiredRuntimeIDs: Set(configuration.sites.map(\.phpRuntimeID)).union([configuration.selectedDatabase.rawValue, "php-8.5"]),
-            selectedDatabase: configuration.selectedDatabase
+            requiredRuntimeIDs: Set(configuration.sites.map(\.phpRuntimeID)).union(configuration.selectedDatabaseServices.map(\.runtimeID)).union(["php-8.5"]),
+            selectedDatabase: configuration.selectedDatabase, selectedPostgreSQL: configuration.selectedPostgreSQL,
+            ports: configuration.ports, localNetworkAccess: configuration.localNetworkAccess
         )
         let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
         let progressModel = self
@@ -352,6 +374,12 @@ final class AppModel: ObservableObject {
         isBusy = true
         defer { isBusy = false }
         do {
+            // A registered helper that no longer responds usually means the app bundle
+            // was replaced after registration, which makes launchd's bundle record
+            // stale. Rebuild the registration against the current bundle.
+            if case .unavailable = helperSetupState, helper.registrationStatus == .enabled {
+                try await helper.unregister()
+            }
             try helper.register()
             await refreshHelperStatus()
             if helperSetupState == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
@@ -363,11 +391,95 @@ final class AppModel: ObservableObject {
 
     var helperIsRegistered: Bool { helper.registrationStatus == .enabled || helper.registrationStatus == .requiresApproval }
 
+    func dismissHelperNotice() async {
+        helperNotice = nil
+        guard !configuration.helperNoticeDismissed else { return }
+        configuration.helperNoticeDismissed = true
+        await persistConfiguration()
+    }
+
+    func updatePorts(_ ports: ServicePorts) async {
+        guard !isBusy else { return }
+        guard !hasRunningServices else {
+            errorMessage = "Stop the stack before changing ports."
+            return
+        }
+        guard ports.isValid else {
+            if ports.collisions.isEmpty {
+                errorMessage = "Port 22 is reserved and cannot be assigned to a DevStack service."
+            } else {
+                errorMessage = "Conflicting listener ports: \(ports.collisions.map(String.init).joined(separator: ", "))."
+            }
+            return
+        }
+        let previous = configuration.ports
+        configuration.ports = ports
+        do {
+            try generateConfiguration()
+            try await store.save(configuration)
+            if helperInstalled {
+                try await applyPrivilegedNetworking(hostnames: configuration.sites.map(\.hostname) + Self.managementHostnames)
+            }
+        } catch {
+            configuration.ports = previous
+            try? generateConfiguration()
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    static let managementHostnames = ["phpmyadmin.localhost", "mailpit.localhost", "adminer.localhost", "postgresql.localhost"]
+
+    var localNetworkAddress: String? { LocalNetwork.primaryIPv4Address() }
+
+    var localNetworkLanEntries: [PortForwardingEntry] {
+        guard configuration.localNetworkAccess else { return [] }
+        let http = PortForwardingEntry(publicPort: configuration.ports.webHTTP, upstreamPort: configuration.ports.webHTTPListen)
+        let https = PortForwardingEntry(publicPort: configuration.ports.webHTTPS, upstreamPort: configuration.ports.webHTTPSListen)
+        return http == https ? [http] : [http, https]
+    }
+
+    /// Keeps the helper's host mappings, loopback/LAN forwarding and local DNS in
+    /// sync with the current configuration.
+    private func applyPrivilegedNetworking(hostnames: [String]) async throws {
+        try await helper.setPortForwarding(PortForwardingConfiguration(
+            enabled: true,
+            entries: configuration.ports.forwardings,
+            lanEntries: localNetworkLanEntries))
+        let answerAddress = localNetworkAddress ?? ""
+        try await helper.setDNSConfiguration(DNSConfiguration(
+            enabled: configuration.localNetworkAccess && !answerAddress.isEmpty,
+            hostnames: hostnames,
+            answerAddress: answerAddress))
+    }
+
+    func setLocalNetworkAccess(_ enabled: Bool) async {
+        guard !isBusy else { return }
+        guard helperInstalled else {
+            errorMessage = "Local network access requires the helper. Set it up in Settings first."
+            return
+        }
+        if enabled, localNetworkAddress == nil {
+            errorMessage = "No active Wi-Fi or Ethernet connection was found. Connect to a network first."
+            return
+        }
+        let previous = configuration.localNetworkAccess
+        configuration.localNetworkAccess = enabled
+        do {
+            try await store.save(configuration)
+            try await applyPrivilegedNetworking(hostnames: configuration.sites.map(\.hostname) + Self.managementHostnames)
+            await refreshHelperStatus()
+        } catch {
+            configuration.localNetworkAccess = previous
+            try? await store.save(configuration)
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func refreshHelperStatus() async {
         guard !isReviewMode else { return }
         guard helper.canAuthenticate else {
             helperInstalled = false; helperStatus = nil
-            helperSetupState = .unavailable("Standard ports require a Developer ID signed release. This development build uses ports 8080 and 8443.")
+            helperSetupState = .unavailable("System integration requires a Developer ID signed release. This build cannot manage the hosts file or privileged ports.")
             return
         }
         switch helper.registrationStatus {
@@ -379,6 +491,9 @@ final class AppModel: ObservableObject {
                 helperStatus = try await helper.status()
                 helperInstalled = true
                 helperSetupState = .ready
+                if configuration.localNetworkAccess {
+                    try? await applyPrivilegedNetworking(hostnames: configuration.sites.map(\.hostname) + Self.managementHostnames)
+                }
             } catch {
                 helperInstalled = false; helperStatus = nil
                 helperSetupState = .unavailable("The registered helper did not respond: \(error.localizedDescription)")
@@ -414,7 +529,11 @@ final class AppModel: ObservableObject {
         isBusy = true
         defer { isBusy = false }
         do {
-            if helper.isRegistered && helper.canAuthenticate { try await helper.removeManagedState() }
+            // Managed state can only be cleared while the helper responds; the
+            // registration must be removed even when it is already dead.
+            if helperInstalled, helper.isRegistered, helper.canAuthenticate {
+                try await helper.removeManagedState()
+            }
             try await helper.unregister()
             helperStatus = nil
             helperInstalled = false
@@ -480,7 +599,7 @@ final class AppModel: ObservableObject {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
-        guard let url = URL(string: "http://127.0.0.1:8025/api/v1/messages") else { return }
+        guard let url = URL(string: "http://127.0.0.1:\(configuration.ports.mailpitInboxListen)/api/v1/messages") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
         do {
@@ -493,15 +612,22 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func databaseBackupFilename() -> String {
-        databaseManager.backupFilename(engine: configuration.selectedDatabase, database: nil)
+    func databaseBackupFilename(postgreSQL: Bool = false) -> String {
+        if postgreSQL { return postgreSQLManager.backupFilename() }
+        return databaseManager.backupFilename(engine: configuration.selectedDatabase, database: nil)
     }
 
-    func exportDatabase(to destination: URL) async {
+    func exportDatabase(to destination: URL, postgreSQL: Bool = false) async {
         isBusy = true
         defer { isBusy = false }
         do {
             await refreshServiceStates()
+            if postgreSQL {
+                guard serviceIsRunning(.postgresql18) else { throw CocoaError(.executableNotLoadable) }
+                let manager = postgreSQLManager
+                lastDatabaseBackup = try await Task.detached { try manager.exportSQL(destination: destination) }.value
+                return
+            }
             let engine = configuration.selectedDatabase
             try requireRunningDatabase(engine)
             let manager = databaseManager
@@ -511,11 +637,18 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func importDatabase(from source: URL) async {
+    func importDatabase(from source: URL, postgreSQL: Bool = false) async {
         isBusy = true
         defer { isBusy = false }
         do {
             await refreshServiceStates()
+            if postgreSQL {
+                guard serviceIsRunning(.postgresql18) else { throw CocoaError(.executableNotLoadable) }
+                let manager = postgreSQLManager
+                lastDatabaseBackup = try await Task.detached { try manager.exportSQL() }.value
+                try await Task.detached { try manager.importSQL(source: source) }.value
+                return
+            }
             let engine = configuration.selectedDatabase
             try requireRunningDatabase(engine)
             let manager = databaseManager
@@ -527,7 +660,7 @@ final class AppModel: ObservableObject {
     }
 
     func resetDatabase() async {
-        guard !isBusy else { return }
+        guard configuration.selectedDatabase != .none, !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
         let engine = configuration.selectedDatabase
@@ -589,14 +722,15 @@ final class AppModel: ObservableObject {
 
     private var databaseManager: DatabaseManager {
         DatabaseManager(paths: paths, runtimeRoot: configuration.importedRuntimeIDs.contains(configuration.selectedDatabase.rawValue) ? paths.importedRuntimes : paths.builtInRuntimes,
-            opensslRuntime: runtimeDirectory("openssl-3.5"))
+            opensslRuntime: runtimeDirectory("openssl-3.5"), port: configuration.ports.mysqlListen)
     }
 
     private var managedPath: String {
         [
             paths.generated.appendingPathComponent("bin").path,
             runtimeDirectory(configuration.defaultPHPRuntimeID).appendingPathComponent("bin").path,
-            runtimeDirectory(configuration.selectedDatabase.rawValue).appendingPathComponent("bin").path
+            runtimeDirectory(configuration.selectedDatabase == .none ? "mysql-8.4" : configuration.selectedDatabase.rawValue).appendingPathComponent("bin").path,
+            runtimeDirectory("postgresql-18").appendingPathComponent("bin").path
         ].joined(separator: ":")
     }
 
@@ -605,7 +739,7 @@ final class AppModel: ObservableObject {
     }
 
     private func requireRunningDatabase(_ engine: DatabaseEngine) throws {
-        let kind: ServiceKind = engine == .mysql57 ? .mysql57 : .mysql84
+        guard let kind = engine.service else { throw CocoaError(.executableNotLoadable) }
         guard serviceStates.first(where: { $0.service == kind })?.phase == .running else {
             throw CocoaError(.executableNotLoadable, userInfo: [NSLocalizedDescriptionKey: "Start \(engine.displayName) before exporting, importing, or resetting the database."])
         }
@@ -639,19 +773,30 @@ final class AppModel: ObservableObject {
             )
         }
         try AtomicFileWriter.write(try renderer.nginxConfiguration(sites: configuration.sites), to: paths.generatedNginx.appendingPathComponent("nginx.conf"), permissions: 0o600)
-        for engine in DatabaseEngine.allCases {
+        for engine in DatabaseEngine.allCases where engine != .none {
             let base = runtimeDirectory(engine.rawValue)
             try AtomicFileWriter.write(renderer.mysqlConfiguration(engine: engine, baseDirectory: base), to: paths.generated.appendingPathComponent("\(engine.rawValue).cnf"), permissions: 0o600)
         }
         try AtomicFileWriter.write(renderer.composerWrapperScript(runtimeID: configuration.defaultPHPRuntimeID), to: paths.generated.appendingPathComponent("bin/composer"), permissions: 0o755)
         for client in ["mysql", "mysqldump", "mysqladmin"] {
-            try AtomicFileWriter.write(try renderer.databaseClientWrapperScript(engine: configuration.selectedDatabase, client: client),
+            try AtomicFileWriter.write(try renderer.databaseClientWrapperScript(engine: configuration.selectedDatabase == .none ? .mysql84 : configuration.selectedDatabase, client: client),
                 to: paths.generated.appendingPathComponent("bin/\(client)"), permissions: 0o755)
         }
+        try postgreSQLManager.writeConfiguration()
+        let pgEnvironment = postgreSQLManager.environment.filter { $0.key != "PGPASSWORD" }
+            .map { "export \($0.key)=\(shellQuote($0.value))" }.sorted().joined(separator: "\n")
+        for client in ["psql", "pg_dump", "pg_dumpall", "pg_restore", "createdb", "dropdb", "pg_isready"] {
+            let executable = runtimeDirectory("postgresql-18").appendingPathComponent("bin/\(client)")
+            let arguments = client == "psql" ? " -X" : ""
+            let script = "#!/bin/sh\n\(pgEnvironment)\nexec \(shellQuote(executable.path))\(arguments) \"$@\"\n"
+            try AtomicFileWriter.write(script, to: paths.generated.appendingPathComponent("bin/\(client)"), permissions: 0o755)
+        }
+
     }
 
     private func validateRequiredRuntimes() throws {
-        var required = [configuration.selectedWebServer.service.runtimeID, "php-8.5", configuration.selectedDatabase.rawValue, "mailpit-1.31.1", "phpmyadmin-5.2.3", "adminer-6.1.1", "openssl-3.5"]
+        var required = [configuration.selectedWebServer.service.runtimeID, "php-8.5", "mailpit-1.31.1", "phpmyadmin-5.2.3", "adminer-6.1.1", "openssl-3.5"]
+        required.append(contentsOf: configuration.selectedDatabaseServices.map(\.runtimeID))
         required.append(contentsOf: requiredPHPRuntimes)
         let missing = required.filter { !runtimeIsAvailable($0) }
         guard missing.isEmpty else {
@@ -695,7 +840,7 @@ final class AppModel: ObservableObject {
             paths: paths,
             openssl: runtimeDirectory("openssl-3.5").appendingPathComponent("bin/openssl")
         )
-        let managementHosts = ["phpmyadmin.localhost", "mailpit.localhost", "adminer.localhost"]
+        let managementHosts = Self.managementHostnames
         let TLSHosts = configuration.sites.filter(\.tlsEnabled).map(\.hostname) + managementHosts
         try await Task.detached {
             try certificates.ensureCertificates(for: TLSHosts)
@@ -705,7 +850,7 @@ final class AppModel: ObservableObject {
         guard helperInstalled else { return }
         let hostnames = configuration.sites.map(\.hostname) + managementHosts
         try await helper.applyHostMappings(hostnames.map { HostMapping(hostname: $0) })
-        try await helper.setPortForwarding(.init(enabled: true))
+        try await applyPrivilegedNetworking(hostnames: hostnames)
         var status = try await helper.status()
         if !status.localCATrusted {
             try await helper.trustLocalCA(certificates.caCertificateDER())
@@ -719,7 +864,7 @@ final class AppModel: ObservableObject {
         guard configuration.selectedDatabase == .mysql84,
               configuration.sites.contains(where: { $0.phpRuntimeID == "php-7.4" }) else { return }
         let php = runtimeDirectory("php-7.4").appendingPathComponent("bin/php")
-        let code = #"mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT); $db = new mysqli('127.0.0.1', 'root', 'root', '', 3306); $db->query('SELECT 1');"#
+        let code = #"mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT); $db = new mysqli('127.0.0.1', 'root', 'root', '', \#(configuration.ports.mysqlListen)); $db->query('SELECT 1');"#
         _ = try runner.runChecked(
             executable: php,
             arguments: ["-c", paths.generatedPHP.appendingPathComponent("php-7.4.ini").path, "-r", code],
@@ -735,7 +880,7 @@ final class AppModel: ObservableObject {
             arguments: ["-D", "FOREGROUND", "-f", paths.generatedApache.appendingPathComponent("httpd.conf").path],
             environment: runtimeEnvironment,
             logFile: paths.logs.appendingPathComponent("apache.log"),
-            readinessProbe: .tcpLoopback(port: 8080)
+            readinessProbe: .tcpLoopback(port: configuration.ports.webHTTPListen)
         ))
     }
 
@@ -768,7 +913,7 @@ final class AppModel: ObservableObject {
             arguments: ["--defaults-file=\(paths.generated.appendingPathComponent("\(engine.rawValue).cnf").path)"],
             environment: runtimeEnvironment,
             logFile: paths.logs.appendingPathComponent("\(engine.rawValue).log"),
-            readinessProbe: .tcpLoopback(port: 3306),
+            readinessProbe: .tcpLoopback(port: configuration.ports.mysqlListen),
             readinessTimeout: 30
         ))
     }
@@ -780,7 +925,7 @@ final class AppModel: ObservableObject {
             executable: runtimeDirectory("mailpit-1.31.1").appendingPathComponent("mailpit"),
             arguments: renderer.mailpitArguments(),
             logFile: paths.logs.appendingPathComponent("mailpit.log"),
-            readinessProbe: .tcpLoopback(port: 8025)
+            readinessProbe: .tcpLoopback(port: configuration.ports.mailpitInboxListen)
         ))
     }
 
@@ -791,17 +936,19 @@ final class AppModel: ObservableObject {
     private var configurationRenderer: ConfigurationRenderer {
         ConfigurationRenderer(paths: paths, runtimeRoot: paths.builtInRuntimes,
             runtimeDirectories: Dictionary(uniqueKeysWithValues: configuration.importedRuntimeIDs.map { ($0, runtimeDirectory($0)) }),
-            standardPortsEnabled: helperInstalled)
+            ports: configuration.ports)
     }
 
     func siteURL(_ site: SiteDefinition) -> String {
         let scheme = site.tlsEnabled ? "https" : "http"
-        let port = site.tlsEnabled ? 8443 : 8080
-        return "\(scheme)://\(site.hostname)\(helperInstalled ? "" : ":\(port)")"
+        let port = site.tlsEnabled ? configuration.ports.webHTTPS : configuration.ports.webHTTP
+        let defaultPort: UInt16 = site.tlsEnabled ? 443 : 80
+        return "\(scheme)://\(site.hostname)\(port == defaultPort ? "" : ":\(port)")"
     }
 
     func toolURL(_ name: String) -> String {
-        return "https://\(name).localhost\(helperInstalled ? "" : ":8443")"
+        let port = configuration.ports.webHTTPS
+        return "https://\(name).localhost\(port == 443 ? "" : ":\(port)")"
     }
 
     func selectWebServer(_ server: WebServer) async {
@@ -843,6 +990,11 @@ final class AppModel: ObservableObject {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
+        await refreshHelperStatus()
+        guard helperInstalled else {
+            helperNotice = .startBlocked
+            return
+        }
         do {
             guard runtimeIsAvailable(service.runtimeID) else {
                 throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "\(service.displayName) is not installed."])
@@ -867,6 +1019,10 @@ final class AppModel: ObservableObject {
                 let initialized = try await Task.detached { try manager.initializeIfNeeded(engine) }.value
                 try await startDatabase(engine)
                 if initialized { try await Task.detached { try manager.configureDevelopmentRootPassword(engine) }.value }
+            case .postgresql18:
+                configuration.selectedPostgreSQL = .postgresql18
+                try await store.save(configuration)
+                try await prepareAndStartPostgreSQL()
             case .mailpit: try await startMailpit()
             }
         } catch { errorMessage = "\(service.displayName): \(error.localizedDescription)" }
@@ -891,34 +1047,120 @@ final class AppModel: ObservableObject {
         let arguments = ["-p", paths.generatedNginx.path + "/", "-c", paths.generatedNginx.appendingPathComponent("nginx.conf").path]
         _ = try runner.runChecked(executable: executable, arguments: ["-t"] + arguments, environment: runtimeEnvironment)
         try await supervisor.start(ServiceSpecification(kind: .nginx, executable: executable, arguments: arguments, environment: runtimeEnvironment,
-            logFile: paths.logs.appendingPathComponent("nginx.log"), readinessProbe: .tcpLoopback(port: 8443)))
+            logFile: paths.logs.appendingPathComponent("nginx.log"), readinessProbe: .tcpLoopback(port: configuration.ports.webHTTPSListen)))
     }
 
     private func selectDatabase(_ engine: DatabaseEngine) async {
-        guard !isBusy, engine != configuration.selectedDatabase, runtimeIsAvailable(engine.rawValue) else { return }
+        guard !isBusy, engine != configuration.selectedDatabase,
+              engine == .none || runtimeIsAvailable(engine.rawValue) else { return }
         isBusy = true
         defer { isBusy = false }
         let previous = configuration.selectedDatabase
-        let old: ServiceKind = previous == .mysql84 ? .mysql84 : .mysql57
-        let next: ServiceKind = engine == .mysql84 ? .mysql84 : .mysql57
-        let wasRunning = await supervisor.state(for: old).phase == .running
+        let wasRunning = previous.service.map(serviceIsRunning) ?? false
         configuration.selectedDatabase = engine
         do {
             try generateConfiguration()
-            if wasRunning {
+            if let old = previous.service { await supervisor.stop(old) }
+            if wasRunning, engine != .none {
                 let manager = databaseManager
                 let initialized = try await Task.detached { try manager.initializeIfNeeded(engine) }.value
-                await supervisor.stop(old)
                 try await startDatabase(engine)
                 if initialized { try await Task.detached { try manager.configureDevelopmentRootPassword(engine) }.value }
             }
             try await store.save(configuration)
         } catch {
             configuration.selectedDatabase = previous
-            if wasRunning { await supervisor.stop(next); try? await startDatabase(previous) }
-            errorMessage = "Could not switch database: \(error.localizedDescription)"
+            try? generateConfiguration()
+            if let next = engine.service { await supervisor.stop(next) }
+            if wasRunning { try? await startDatabase(previous) }
+            errorMessage = "Could not change MySQL selection: \(error.localizedDescription)"
         }
         await refreshServiceStates()
+    }
+
+    func selectPostgreSQL(_ engine: PostgreSQLEngine) async {
+        guard !isBusy, engine != configuration.selectedPostgreSQL,
+              engine == .none || runtimeIsAvailable(engine.rawValue) else { return }
+        isBusy = true
+        defer { isBusy = false }
+        let previous = configuration.selectedPostgreSQL
+        let wasRunning = serviceIsRunning(.postgresql18)
+        configuration.selectedPostgreSQL = engine
+        do {
+            if engine == .none { await supervisor.stop(.postgresql18) }
+            try await store.save(configuration)
+        } catch {
+            configuration.selectedPostgreSQL = previous
+            if wasRunning { try? await prepareAndStartPostgreSQL() }
+            errorMessage = error.localizedDescription
+        }
+        await refreshServiceStates()
+    }
+
+    var postgreSQLManager: PostgreSQLManager {
+        PostgreSQLManager(paths: paths, runtime: runtimeDirectory("postgresql-18"), opensslRuntime: runtimeDirectory("openssl-3.5"), port: configuration.ports.postgresqlListen)
+    }
+    private func prepareAndStartPostgreSQL() async throws {
+        let manager = postgreSQLManager
+        let certificates = certificateManager
+        try await Task.detached {
+            try certificates.ensureLeafCertificate(for: "postgresql.localhost")
+            _ = try manager.initializeIfNeeded()
+            try manager.writeConfiguration()
+        }.value
+        try await supervisor.start(manager.specification)
+        guard await Task.detached(operation: { manager.ping() }).value else {
+            await supervisor.stop(.postgresql18)
+            throw ServiceFailure(message: "PostgreSQL did not accept the managed credentials.")
+        }
+    }
+
+    var managedTLSHostnames: Set<String> {
+        Set(configuration.sites.filter(\.tlsEnabled).map(\.hostname) + ["phpmyadmin.localhost", "adminer.localhost", "mailpit.localhost", "postgresql.localhost"])
+    }
+
+    func refreshCertificates() async {
+        let manager = certificateManager
+        do {
+            let summaries = try await Task.detached { try manager.leafSummaries() }.value
+            certificateSummaries = summaries
+            caSummary = FileManager.default.fileExists(atPath: manager.caCertificate.path)
+                ? await Task.detached { manager.summary(of: manager.caCertificate, hostname: "DevStack Local CA") }.value : nil
+            localCATrusted = manager.isTrusted()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func issueCertificate(for rawHostname: String) async {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
+        let manager = certificateManager
+        do {
+            let hostname = try HostnameValidator.validate(rawHostname)
+            try await Task.detached { try manager.ensureLeafCertificate(for: hostname, force: true); try manager.refreshTrustBundle() }.value
+            if managedTLSHostnames.contains(hostname) {
+                if serviceIsRunning(.apache) { try await validateWebConfigurations(); try await reloadApache() }
+                if serviceIsRunning(.nginx) {
+                    try await validateWebConfigurations()
+                    let executable = runtimeDirectory("nginx-1.30").appendingPathComponent("sbin/nginx")
+                    let arguments = ["-p", paths.generatedNginx.path + "/", "-c", paths.generatedNginx.appendingPathComponent("nginx.conf").path, "-s", "reload"]
+                    let environment = runtimeEnvironment; let runner = runner
+                    try await Task.detached { _ = try runner.runChecked(executable: executable, arguments: arguments, environment: environment) }.value
+                }
+                if hostname == "postgresql.localhost", serviceIsRunning(.postgresql18) { try await supervisor.reload(.postgresql18) }
+            }
+        } catch { errorMessage = error.localizedDescription }
+        await refreshCertificates()
+    }
+
+    func deleteCertificate(_ certificate: CertificateSummary) async {
+        guard !isBusy, !managedTLSHostnames.contains(certificate.hostname) else { return }
+        isBusy = true
+        defer { isBusy = false }
+        let manager = certificateManager
+        do { try await Task.detached { try manager.deleteLeafCertificate(for: certificate.hostname) }.value }
+        catch { errorMessage = error.localizedDescription }
+        await refreshCertificates()
     }
 
     private func loadRuntimeLock() throws -> [RuntimeManifest] {

@@ -30,6 +30,8 @@ public struct DevStackPaths: Sendable {
     public var databases: URL { applicationSupport.appendingPathComponent("Databases", isDirectory: true) }
     public var mysql57Data: URL { databases.appendingPathComponent("mysql-5.7", isDirectory: true) }
     public var mysql84Data: URL { databases.appendingPathComponent("mysql-8.4", isDirectory: true) }
+    public var postgresql18Data: URL { databases.appendingPathComponent("postgresql-18", isDirectory: true) }
+    public var generatedPostgreSQL: URL { generated.appendingPathComponent("PostgreSQL", isDirectory: true) }
     public var sockets: URL {
         let digest = SHA256.hash(data: Data(applicationSupport.standardizedFileURL.path.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
         return URL(fileURLWithPath: "/tmp/devstack-\(getuid())-\(digest)", isDirectory: true)
@@ -55,7 +57,7 @@ public struct DevStackPaths: Sendable {
         let directories = [
             applicationSupport, logs, generated, generatedApache, generatedPHP, generatedNginx,
             generatedPHP.appendingPathComponent("conf.d", isDirectory: true),
-            importedRuntimes, databases, sockets, certificates, phpMyAdmin,
+            importedRuntimes, databases, generatedPostgreSQL, sockets, certificates, phpMyAdmin,
             phpMyAdmin.appendingPathComponent("tmp", isDirectory: true),
             certificates.appendingPathComponent("sites", isDirectory: true), mailpit, backups
         ]

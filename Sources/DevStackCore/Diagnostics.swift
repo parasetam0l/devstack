@@ -10,6 +10,9 @@ public struct DiagnosticContext: Sendable {
     public var serviceStates: [ServiceState]
     public var requiredRuntimeIDs: Set<String>
     public var selectedDatabase: DatabaseEngine
+    public var selectedPostgreSQL: PostgreSQLEngine
+    public var ports: ServicePorts
+    public var localNetworkAccess: Bool
 
     public init(
         paths: DevStackPaths,
@@ -20,7 +23,10 @@ public struct DiagnosticContext: Sendable {
         expectedHostnames: [String] = [],
         serviceStates: [ServiceState] = [],
         requiredRuntimeIDs: Set<String> = [],
-        selectedDatabase: DatabaseEngine = .mysql84
+        selectedDatabase: DatabaseEngine = .mysql84,
+        selectedPostgreSQL: PostgreSQLEngine = .none,
+        ports: ServicePorts = ServicePorts(),
+        localNetworkAccess: Bool = false
     ) {
         self.paths = paths
         self.runtimeManifests = runtimeManifests
@@ -30,6 +36,9 @@ public struct DiagnosticContext: Sendable {
         self.expectedHostnames = expectedHostnames
         self.serviceStates = serviceStates
         self.selectedDatabase = selectedDatabase
+        self.selectedPostgreSQL = selectedPostgreSQL
+        self.ports = ports
+        self.localNetworkAccess = localNetworkAccess
         self.requiredRuntimeIDs = requiredRuntimeIDs
     }
 }
@@ -56,7 +65,7 @@ public struct DevStackDoctor: Sendable {
         results.append(directoryResult(context.paths.applicationSupport, id: "application-support"))
         results.append(directoryResult(context.paths.logs, id: "logs"))
         results.append(helperResult(context))
-        results.append(contentsOf: helperStatusResults(context.helperStatus))
+        results.append(contentsOf: helperStatusResults(context.helperStatus, context: context))
         results.append(contentsOf: serviceReadinessResults(context.serviceStates))
         progress?("Checking ports and local domain mappings…")
         results.append(contentsOf: portResults(context: context))
@@ -66,6 +75,7 @@ public struct DevStackDoctor: Sendable {
         results.append(contentsOf: configurationResults(context))
         results.append(contentsOf: certificateResults(context))
         results.append(databaseResult(context))
+        results.append(postgreSQLResult(context))
         results.append(diskResult(context.paths.applicationSupport))
 
         if let applicationURL = context.applicationURL {
@@ -110,14 +120,14 @@ public struct DevStackDoctor: Sendable {
         )
     }
 
-    private func helperStatusResults(_ status: PrivilegedHelperStatus?) -> [DiagnosticResult] {
+    private func helperStatusResults(_ status: PrivilegedHelperStatus?, context: DiagnosticContext) -> [DiagnosticResult] {
         guard let status else { return [] }
         return [
             .init(
                 id: "helper-port-forwarding",
                 title: "Privileged port forwarding",
                 severity: status.portForwardingEnabled ? .info : .warning,
-                evidence: status.portForwardingEnabled ? "80→8080 and 443→8443 are enabled." : "Disabled",
+                evidence: status.portForwardingEnabled ? "Loopback forwarding is enabled." : "Disabled",
                 remediation: status.portForwardingEnabled ? nil : "Start DevStack to enable its loopback-only forwarders."
             ),
             .init(
@@ -126,6 +136,17 @@ public struct DevStackDoctor: Sendable {
                 severity: status.localCATrusted ? .info : .warning,
                 evidence: status.localCATrusted ? "The public DevStack CA is trusted." : "The DevStack CA is not trusted.",
                 remediation: status.localCATrusted ? nil : "Start DevStack or reinstall the helper to trust the public local CA certificate."
+            ),
+            .init(
+                id: "local-dns",
+                title: "Local DNS server",
+                severity: status.dnsEnabled ? .info : (context.localNetworkAccess ? .warning : .info),
+                evidence: status.dnsEnabled
+                    ? "Answering DevStack hostnames with \(status.dnsAnswerAddress ?? "the LAN address"); other queries are forwarded to the system resolvers."
+                    : "Disabled.",
+                remediation: status.dnsEnabled ? nil : (context.localNetworkAccess
+                    ? "Local network access is enabled in Settings but the helper is not answering on port 53."
+                    : "Enable Local network access in Settings to serve DevStack hostnames to phones.")
             )
         ]
     }
@@ -167,10 +188,24 @@ public struct DevStackDoctor: Sendable {
     private func portResults(context: DiagnosticContext) -> [DiagnosticResult] {
         let selectedDatabaseService: ServiceKind = context.selectedDatabase == .mysql57 ? .mysql57 : .mysql84
         let webService: ServiceKind = context.serviceStates.contains { $0.service == .nginx && $0.phase == .running } ? .nginx : .apache
-        let owners: [(Int, ServiceKind)] = [
-            (80, webService), (443, webService), (8080, webService), (8443, webService),
-            (3306, selectedDatabaseService), (1025, .mailpit), (8025, .mailpit)
+        let ports = context.ports
+        var owners: [(Int, ServiceKind)] = [
+            (Int(ports.webHTTPListen), webService), (Int(ports.webHTTPSListen), webService),
+            (Int(ports.mysqlListen), selectedDatabaseService), (Int(ports.postgresqlListen), .postgresql18),
+            (Int(ports.mailpitSMTPListen), .mailpit), (Int(ports.mailpitInboxListen), .mailpit)
         ]
+        if context.helperInstalled {
+            for entry in ports.forwardings {
+                let service: ServiceKind
+                switch entry.publicPort {
+                case ports.webHTTP, ports.webHTTPS: service = webService
+                case ports.mysql: service = selectedDatabaseService
+                case ports.postgresql: service = .postgresql18
+                default: service = .mailpit
+                }
+                owners.append((Int(entry.publicPort), service))
+            }
+        }
         var phases: [ServiceKind: ServicePhase] = [:]
         for state in context.serviceStates { phases[state.service] = state.phase }
         return owners.map { port, service in
@@ -181,7 +216,7 @@ public struct DevStackDoctor: Sendable {
                     timeout: 5
                 )
                 let occupied = result.exitCode == 0 && !result.standardOutput.isEmpty
-                let expected = phases[service] == .running && (port > 443 || context.helperInstalled)
+                let expected = phases[service] == .running && (port >= 1024 || context.helperInstalled)
                 let severity: DiagnosticSeverity = expected ? (occupied ? .info : .error) : (occupied ? .warning : .info)
                 let evidence = occupied ? redact(result.standardOutput) : "Available"
                 return .init(
@@ -233,7 +268,7 @@ public struct DevStackDoctor: Sendable {
                     return roots.first { FileManager.default.fileExists(atPath: $0.appendingPathComponent("bin/php").path) }
                 }
                 guard !installed.isEmpty else {
-                    return .init(id: "runtime-\(manifest.id)", title: manifest.id, severity: .warning, evidence: "The owning PHP runtime is not installed.")
+                    return .init(id: "runtime-\(manifest.id)", title: manifest.id, severity: owners.contains(where: required.contains) ? .warning : .info, evidence: "The owning PHP runtime is not installed.")
                 }
                 let failures = installed.flatMap { root in auditRuntimeBinaries(at: root, manifest: manifest) }
                 let missing = installed.flatMap { root in manifest.entryPoints.values.filter { !FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path) } }
@@ -244,6 +279,10 @@ public struct DevStackDoctor: Sendable {
             }
             let roots = [paths.importedRuntimes.appendingPathComponent(manifest.id), paths.builtInRuntimes.appendingPathComponent(manifest.id)]
             let root = roots.first { FileManager.default.fileExists(atPath: $0.path) }
+            if root == nil, manifest.build?.feasibilityGate != nil, manifest.supportState != .supported, !required.contains(manifest.id) {
+                return .init(id: "runtime-\(manifest.id)", title: "Optional runtime \(manifest.id)", severity: .info,
+                    evidence: "Not included in this build. Its compatibility gate must pass before installation.")
+            }
             let missing = manifest.entryPoints.values.filter { relative in
                 guard let root else { return true }
                 return !FileManager.default.fileExists(atPath: root.appendingPathComponent(relative).path)
@@ -322,12 +361,12 @@ public struct DevStackDoctor: Sendable {
         let mysqlArguments = engine == .mysql84
             ? ["--defaults-file=\(mysqlConfig.path)", "--validate-config"]
             : ["--defaults-file=\(mysqlConfig.path)", "--verbose", "--help"]
-        checks.append((
+        if engine != .none { checks.append((
             "config-\(engine.rawValue)", "\(engine.displayName) configuration",
             context.paths.builtInRuntimes.appendingPathComponent("\(engine.rawValue)/bin/mysqld"),
             mysqlArguments,
             engine == .mysql84
-        ))
+        )) }
 
         return checks.map { id, title, executable, arguments, reportsOutput in
             let referencedFiles = arguments.filter { $0.hasPrefix("/") || $0.hasPrefix("--defaults-file=") }
@@ -390,13 +429,16 @@ public struct DevStackDoctor: Sendable {
     }
 
     private func databaseResult(_ context: DiagnosticContext) -> DiagnosticResult {
+        if context.selectedDatabase == .none {
+            return .init(id: "database-state", title: "MySQL selection", severity: .info, evidence: "MySQL is excluded from Start Stack. Existing databases are preserved.")
+        }
         let selectedDirectory = context.selectedDatabase == .mysql57 ? context.paths.mysql57Data : context.paths.mysql84Data
         let otherDirectory = context.selectedDatabase == .mysql57 ? context.paths.mysql84Data : context.paths.mysql57Data
         guard selectedDirectory.standardizedFileURL.path != otherDirectory.standardizedFileURL.path else {
             return .init(id: "database-state", title: "Database isolation", severity: .error, evidence: "MySQL data directories resolve to the same path.", remediation: "Move each engine to its own data directory before starting MySQL.")
         }
         let initialized = FileManager.default.fileExists(atPath: selectedDirectory.appendingPathComponent("mysql").path)
-        let manager = DatabaseManager(paths: context.paths, runtimeRoot: context.paths.builtInRuntimes, runner: runner)
+        let manager = DatabaseManager(paths: context.paths, runtimeRoot: context.paths.builtInRuntimes, runner: runner, port: context.ports.mysqlListen)
         let selectedService: ServiceKind = context.selectedDatabase == .mysql57 ? .mysql57 : .mysql84
         let running = context.serviceStates.first(where: { $0.service == selectedService })?.phase == .running
         let reachable = running ? manager.ping(context.selectedDatabase) : false
@@ -408,6 +450,15 @@ public struct DevStackDoctor: Sendable {
             evidence: "Selected: \(context.selectedDatabase.displayName); initialized: \(initialized ? "yes" : "no"); readiness: \(running ? (reachable ? "reachable" : "unreachable") : "stopped"); data directories are separate.",
             remediation: healthy ? nil : "Inspect the selected MySQL log and restart the engine."
         )
+    }
+
+    private func postgreSQLResult(_ context: DiagnosticContext) -> DiagnosticResult {
+        let running = context.serviceStates.contains { $0.service == .postgresql18 && $0.phase == .running }
+        let manager = PostgreSQLManager(paths: context.paths, runtime: context.paths.builtInRuntimes.appendingPathComponent("postgresql-18"), port: context.ports.postgresqlListen)
+        let reachable = !running || manager.ping()
+        return .init(id: "postgresql-state", title: "PostgreSQL state", severity: reachable ? .info : .error,
+            evidence: "Selected: \(context.selectedPostgreSQL.displayName); service: \(running ? "running" : "stopped"); own data directory: \(context.paths.postgresql18Data.path).",
+            remediation: reachable ? nil : "Inspect the PostgreSQL log and check port \(context.ports.postgresqlListen).")
     }
 
     private func diskResult(_ url: URL) -> DiagnosticResult {

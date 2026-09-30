@@ -15,14 +15,14 @@ struct PrivilegedHelperClient: @unchecked Sendable {
         var code: SecStaticCode?
         var info: CFDictionary?
         guard SecStaticCodeCreateWithPath(Bundle.main.bundleURL as CFURL, [], &code) == errSecSuccess,
-              let code, SecCodeCopySigningInformation(code, [], &info) == errSecSuccess,
+              let code, SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
               let dictionary = info as? [String: Any] else { return false }
         return dictionary[kSecCodeInfoTeamIdentifier as String] is String
     }
 
     func register() throws {
         guard canAuthenticate else {
-            throw NSError(domain: "app.devstack.desktop.helper", code: 2, userInfo: [NSLocalizedDescriptionKey: "System integration requires a Developer ID signed release. This development build can run services on ports 8080 and 8443."])
+            throw NSError(domain: "app.devstack.desktop.helper", code: 2, userInfo: [NSLocalizedDescriptionKey: "System integration requires a Developer ID signed release. This build cannot manage the hosts file or privileged ports."])
         }
         guard service.status != .enabled, service.status != .requiresApproval else { return }
         try service.register()
@@ -44,6 +44,13 @@ struct PrivilegedHelperClient: @unchecked Sendable {
         let request = try encoder.encode(configuration)
         let _: HelperAcknowledgement = try await call { proxy, reply in
             proxy.setPortForwarding(request, withReply: reply)
+        }
+    }
+
+    func setDNSConfiguration(_ configuration: DNSConfiguration) async throws {
+        let request = try encoder.encode(configuration)
+        let _: HelperAcknowledgement = try await call { proxy, reply in
+            proxy.setDNSConfiguration(request, withReply: reply)
         }
     }
 

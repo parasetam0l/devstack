@@ -32,8 +32,8 @@ public actor AppConfigurationStore {
     }
 
     private func migrate(_ configuration: AppConfiguration) -> AppConfiguration {
-        // Schema 1 is the initial public schema. Future migrations must be
-        // append-only and explicitly tested before incrementing the version.
+        // The Codable initializer applies the additive schema-2 database and
+        // PHP-driver defaults; selection combinations and old files are checked.
         configuration
     }
 }

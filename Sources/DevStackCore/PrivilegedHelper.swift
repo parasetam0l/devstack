@@ -15,23 +15,42 @@ public struct LocalCARequest: Codable, Hashable, Sendable {
     }
 }
 
+/// The helper's local DNS service: it answers the listed hostnames with the
+/// Mac's LAN address and forwards every other query to the system resolvers.
+public struct DNSConfiguration: Codable, Hashable, Sendable {
+    public var enabled: Bool
+    public var hostnames: [String]
+    public var answerAddress: String
+
+    public init(enabled: Bool, hostnames: [String] = [], answerAddress: String = "") {
+        self.enabled = enabled
+        self.hostnames = hostnames
+        self.answerAddress = answerAddress
+    }
+}
+
 public struct PrivilegedHelperStatus: Codable, Hashable, Sendable {
     public var hostMappingsInstalled: Bool
     public var portForwardingEnabled: Bool
     public var localCATrusted: Bool
     public var version: String
+    public var dnsEnabled: Bool
+    public var dnsAnswerAddress: String?
 
-    public init(hostMappingsInstalled: Bool, portForwardingEnabled: Bool, localCATrusted: Bool, version: String) {
+    public init(hostMappingsInstalled: Bool, portForwardingEnabled: Bool, localCATrusted: Bool, version: String, dnsEnabled: Bool = false, dnsAnswerAddress: String? = nil) {
         self.hostMappingsInstalled = hostMappingsInstalled
         self.portForwardingEnabled = portForwardingEnabled
         self.localCATrusted = localCATrusted
         self.version = version
+        self.dnsEnabled = dnsEnabled
+        self.dnsAnswerAddress = dnsAnswerAddress
     }
 }
 
 @objc public protocol PrivilegedHelperXPCProtocol {
     func applyHostMappings(_ request: Data, withReply reply: @escaping (Data?, NSError?) -> Void)
     func setPortForwarding(_ request: Data, withReply reply: @escaping (Data?, NSError?) -> Void)
+    func setDNSConfiguration(_ request: Data, withReply reply: @escaping (Data?, NSError?) -> Void)
     func trustLocalCA(_ request: Data, withReply reply: @escaping (Data?, NSError?) -> Void)
     func removeManagedState(withReply reply: @escaping (Data?, NSError?) -> Void)
     func status(withReply reply: @escaping (Data?, NSError?) -> Void)
@@ -42,13 +61,15 @@ public enum PrivilegedRequestValidationError: LocalizedError, Equatable, Sendabl
     case nonLoopbackMapping
     case invalidPortForwarding
     case invalidCertificate
+    case invalidDNSAddress
 
     public var errorDescription: String? {
         switch self {
         case .tooManyHostnames: "A maximum of 256 host mappings is allowed."
         case .nonLoopbackMapping: "Host mappings must point only to the IPv4 and IPv6 loopback addresses."
-        case .invalidPortForwarding: "Only loopback forwarding from 80 to 8080 and 443 to 8443 is allowed."
+        case .invalidPortForwarding: "Only loopback forwarding from a privileged port to an unprivileged DevStack listener is allowed."
         case .invalidCertificate: "The CA certificate payload is empty or too large."
+        case .invalidDNSAddress: "The DNS answer address must be a private LAN IPv4 address."
         }
     }
 }
@@ -68,10 +89,48 @@ public enum PrivilegedRequestValidator {
     }
 
     public static func portForwarding(_ configuration: PortForwardingConfiguration) throws -> PortForwardingConfiguration {
-        guard configuration.httpUpstreamPort == 8080, configuration.httpsUpstreamPort == 8443 else {
+        guard configuration.entries.count <= 8 else {
             throw PrivilegedRequestValidationError.invalidPortForwarding
         }
+        var publicPorts = Set<UInt16>()
+        for entry in configuration.entries {
+            guard entry.publicPort >= 1, entry.publicPort < 1024,
+                  entry.upstreamPort >= 1024, entry.upstreamPort != entry.publicPort,
+                  !ServicePorts.reservedPorts.contains(entry.publicPort),
+                  publicPorts.insert(entry.publicPort).inserted else {
+                throw PrivilegedRequestValidationError.invalidPortForwarding
+            }
+        }
+        guard configuration.lanEntries.count <= 8 else {
+            throw PrivilegedRequestValidationError.invalidPortForwarding
+        }
+        var lanPorts = Set<UInt16>()
+        for entry in configuration.lanEntries {
+            guard entry.publicPort >= 1, entry.upstreamPort >= 1024,
+                  !ServicePorts.reservedPorts.contains(entry.publicPort),
+                  lanPorts.insert(entry.publicPort).inserted else {
+                throw PrivilegedRequestValidationError.invalidPortForwarding
+            }
+        }
         return configuration
+    }
+
+    public static func dnsConfiguration(_ configuration: DNSConfiguration) throws -> DNSConfiguration {
+        guard configuration.hostnames.count <= 256 else { throw PrivilegedRequestValidationError.tooManyHostnames }
+        var hostnames = Set<String>()
+        let normalized = try configuration.hostnames.map { name -> String in
+            let hostname = try HostnameValidator.validate(name, existing: hostnames)
+            hostnames.insert(hostname)
+            return hostname
+        }
+        if configuration.enabled {
+            guard LocalNetwork.isPrivateIPv4(configuration.answerAddress),
+                  !configuration.answerAddress.hasPrefix("127."),
+                  !configuration.answerAddress.hasPrefix("169.254.") else {
+                throw PrivilegedRequestValidationError.invalidDNSAddress
+            }
+        }
+        return DNSConfiguration(enabled: configuration.enabled, hostnames: normalized.sorted(), answerAddress: configuration.answerAddress)
     }
 
     public static func localCA(_ request: LocalCARequest) throws -> LocalCARequest {

@@ -5,6 +5,7 @@ public enum RuntimeKind: String, Codable, CaseIterable, Sendable {
     case nginx
     case php
     case mysql
+    case postgresql
     case mailpit
     case phpMyAdmin = "phpmyadmin"
     case adminer
@@ -258,17 +259,27 @@ public struct SiteDefinition: Codable, Hashable, Identifiable, Sendable {
 }
 
 public enum DatabaseEngine: String, Codable, CaseIterable, Sendable {
+    case none = "none"
     case mysql57 = "mysql-5.7"
     case mysql84 = "mysql-8.4"
 
     public var displayName: String {
         switch self {
+        case .none: "No MySQL"
         case .mysql57: "MySQL 5.7.44"
         case .mysql84: "MySQL 8.4.11 LTS"
         }
     }
 
     public var isLegacy: Bool { self == .mysql57 }
+    public var service: ServiceKind? { self == .none ? nil : ServiceKind(rawValue: rawValue) }
+}
+
+public enum PostgreSQLEngine: String, Codable, CaseIterable, Sendable {
+    case none = "none"
+    case postgresql18 = "postgresql-18"
+    public var displayName: String { self == .none ? "No PostgreSQL" : "PostgreSQL 18.6" }
+    public var service: ServiceKind? { self == .none ? nil : .postgresql18 }
 }
 
 public enum WebServer: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -279,43 +290,59 @@ public enum WebServer: String, Codable, CaseIterable, Identifiable, Sendable {
 }
 
 public struct AppConfiguration: Codable, Hashable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 4
 
     public var schemaVersion: Int
     public var sites: [SiteDefinition]
     public var selectedDatabase: DatabaseEngine
+    public var selectedPostgreSQL: PostgreSQLEngine
     public var enabledExtensions: [String: Set<String>]
     public var startAtLogin: Bool
     public var importedRuntimeIDs: [String]
     public var selectedWebServer: WebServer
     public var defaultPHPRuntimeID: String
+    public var ports: ServicePorts
+    public var helperNoticeDismissed: Bool
+    public var localNetworkAccess: Bool
 
     public init(
         schemaVersion: Int = currentSchemaVersion,
         sites: [SiteDefinition] = [],
         selectedDatabase: DatabaseEngine = .mysql84,
+        selectedPostgreSQL: PostgreSQLEngine = .none,
         enabledExtensions: [String: Set<String>] = [
             "php-7.4": ["redis", "imagick"],
-            "php-8.5": ["redis", "imagick"],
-            "php-8.4": ["redis", "imagick"]
+            "php-8.5": ["redis", "imagick", "pgsql", "pdo_pgsql"],
+            "php-8.4": ["redis", "imagick", "pgsql", "pdo_pgsql"]
         ],
         startAtLogin: Bool = false,
         importedRuntimeIDs: [String] = [],
         selectedWebServer: WebServer = .apache,
-        defaultPHPRuntimeID: String = "php-8.5"
+        defaultPHPRuntimeID: String = "php-8.5",
+        ports: ServicePorts = ServicePorts(),
+        helperNoticeDismissed: Bool = false,
+        localNetworkAccess: Bool = false
     ) {
         self.schemaVersion = schemaVersion
         self.sites = sites
         self.selectedDatabase = selectedDatabase
+        self.selectedPostgreSQL = selectedPostgreSQL
         self.enabledExtensions = enabledExtensions
         self.startAtLogin = startAtLogin
         self.importedRuntimeIDs = importedRuntimeIDs
         self.selectedWebServer = selectedWebServer
         self.defaultPHPRuntimeID = defaultPHPRuntimeID
+        self.ports = ports
+        self.helperNoticeDismissed = helperNoticeDismissed
+        self.localNetworkAccess = localNetworkAccess
+    }
+
+    public var selectedDatabaseServices: [ServiceKind] {
+        [selectedDatabase.service, selectedPostgreSQL.service].compactMap { $0 }
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, sites, selectedDatabase, enabledExtensions, startAtLogin, importedRuntimeIDs, selectedWebServer, defaultPHPRuntimeID
+        case schemaVersion, sites, selectedDatabase, selectedPostgreSQL, enabledExtensions, startAtLogin, importedRuntimeIDs, selectedWebServer, defaultPHPRuntimeID, ports, helperNoticeDismissed, localNetworkAccess
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -323,12 +350,20 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
             schemaVersion: try values.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1,
             sites: try values.decodeIfPresent([SiteDefinition].self, forKey: .sites) ?? [],
             selectedDatabase: try values.decodeIfPresent(DatabaseEngine.self, forKey: .selectedDatabase) ?? .mysql84,
+            selectedPostgreSQL: try values.decodeIfPresent(PostgreSQLEngine.self, forKey: .selectedPostgreSQL) ?? .none,
             enabledExtensions: try values.decodeIfPresent([String: Set<String>].self, forKey: .enabledExtensions) ?? [:],
             startAtLogin: try values.decodeIfPresent(Bool.self, forKey: .startAtLogin) ?? false,
             importedRuntimeIDs: try values.decodeIfPresent([String].self, forKey: .importedRuntimeIDs) ?? [],
             selectedWebServer: try values.decodeIfPresent(WebServer.self, forKey: .selectedWebServer) ?? .apache,
-            defaultPHPRuntimeID: try values.decodeIfPresent(String.self, forKey: .defaultPHPRuntimeID) ?? "php-8.5"
+            defaultPHPRuntimeID: try values.decodeIfPresent(String.self, forKey: .defaultPHPRuntimeID) ?? "php-8.5",
+            ports: try values.decodeIfPresent(ServicePorts.self, forKey: .ports) ?? ServicePorts(),
+            helperNoticeDismissed: try values.decodeIfPresent(Bool.self, forKey: .helperNoticeDismissed) ?? false,
+            localNetworkAccess: try values.decodeIfPresent(Bool.self, forKey: .localNetworkAccess) ?? false
         )
+        if schemaVersion < 2 {
+            for id in ["php-8.4", "php-8.5"] { enabledExtensions[id, default: []].formUnion(["pgsql", "pdo_pgsql"]) }
+        }
+        if schemaVersion < Self.currentSchemaVersion { schemaVersion = Self.currentSchemaVersion }
     }
 
 }
@@ -341,6 +376,7 @@ public enum ServiceKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case php85 = "php-8.5"
     case mysql57 = "mysql-5.7"
     case mysql84 = "mysql-8.4"
+    case postgresql18 = "postgresql-18"
     case mailpit
 
     public var id: String { rawValue }
@@ -447,14 +483,110 @@ public struct HostMapping: Codable, Hashable, Sendable {
     }
 }
 
+public struct PortForwardingEntry: Codable, Hashable, Sendable {
+    public var publicPort: UInt16
+    public var upstreamPort: UInt16
+
+    public init(publicPort: UInt16, upstreamPort: UInt16) {
+        self.publicPort = publicPort
+        self.upstreamPort = upstreamPort
+    }
+}
+
 public struct PortForwardingConfiguration: Codable, Hashable, Sendable {
     public var enabled: Bool
-    public var httpUpstreamPort: UInt16
-    public var httpsUpstreamPort: UInt16
+    public var entries: [PortForwardingEntry]
+    public var lanEntries: [PortForwardingEntry]
 
-    public init(enabled: Bool, httpUpstreamPort: UInt16 = 8080, httpsUpstreamPort: UInt16 = 8443) {
+    public init(enabled: Bool, entries: [PortForwardingEntry] = [], lanEntries: [PortForwardingEntry] = []) {
         self.enabled = enabled
-        self.httpUpstreamPort = httpUpstreamPort
-        self.httpsUpstreamPort = httpsUpstreamPort
+        self.entries = entries
+        self.lanEntries = lanEntries
     }
+}
+
+/// User-configurable ports for every stack service.
+///
+/// Ports below 1024 cannot be bound by the unprivileged service processes. When one is
+/// requested, the service keeps listening on its unprivileged fallback port and the
+/// privileged helper forwards the requested public port to it on the loopback interface.
+public struct ServicePorts: Codable, Hashable, Sendable {
+    public var webHTTP: UInt16
+    public var webHTTPS: UInt16
+    public var mysql: UInt16
+    public var postgresql: UInt16
+    public var mailpitSMTP: UInt16
+    public var mailpitInbox: UInt16
+
+    public init(
+        webHTTP: UInt16 = ServicePorts.webHTTPFallback,
+        webHTTPS: UInt16 = ServicePorts.webHTTPSFallback,
+        mysql: UInt16 = ServicePorts.mysqlFallback,
+        postgresql: UInt16 = ServicePorts.postgresqlFallback,
+        mailpitSMTP: UInt16 = ServicePorts.mailpitSMTPFallback,
+        mailpitInbox: UInt16 = ServicePorts.mailpitInboxFallback
+    ) {
+        self.webHTTP = webHTTP
+        self.webHTTPS = webHTTPS
+        self.mysql = mysql
+        self.postgresql = postgresql
+        self.mailpitSMTP = mailpitSMTP
+        self.mailpitInbox = mailpitInbox
+    }
+
+    public static let webHTTPFallback: UInt16 = 8080
+    public static let webHTTPSFallback: UInt16 = 8443
+    public static let mysqlFallback: UInt16 = 3306
+    public static let postgresqlFallback: UInt16 = 5432
+    public static let mailpitSMTPFallback: UInt16 = 1025
+    public static let mailpitInboxFallback: UInt16 = 8025
+
+    /// The port the web server actually listens on.
+    public var webHTTPListen: UInt16 { webHTTP < 1024 ? Self.webHTTPFallback : webHTTP }
+    public var webHTTPSListen: UInt16 { webHTTPS < 1024 ? Self.webHTTPSFallback : webHTTPS }
+    public var mysqlListen: UInt16 { mysql < 1024 ? Self.mysqlFallback : mysql }
+    public var postgresqlListen: UInt16 { postgresql < 1024 ? Self.postgresqlFallback : postgresql }
+    public var mailpitSMTPListen: UInt16 { mailpitSMTP < 1024 ? Self.mailpitSMTPFallback : mailpitSMTP }
+    public var mailpitInboxListen: UInt16 { mailpitInbox < 1024 ? Self.mailpitInboxFallback : mailpitInbox }
+
+    /// Public ports the helper must forward to the unprivileged listener.
+    public var forwardings: [PortForwardingEntry] {
+        let pairs: [(UInt16, UInt16)] = [
+            (webHTTP, webHTTPListen),
+            (webHTTPS, webHTTPSListen),
+            (mysql, mysqlListen),
+            (postgresql, postgresqlListen),
+            (mailpitSMTP, mailpitSMTPListen),
+            (mailpitInbox, mailpitInboxListen)
+        ]
+        return pairs.filter { $0.0 < 1024 }.map { PortForwardingEntry(publicPort: $0.0, upstreamPort: $0.1) }
+    }
+
+    public var requiresHelper: Bool { !forwardings.isEmpty }
+
+    /// Ports the helper refuses to bind even when requested.
+    public static let reservedPorts: Set<UInt16> = [22]
+
+    /// Ports that are privileged but not forwardable.
+    public var reservedRequests: [UInt16] {
+        [webHTTP, webHTTPS, mysql, postgresql, mailpitSMTP, mailpitInbox].filter { Self.reservedPorts.contains($0) }
+    }
+
+    /// Listener conflicts that make the stack unable to start.
+    public var collisions: [UInt16] {
+        let listeners: [UInt16] = [webHTTPListen, webHTTPSListen, mysqlListen, postgresqlListen, mailpitSMTPListen, mailpitInboxListen]
+        var seen = Set<UInt16>()
+        var duplicates = Set<UInt16>()
+        for port in listeners where !seen.insert(port).inserted { duplicates.insert(port) }
+        let publics: [UInt16] = [webHTTP, webHTTPS, mysql, postgresql, mailpitSMTP, mailpitInbox].filter { $0 < 1024 }
+        var publicSeen = Set<UInt16>()
+        for port in publics where !publicSeen.insert(port).inserted { duplicates.insert(port) }
+        return duplicates.sorted()
+    }
+
+    public var privilegedPorts: [UInt16] {
+        [webHTTP, webHTTPS, mysql, postgresql, mailpitSMTP, mailpitInbox].filter { $0 < 1024 && !Self.reservedPorts.contains($0) }
+    }
+
+    public var isValid: Bool { collisions.isEmpty && reservedRequests.isEmpty }
 }

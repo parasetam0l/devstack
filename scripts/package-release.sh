@@ -12,7 +12,7 @@ identity="${DEVSTACK_SIGNING_IDENTITY:--}"
 [[ "$(uname -m)" == "arm64" ]] || { echo "Release packaging requires Apple Silicon." >&2; exit 69; }
 [[ -d "$runtime_root" ]] || { echo "Runtime payload is missing: $runtime_root" >&2; exit 66; }
 
-runtime_ids=(apache-2.4 nginx-1.30 php-8.4 php-8.5 mysql-8.4 openssl-3.5 mailpit-1.31.1 phpmyadmin-5.2.3 adminer-6.1.1 composer-2.10.3 imagemagick-7.1)
+runtime_ids=(apache-2.4 nginx-1.30 php-8.4 php-8.5 mysql-8.4 postgresql-18 openssl-3.5 mailpit-1.31.1 phpmyadmin-5.2.3 adminer-6.1.1 composer-2.10.3 imagemagick-7.1)
 # Optional legacy payloads enter the release only after their feasibility gates pass.
 if [[ "${DEVSTACK_INCLUDE_LEGACY:-0}" == "1" ]]; then
     for runtime_id in php-7.4 mysql-5.7; do
@@ -26,8 +26,8 @@ if [[ "${DEVSTACK_INCLUDE_LEGACY:-0}" == "1" ]]; then
     done
 fi
 cd "$repository_root"
-swift build -c release --build-system native --jobs "${DEVSTACK_BUILD_JOBS:-4}"
-products="$(swift build -c release --build-system native --show-bin-path)"
+swift build -c release --jobs "${DEVSTACK_BUILD_JOBS:-2}"
+products="$(swift build -c release --show-bin-path)"
 "$products/DevStackCoreChecks"
 mkdir -p "$application/Contents/MacOS" \
     "$application/Contents/Resources/Runtimes" \
@@ -73,7 +73,13 @@ done < <(/usr/bin/python3 "$repository_root/scripts/mach-o-files.py" "$applicati
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$application"
 
 dmg="$staging_root/DevStack-0.1.0-arm64.dmg"
-/usr/bin/hdiutil create -volname DevStack -srcfolder "$application" -ov -format UDZO "$dmg"
+dmg_root="$staging_root/dmg-root"
+rm -rf "$dmg_root"
+mkdir -p "$dmg_root"
+cp -cR "$application" "$dmg_root/DevStack.app"
+ln -s /Applications "$dmg_root/Applications"
+/usr/sbin/diskutil image create from --volumeName DevStack --format UDZO "$dmg_root" "$dmg"
+rm -rf "$dmg_root"
 /usr/bin/codesign --force "${signing_options[@]}" --sign "$identity" "$dmg"
 
 if [[ -n "${DEVSTACK_NOTARY_PROFILE:-}" ]]; then

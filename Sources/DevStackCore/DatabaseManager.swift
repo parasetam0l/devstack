@@ -2,12 +2,14 @@ import Darwin
 import Foundation
 
 public enum DatabaseManagerError: LocalizedError, Sendable {
+    case engineNotSelected
     case unsafeDatabaseName(String)
     case sourceFileMissing(String)
     case dataDirectoryMissing(String)
 
     public var errorDescription: String? {
         switch self {
+        case .engineNotSelected: "Select a MySQL version before using its database tools."
         case .unsafeDatabaseName(let name): "Invalid database name: \(name)"
         case .sourceFileMissing(let path): "SQL source file does not exist: \(path)"
         case .dataDirectoryMissing(let path): "Database data directory does not exist: \(path)"
@@ -18,17 +20,20 @@ public enum DatabaseManagerError: LocalizedError, Sendable {
 public struct DatabaseManager: Sendable {
     public let paths: DevStackPaths
     public let runtimeRoot: URL
+    public let port: UInt16
     private let runner: ProcessRunner
     private let environment: [String: String]
 
-    public init(paths: DevStackPaths, runtimeRoot: URL, runner: ProcessRunner = ProcessRunner(), opensslRuntime: URL? = nil) {
+    public init(paths: DevStackPaths, runtimeRoot: URL, runner: ProcessRunner = ProcessRunner(), opensslRuntime: URL? = nil, port: UInt16 = ServicePorts.mysqlFallback) {
         self.paths = paths
         self.runtimeRoot = runtimeRoot
         self.runner = runner
+        self.port = port
         self.environment = RuntimeEnvironment.openssl(at: opensslRuntime ?? runtimeRoot.appendingPathComponent("openssl-3.5"))
     }
 
     public func initializeIfNeeded(_ engine: DatabaseEngine) throws -> Bool {
+        guard engine != .none else { throw DatabaseManagerError.engineNotSelected }
         let dataDirectory = dataDirectory(for: engine)
         let initializedMarker = dataDirectory.appendingPathComponent("mysql", isDirectory: true)
         guard !FileManager.default.fileExists(atPath: initializedMarker.path) else {
@@ -48,6 +53,7 @@ public struct DatabaseManager: Sendable {
     }
 
     public func configureDevelopmentRootPassword(_ engine: DatabaseEngine) throws {
+        guard engine != .none else { throw DatabaseManagerError.engineNotSelected }
         let marker = dataDirectory(for: engine).appendingPathComponent(".devstack-root-configured")
         if ping(engine) { try AtomicFileWriter.write("configured\n", to: marker, permissions: 0o600); return }
         let sql = engine == .mysql84
@@ -62,6 +68,7 @@ public struct DatabaseManager: Sendable {
     }
 
     public func ping(_ engine: DatabaseEngine) -> Bool {
+        guard engine != .none else { return false }
         guard let result = try? runner.run(
             executable: client(engine, name: "mysql"),
             arguments: connectionArguments(engine, passwordConfigured: true) + ["--batch", "--skip-column-names", "--execute", "SELECT 1"],
@@ -73,6 +80,7 @@ public struct DatabaseManager: Sendable {
 
     @discardableResult
     public func exportSQL(_ engine: DatabaseEngine, database: String? = nil, destination: URL? = nil) throws -> URL {
+        guard engine != .none else { throw DatabaseManagerError.engineNotSelected }
         if let database { try validateDatabaseName(database) }
         try FileManager.default.createDirectory(at: paths.backups, withIntermediateDirectories: true)
         let target = destination ?? paths.backups.appendingPathComponent(backupFilename(engine: engine, database: database))
@@ -93,6 +101,7 @@ public struct DatabaseManager: Sendable {
     }
 
     public func importSQL(_ engine: DatabaseEngine, source: URL, database: String? = nil) throws {
+        guard engine != .none else { throw DatabaseManagerError.engineNotSelected }
         guard FileManager.default.fileExists(atPath: source.path) else { throw DatabaseManagerError.sourceFileMissing(source.path) }
         if let database { try validateDatabaseName(database) }
         var arguments = connectionArguments(engine, passwordConfigured: true)
@@ -154,7 +163,7 @@ public struct DatabaseManager: Sendable {
         var result = ["--no-defaults", "--no-login-paths",
             "--character-sets-dir=\(runtimeRoot.appendingPathComponent("\(engine.rawValue)/share/charsets").path)",
             "--plugin-dir=\(runtimeRoot.appendingPathComponent("\(engine.rawValue)/lib/plugin").path)",
-            "--protocol=TCP", "--host=127.0.0.1", "--port=3306", "--user=root"]
+            "--protocol=TCP", "--host=127.0.0.1", "--port=\(port)", "--user=root"]
         if !passwordConfigured { result.append("--skip-password") }
         return result
     }

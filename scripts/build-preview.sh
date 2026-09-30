@@ -12,8 +12,8 @@ if [[ "${DEVSTACK_INSTALL_PREVIEW:-0}" == "1" ]] && /usr/bin/pgrep -x DevStack >
     echo "Quit DevStack before replacing the installed app." >&2
     exit 75
 fi
-swift build --build-system native --jobs "${DEVSTACK_BUILD_JOBS:-4}"
-products="$(swift build --build-system native --show-bin-path)"
+swift build --jobs "${DEVSTACK_BUILD_JOBS:-2}"
+products="$(swift build --show-bin-path)"
 mkdir -p "$application/Contents/MacOS" "$application/Contents/Resources/Runtimes" "$application/Contents/Library/LaunchServices" "$application/Contents/Library/LaunchDaemons"
 cp "$repository_root/Packaging/Info.plist" "$application/Contents/Info.plist"
 cp "$products/DevStack" "$application/Contents/MacOS/DevStack"
@@ -23,7 +23,7 @@ cp "$repository_root/Sources/DevStackApp/Resources/DevStack.icns" "$application/
 for resource_bundle in "$products"/*.bundle; do
     [[ ! -d "$resource_bundle" ]] || ditto "$resource_bundle" "$application/Contents/Resources/$(basename "$resource_bundle")"
 done
-for id in nginx-1.30 adminer-6.1.1 php-8.4 apache-2.4 php-8.5 mysql-8.4 openssl-3.5 mailpit-1.31.1 phpmyadmin-5.2.3 composer-2.10.3 imagemagick-7.1; do
+for id in nginx-1.30 adminer-6.1.1 php-8.4 apache-2.4 php-8.5 mysql-8.4 postgresql-18 openssl-3.5 mailpit-1.31.1 phpmyadmin-5.2.3 composer-2.10.3 imagemagick-7.1; do
     if [[ -d "$runtime_root/$id" ]]; then
         cp -cR "$runtime_root/$id" "$application/Contents/Resources/Runtimes/$id"
     fi

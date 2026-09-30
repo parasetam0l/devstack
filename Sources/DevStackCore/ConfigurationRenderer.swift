@@ -16,7 +16,7 @@ public struct ConfigurationRenderer: Sendable {
     public let paths: DevStackPaths
     public let runtimeRoot: URL
     public let runtimeDirectories: [String: URL]
-    public let standardPortsEnabled: Bool
+    public let ports: ServicePorts
     public let userName: String
     public let groupName: String
 
@@ -24,14 +24,14 @@ public struct ConfigurationRenderer: Sendable {
         paths: DevStackPaths,
         runtimeRoot: URL,
         runtimeDirectories: [String: URL] = [:],
-        standardPortsEnabled: Bool = false,
+        ports: ServicePorts = ServicePorts(),
         userName: String = NSUserName(),
         groupName: String = "staff"
     ) {
         self.paths = paths
         self.runtimeRoot = runtimeRoot
         self.runtimeDirectories = runtimeDirectories
-        self.standardPortsEnabled = standardPortsEnabled
+        self.ports = ports
         self.userName = userName
         self.groupName = groupName
     }
@@ -55,10 +55,10 @@ public struct ConfigurationRenderer: Sendable {
         ErrorLog \(quote(paths.logs.appendingPathComponent("apache-error.log").path))
         LogLevel warn
         ServerName devstack.test
-        Listen 127.0.0.1:8080
-        Listen 127.0.0.1:8443
-        Listen [::1]:8080
-        Listen [::1]:8443
+        Listen 127.0.0.1:\(ports.webHTTPListen)
+        Listen 127.0.0.1:\(ports.webHTTPSListen)
+        Listen [::1]:\(ports.webHTTPListen)
+        Listen [::1]:\(ports.webHTTPSListen)
 
         \(mpmDirective)
         LoadModule unixd_module \(quote(moduleDirectory.appendingPathComponent("mod_unixd.so").path))
@@ -89,7 +89,7 @@ public struct ConfigurationRenderer: Sendable {
 
         \(siteBlocks)
 
-        <VirtualHost *:8443>
+        <VirtualHost *:\(ports.webHTTPSListen)>
             ServerName phpmyadmin.localhost
             DocumentRoot \(phpMyAdminRoot)
             SSLEngine on
@@ -105,7 +105,7 @@ public struct ConfigurationRenderer: Sendable {
             </Directory>
         </VirtualHost>
 
-        <VirtualHost *:8443>
+        <VirtualHost *:\(ports.webHTTPSListen)>
             ServerName adminer.localhost
             DocumentRoot \(quote(runtimeDirectory("adminer-6.1.1").path))
             SSLEngine on
@@ -120,14 +120,14 @@ public struct ConfigurationRenderer: Sendable {
             </Directory>
         </VirtualHost>
 
-        <VirtualHost *:8443>
+        <VirtualHost *:\(ports.webHTTPSListen)>
             ServerName mailpit.localhost
             SSLEngine on
             SSLCertificateFile \(mailpitCertificate)
             SSLCertificateKeyFile \(mailpitKey)
             ProxyPreserveHost On
-            ProxyPass / http://127.0.0.1:8025/
-            ProxyPassReverse / http://127.0.0.1:8025/
+            ProxyPass / http://127.0.0.1:\(ports.mailpitInboxListen)/
+            ProxyPassReverse / http://127.0.0.1:\(ports.mailpitInboxListen)/
             RequestHeader set X-Forwarded-Proto "https"
         </VirtualHost>
         """
@@ -176,7 +176,7 @@ public struct ConfigurationRenderer: Sendable {
         }
         let runtime = runtimeDirectory(runtimeID)
         let extensionDirectory = runtime.appendingPathComponent("lib/php/extensions")
-        guard enabledExtensions.isSubset(of: ["xdebug", "redis", "imagick"]) else {
+        guard enabledExtensions.isSubset(of: ["xdebug", "redis", "imagick", "pgsql", "pdo_pgsql"]) else {
             throw ConfigurationRendererError.unsafeValue("Unknown PHP extension")
         }
         var settings = enabledExtensions.sorted().map { name in
@@ -207,8 +207,8 @@ public struct ConfigurationRenderer: Sendable {
         post_max_size=64M
         upload_max_filesize=64M
         extension_dir=\(quote(extensionDirectory.path))
-        sendmail_path=\(quote("\(mailpitBinary.path) sendmail -S 127.0.0.1:1025"))
-        mysqli.default_port=3306
+        sendmail_path=\(quote("\(mailpitBinary.path) sendmail -S 127.0.0.1:\(ports.mailpitSMTPListen)"))
+        mysqli.default_port=\(ports.mysqlListen)
         mysqli.default_socket=\(quote(paths.sockets.appendingPathComponent("mysql.sock").path))
         pdo_mysql.default_socket=\(quote(paths.sockets.appendingPathComponent("mysql.sock").path))
         opcache.enable=1
@@ -225,7 +225,7 @@ public struct ConfigurationRenderer: Sendable {
         let suffix = engine.rawValue
         return """
         [client]
-        port=3306
+        port=\(ports.mysqlListen)
         character-sets-dir=\(baseDirectory.appendingPathComponent("share/charsets").path)
         socket=\(paths.sockets.appendingPathComponent("mysql.sock").path)
 
@@ -233,7 +233,7 @@ public struct ConfigurationRenderer: Sendable {
         basedir=\(baseDirectory.path)
         plugin-dir=\(baseDirectory.appendingPathComponent("lib/plugin").path)
         datadir=\(dataDirectory.path)
-        port=3306
+        port=\(ports.mysqlListen)
         bind-address=127.0.0.1
         socket=\(paths.sockets.appendingPathComponent("mysql.sock").path)
         pid-file=\(paths.generated.appendingPathComponent("\(suffix).pid").path)
@@ -248,8 +248,8 @@ public struct ConfigurationRenderer: Sendable {
 
     public func mailpitArguments() -> [String] {
         [
-            "--listen", "127.0.0.1:8025",
-            "--smtp", "127.0.0.1:1025",
+            "--listen", "127.0.0.1:\(ports.mailpitInboxListen)",
+            "--smtp", "127.0.0.1:\(ports.mailpitSMTPListen)",
             "--database", paths.mailpitDatabase.path,
             "--allowed-hosts", "127.0.0.1,localhost,mailpit.localhost",
             "--disable-version-check",
@@ -312,11 +312,11 @@ public struct ConfigurationRenderer: Sendable {
         """
 
         let httpBehavior = site.tlsEnabled
-            ? "Redirect permanent / https://\(hostname)\(standardPortsEnabled ? "" : ":8443")/"
+            ? "Redirect permanent / https://\(hostname)\(ports.webHTTPS == 443 ? "" : ":\(ports.webHTTPS)")/"
             : "DocumentRoot \(root)\n\(directory)"
 
         var result = """
-        <VirtualHost *:8080>
+        <VirtualHost *:\(ports.webHTTPListen)>
             ServerName \(hostname)
             ErrorLog \(errorLog)
             CustomLog \(accessLog) combined
@@ -327,7 +327,7 @@ public struct ConfigurationRenderer: Sendable {
         if site.tlsEnabled {
             result += """
 
-            <VirtualHost *:8443>
+            <VirtualHost *:\(ports.webHTTPSListen)>
                 ServerName \(hostname)
                 DocumentRoot \(root)
                 ErrorLog \(errorLog)
@@ -408,7 +408,7 @@ public struct ConfigurationRenderer: Sendable {
         $cfg['blowfish_secret'] = '\(cookieSecret)';
         $cfg['Servers'][1]['auth_type'] = 'cookie';
         $cfg['Servers'][1]['host'] = '127.0.0.1';
-        $cfg['Servers'][1]['port'] = '3306';
+        $cfg['Servers'][1]['port'] = '\(ports.mysqlListen)';
         $cfg['Servers'][1]['AllowNoPassword'] = false;
         $cfg['VersionCheck'] = false;
         """

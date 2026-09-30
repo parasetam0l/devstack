@@ -1,6 +1,7 @@
 import DevStackCore
 import CryptoKit
 import Foundation
+import Network
 
 private struct CheckFailure: Error, CustomStringConvertible {
     var description: String
@@ -45,6 +46,19 @@ private func expect(_ condition: @autoclosure () throws -> Bool, _ message: Stri
 @main
 enum DevStackCoreChecks {
     static func main() async throws {
+        let old = try JSONDecoder().decode(AppConfiguration.self, from: Data(#"{"schemaVersion":1,"selectedDatabase":"mysql-8.4"}"#.utf8))
+        try expect(old.selectedPostgreSQL == .none, "Existing installations unexpectedly enable PostgreSQL")
+        try expect(old.enabledExtensions["php-8.4"]?.contains("pdo_pgsql") == true, "Existing PHP configuration did not gain its PostgreSQL driver")
+        for mysql in [DatabaseEngine.none, .mysql84] {
+            for postgres in [PostgreSQLEngine.none, .postgresql18] {
+                let configuration = AppConfiguration(selectedDatabase: mysql, selectedPostgreSQL: postgres)
+                let decoded = try JSONDecoder().decode(AppConfiguration.self, from: JSONEncoder().encode(configuration))
+                try expect(decoded == configuration, "Database selections do not survive relaunch")
+                let expected: Set<ServiceKind> = Set([mysql.service, postgres.service].compactMap { $0 })
+                try expect(Set(configuration.selectedDatabaseServices) == expected, "Start Stack includes a disabled database")
+            }
+        }
+
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -116,9 +130,17 @@ enum DevStackCoreChecks {
         try expect(!replacedHosts.contains("old.test"), "Old managed host entry was preserved")
         try expect(replacedHosts.contains("127.0.0.1\texample.test"), "IPv4 host entry was not generated")
         try expect(replacedHosts.contains("::1\texample.test"), "IPv6 host entry was not generated")
+        let validForwarding = try PrivilegedRequestValidator.portForwarding(.init(enabled: true, entries: [.init(publicPort: 80, upstreamPort: 8080)]))
+        try expect(validForwarding.entries.count == 1, "Privileged loopback forwarding was rejected")
         do {
-            _ = try PrivilegedRequestValidator.portForwarding(.init(enabled: true, httpUpstreamPort: 8081))
-            throw CheckFailure(description: "Arbitrary port forwarding was accepted")
+            _ = try PrivilegedRequestValidator.portForwarding(.init(enabled: true, entries: [.init(publicPort: 8080, upstreamPort: 8080)]))
+            throw CheckFailure(description: "Unprivileged public port was accepted for forwarding")
+        } catch PrivilegedRequestValidationError.invalidPortForwarding {
+            // Expected.
+        }
+        do {
+            _ = try PrivilegedRequestValidator.portForwarding(.init(enabled: true, entries: [.init(publicPort: 22, upstreamPort: 8080)]))
+            throw CheckFailure(description: "Reserved port forwarding was accepted")
         } catch PrivilegedRequestValidationError.invalidPortForwarding {
             // Expected.
         }
@@ -153,6 +175,88 @@ enum DevStackCoreChecks {
         try expect(phpINI.contains("xdebug.client_port=9003"), "Xdebug endpoint was not pinned")
         try expect(phpINI.contains("sendmail_path"), "Mail delivery was not configured")
         try expect(renderer.mailpitArguments().contains("--disable-version-check"), "Mailpit version check was not disabled")
+        let privilegedPorts = ServicePorts(webHTTP: 80, webHTTPS: 9443)
+        try expect(privilegedPorts.webHTTPListen == ServicePorts.webHTTPFallback, "Privileged HTTP port did not fall back to the unprivileged listener")
+        try expect(privilegedPorts.forwardings == [PortForwardingEntry(publicPort: 80, upstreamPort: ServicePorts.webHTTPFallback)], "Privileged port did not produce the expected forwarding")
+        try expect(privilegedPorts.requiresHelper, "Privileged port did not report the helper requirement")
+        try expect(ServicePorts(mysql: ServicePorts.webHTTPFallback).collisions == [ServicePorts.webHTTPFallback], "Port collisions were not detected")
+        let customRenderer = ConfigurationRenderer(paths: paths, runtimeRoot: paths.builtInRuntimes, ports: privilegedPorts)
+        let customApache = try customRenderer.apacheConfiguration(sites: [site])
+        try expect(customApache.contains("Listen 127.0.0.1:\(ServicePorts.webHTTPFallback)") && customApache.contains("Listen 127.0.0.1:9443"), "Custom Apache listeners were not rendered")
+        try expect(customApache.contains("https://example.test:9443/"), "Custom HTTPS redirect port was not rendered")
+        let customINI = try customRenderer.phpINI(runtimeID: "php-8.5", enabledExtensions: [], mailpitBinary: URL(fileURLWithPath: "/tmp/mailpit"))
+        try expect(customINI.contains("mysqli.default_port=\(ServicePorts.mysqlFallback)"), "Configured PHP database port was not rendered")
+        try expect(customRenderer.mailpitArguments().contains("127.0.0.1:\(ServicePorts.mailpitInboxFallback)"), "Configured Mailpit listener was not rendered")
+        let dnsQuery = { (name: String, type: UInt16, id: UInt16) -> Data in
+            var data = Data([UInt8(id >> 8), UInt8(id & 0xFF), 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+            for label in name.split(separator: ".") {
+                data.append(UInt8(label.utf8.count))
+                data.append(contentsOf: label.utf8)
+            }
+            data.append(0)
+            data.append(contentsOf: [UInt8(type >> 8), UInt8(type & 0xFF), 0x00, 0x01])
+            return data
+        }
+        guard let question = DNSMessage.parseQuestion(dnsQuery("site.test", DNSMessage.typeA, 0x1234)) else {
+            throw CheckFailure(description: "DNS query did not parse")
+        }
+        try expect(question.id == 0x1234 && question.name == "site.test" && question.type == DNSMessage.typeA && question.klass == DNSMessage.classIN, "DNS question fields are wrong")
+        let localAnswer = DNSMessage.localResponse(for: question, address: "192.168.1.50")
+        try expect(UInt16(localAnswer[6]) << 8 | UInt16(localAnswer[7]) == 1, "Local DNS answer did not include an A record")
+        try expect(localAnswer.suffix(4) == Data([192, 168, 1, 50]), "Local DNS answer address is wrong")
+        guard let aaaa = DNSMessage.parseQuestion(dnsQuery("site.test", DNSMessage.typeAAAA, 2)) else {
+            throw CheckFailure(description: "AAAA query did not parse")
+        }
+        let nodata = DNSMessage.localResponse(for: aaaa, address: "192.168.1.50")
+        try expect(UInt16(nodata[6]) << 8 | UInt16(nodata[7]) == 0, "AAAA for a managed hostname must answer NODATA")
+        let failure = DNSMessage.failureResponse(for: question, rcode: DNSMessage.rcodeServerFailure)
+        try expect(failure[3] & 0x0F == 2, "DNS failure rcode is wrong")
+        try expect(DNSUpstreams.parseResolvConf("nameserver 192.168.1.1\nnameserver 8.8.8.8 # lan\n").count == 2, "resolv.conf parsing failed")
+        try expect(DNSUpstreams.usableResolvers(contents: "nameserver 127.0.0.1\nnameserver 192.168.1.1\n", excluding: []).count == 1, "Loopback resolver was not excluded")
+        try expect(LocalNetwork.isPrivateIPv4("192.168.1.5") && LocalNetwork.isPrivateIPv4("10.0.0.1") && !LocalNetwork.isPrivateIPv4("8.8.8.8"), "Private IPv4 classification failed")
+        try expect(LocalNetwork.isLocalSource("192.168.1.5") && LocalNetwork.isLocalSource("::1") && !LocalNetwork.isLocalSource("8.8.8.8"), "Local source classification failed")
+        let validatedDNS = try PrivilegedRequestValidator.dnsConfiguration(DNSConfiguration(enabled: true, hostnames: ["site.test"], answerAddress: "192.168.1.50"))
+        try expect(validatedDNS.hostnames == ["site.test"], "DNS configuration validation failed")
+        do {
+            _ = try PrivilegedRequestValidator.dnsConfiguration(DNSConfiguration(enabled: true, hostnames: ["site.test"], answerAddress: "8.8.8.8"))
+            throw CheckFailure(description: "Public DNS answer address was accepted")
+        } catch PrivilegedRequestValidationError.invalidDNSAddress {
+            // Expected.
+        }
+        do {
+            _ = try PrivilegedRequestValidator.portForwarding(.init(enabled: true, lanEntries: [.init(publicPort: 22, upstreamPort: 8080)]))
+            throw CheckFailure(description: "Reserved LAN forwarding was accepted")
+        } catch PrivilegedRequestValidationError.invalidPortForwarding {
+            // Expected.
+        }
+        func udpRoundTrip(_ query: Data, port: UInt16) async throws -> Data {
+            try await withCheckedThrowingContinuation { continuation in
+                let connection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .udp)
+                let gate = UDPReplyGate(continuation: continuation)
+                connection.stateUpdateHandler = { state in
+                    guard case .ready = state else { return }
+                    connection.send(content: query, completion: .contentProcessed { _ in
+                        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_535) { data, _, _, error in
+                            if let error { gate.fail(error) }
+                            else if let data, !data.isEmpty { gate.succeed(data) }
+                            else { gate.fail(CocoaError(.coderReadCorrupt)) }
+                            connection.cancel()
+                        }
+                    })
+                }
+                connection.start(queue: .global())
+                DispatchQueue.global().asyncAfter(deadline: .now() + 3) { gate.fail(URLError(.timedOut)) }
+            }
+        }
+        let responder = LocalDNSResponder(port: 15453)
+        try responder.apply(DNSConfiguration(enabled: true, hostnames: ["site.test"], answerAddress: "192.168.1.50"), upstreams: [])
+        defer { responder.stop() }
+        try await Task.sleep(for: .milliseconds(300))
+        let liveAnswer = try await udpRoundTrip(dnsQuery("site.test", DNSMessage.typeA, 0x2222), port: 15453)
+        try expect(liveAnswer.count >= 12 && UInt16(liveAnswer[6]) << 8 | UInt16(liveAnswer[7]) == 1, "Live DNS responder did not answer")
+        try expect(liveAnswer.suffix(4) == Data([192, 168, 1, 50]), "Live DNS responder answered the wrong address")
+        let liveRefusal = try await udpRoundTrip(dnsQuery("example.com", DNSMessage.typeA, 0x3333), port: 15453)
+        try expect(liveRefusal[3] & 0x0F == 2, "DNS responder did not fail closed without upstreams")
         var unsafeSite = site
         unsafeSite.documentRoot = "/tmp/example\nRequire all granted"
         do {
@@ -201,7 +305,18 @@ enum DevStackCoreChecks {
         try expect(streamed.standardOutput.isEmpty && (try Data(contentsOf: streamedOutput)) == largeInput,
             "SQL file streaming did not preserve the input or captured it in memory")
 
+        let timeoutStart = Date()
+        do {
+            _ = try ProcessRunner().run(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["10"], timeout: 0.1)
+            throw CheckFailure(description: "Command timeout was ignored")
+        } catch CommandExecutionError.timedOut { }
+        try expect(Date().timeIntervalSince(timeoutStart) < 3.5, "Command cleanup exceeded its bounded deadline")
+
         let databaseManager = DatabaseManager(paths: paths, runtimeRoot: paths.builtInRuntimes)
+        do {
+            _ = try databaseManager.initializeIfNeeded(.none)
+            throw CheckFailure(description: "No MySQL was treated as a database engine")
+        } catch DatabaseManagerError.engineNotSelected { }
         let backupName = databaseManager.backupFilename(
             engine: .mysql84,
             database: nil,
@@ -346,8 +461,19 @@ enum DevStackCoreChecks {
         )
         try expect(missingHelperReport.results.contains(where: { $0.id == "privileged-helper" && $0.severity == .warning }), "Doctor omitted missing helper")
 
+        var optionalRuntime = executableManifest.runtime
+        optionalRuntime.id = "mysql-5.7"
+        optionalRuntime.kind = .mysql
+        optionalRuntime.supportState = .endOfLife
+        optionalRuntime.build = RuntimeBuildMetadata(buildSystem: "test", flags: [], feasibilityGate: "Legacy compatibility")
+        let optionalReport = DevStackDoctor().run(context: DiagnosticContext(paths: paths, runtimeManifests: [optionalRuntime]), appVersion: "checks")
+        try expect(optionalReport.results.contains { $0.id == "runtime-mysql-5.7" && $0.severity == .info }, "Doctor treated an intentionally omitted legacy runtime as a repair failure")
+        let requiredReport = DevStackDoctor().run(context: DiagnosticContext(paths: paths, runtimeManifests: [optionalRuntime], requiredRuntimeIDs: ["mysql-5.7"]), appVersion: "checks")
+        try expect(requiredReport.results.contains { $0.id == "runtime-mysql-5.7" && $0.severity == .error }, "Doctor failed to report a missing selected runtime")
+
         let migrated = try JSONDecoder().decode(AppConfiguration.self, from: Data(#"{"schemaVersion":1,"sites":[]}"#.utf8))
         try expect(migrated.selectedWebServer == .apache, "Nginx must stay disabled when migrating old configurations")
+        try expect(migrated.ports == ServicePorts() && !migrated.localNetworkAccess && migrated.schemaVersion == AppConfiguration.currentSchemaVersion, "Port defaults or schema migration failed")
         try expect(paths.phpSocket(runtimeID: "php-8.5", siteID: UUID()).path.utf8.count < 104, "PHP socket exceeds the macOS limit")
         let supervisorRecord = temporary.appendingPathComponent("processes.json")
         let supervisor = ServiceSupervisor(recordsURL: supervisorRecord)
@@ -367,5 +493,25 @@ enum DevStackCoreChecks {
         let stoppedState = await supervisor.state(for: .mailpit)
         try expect(stoppedState.phase == .stopped, "Service did not stop")
         print("DevStackCoreChecks: all checks passed")
+    }
+}
+
+private final class UDPReplyGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data, Error>?
+
+    init(continuation: CheckedContinuation<Data, Error>) {
+        self.continuation = continuation
+    }
+
+    func succeed(_ data: Data) { complete { .success(data) } }
+    func fail(_ error: Error) { complete { .failure(error) } }
+
+    private func complete(_ result: () -> Result<Data, Error>) {
+        lock.lock()
+        guard let continuation else { lock.unlock(); return }
+        self.continuation = nil
+        lock.unlock()
+        continuation.resume(with: result())
     }
 }

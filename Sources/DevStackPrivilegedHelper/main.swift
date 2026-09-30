@@ -37,7 +37,7 @@ private enum CodeSignatureValidator {
         var helperInformation: CFDictionary?
         guard SecCodeCopySelf([], &helperCode) == errSecSuccess, let helperCode,
               SecCodeCopyStaticCode(helperCode, [], &helperStaticCode) == errSecSuccess, let helperStaticCode,
-              SecCodeCopySigningInformation(helperStaticCode, [], &helperInformation) == errSecSuccess,
+              SecCodeCopySigningInformation(helperStaticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &helperInformation) == errSecSuccess,
               let information = helperInformation as? [String: Any],
               let team = information[kSecCodeInfoTeamIdentifier as String] as? String,
               team.range(of: "^[A-Z0-9]{10}$", options: .regularExpression) != nil else { return false }
@@ -52,6 +52,7 @@ private final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtoc
     private let hostsURL = URL(fileURLWithPath: "/etc/hosts")
     private let stateDirectory = URL(fileURLWithPath: "/Library/Application Support/DevStack", isDirectory: true)
     private let forwarder = LoopbackForwarder()
+    private let dnsResponder = LocalDNSResponder()
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
@@ -70,6 +71,17 @@ private final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtoc
             let proposed = try self.decoder.decode(PortForwardingConfiguration.self, from: request)
             let configuration = try PrivilegedRequestValidator.portForwarding(proposed)
             try self.forwarder.apply(configuration)
+            return try self.encodeSuccess()
+        }
+    }
+
+    func setDNSConfiguration(_ request: Data, withReply reply: @escaping (Data?, NSError?) -> Void) {
+        perform(reply) {
+            let proposed = try self.decoder.decode(DNSConfiguration.self, from: request)
+            let configuration = try PrivilegedRequestValidator.dnsConfiguration(proposed)
+            let resolvConf = (try? String(contentsOfFile: "/etc/resolv.conf", encoding: .utf8)) ?? ""
+            let upstreams = DNSUpstreams.usableResolvers(contents: resolvConf, excluding: [configuration.answerAddress])
+            try self.dnsResponder.apply(configuration, upstreams: upstreams)
             return try self.encodeSuccess()
         }
     }
@@ -95,6 +107,7 @@ private final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtoc
             let replacement = HostsFileEditor.removingManagedSection(from: original)
             try self.writeRootFile(Data((replacement + "\n").utf8), to: self.hostsURL, permissions: 0o644)
             try self.forwarder.apply(PortForwardingConfiguration(enabled: false))
+            self.dnsResponder.stop()
             let certificate = self.stateDirectory.appendingPathComponent("DevStack-Local-CA.der")
             if FileManager.default.fileExists(atPath: certificate.path) {
                 _ = try? self.runSecurity(["remove-trusted-cert", "-d", certificate.path])
@@ -112,7 +125,9 @@ private final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtoc
                 hostMappingsInstalled: hosts.contains(PrivilegedHelperConstants.hostsBeginMarker),
                 portForwardingEnabled: self.forwarder.isEnabled,
                 localCATrusted: FileManager.default.fileExists(atPath: certificate.path),
-                version: "0.1.0"
+                version: "0.1.0",
+                dnsEnabled: self.dnsResponder.isEnabled,
+                dnsAnswerAddress: self.dnsResponder.answerAddress
             )
             return try self.encoder.encode(status)
         }
@@ -163,25 +178,56 @@ private final class LoopbackForwarder: @unchecked Sendable {
     private var listeners: [NWListener] = []
     private(set) var isEnabled = false
 
+    private struct ForwardBinding {
+        let port: UInt16
+        let upstream: UInt16
+        let localSourcesOnly: Bool
+    }
+
     func apply(_ configuration: PortForwardingConfiguration) throws {
         listeners.forEach { $0.cancel() }
         listeners.removeAll()
         isEnabled = false
         guard configuration.enabled else { return }
 
-        for (publicPort, upstreamPort) in [(UInt16(80), configuration.httpUpstreamPort), (UInt16(443), configuration.httpsUpstreamPort)] {
-            for host in ["127.0.0.1", "::1"] {
-                let parameters = NWParameters.tcp
-                parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: publicPort)!)
-                let listener = try NWListener(using: parameters)
-                listener.newConnectionHandler = { [weak self] incoming in
-                    self?.accept(incoming, upstreamPort: upstreamPort)
+        var bindings: [UInt16: ForwardBinding] = [:]
+        for entry in configuration.entries {
+            bindings[entry.publicPort] = ForwardBinding(port: entry.publicPort, upstream: entry.upstreamPort, localSourcesOnly: false)
+        }
+        for entry in configuration.lanEntries {
+            // A LAN binding covers loopback too, so it replaces the loopback binding for that port.
+            bindings[entry.publicPort] = ForwardBinding(port: entry.publicPort, upstream: entry.upstreamPort, localSourcesOnly: true)
+        }
+        for binding in bindings.values {
+            if binding.localSourcesOnly {
+                try startListener(host: "0.0.0.0", binding: binding)
+            } else {
+                for host in ["127.0.0.1", "::1"] {
+                    try startListener(host: host, binding: binding)
                 }
-                listener.start(queue: queue)
-                listeners.append(listener)
             }
         }
         isEnabled = true
+    }
+
+    private func startListener(host: String, binding: ForwardBinding) throws {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: binding.port)!)
+        let listener = try NWListener(using: parameters)
+        listener.newConnectionHandler = { [weak self] incoming in
+            if binding.localSourcesOnly, !LocalNetwork.isLocalSource(Self.hostDescription(incoming.endpoint)) {
+                incoming.cancel()
+                return
+            }
+            self?.accept(incoming, upstreamPort: binding.upstream)
+        }
+        listener.start(queue: queue)
+        listeners.append(listener)
+    }
+
+    private static func hostDescription(_ endpoint: NWEndpoint) -> String {
+        guard case let .hostPort(host, _) = endpoint else { return "" }
+        return "\(host)"
     }
 
     private func accept(_ incoming: NWConnection, upstreamPort: UInt16) {

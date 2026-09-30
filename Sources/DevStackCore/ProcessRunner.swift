@@ -85,10 +85,10 @@ public struct ProcessRunner: Sendable {
             if process.isRunning { process.terminate() }
             Thread.sleep(forTimeInterval: 0.1)
             if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-            process.waitUntilExit()
+            let cleanupDeadline = Date().addingTimeInterval(2)
+            while process.isRunning && Date() < cleanupDeadline { Thread.sleep(forTimeInterval: 0.02) }
             throw CommandExecutionError.timedOut(executable: executable.path, seconds: timeout)
         }
-        process.waitUntilExit()
         try? stdout.synchronize()
         try? stderr.synchronize()
 

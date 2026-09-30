@@ -48,14 +48,14 @@ public struct CertificateManager: Sendable {
         try setPermissions(0o644, on: caCertificate)
     }
 
-    public func ensureLeafCertificate(for rawHostname: String, renewBefore days: Int = 30) throws {
+    public func ensureLeafCertificate(for rawHostname: String, renewBefore days: Int = 30, force: Bool = false) throws {
         let hostname: String
         do { hostname = try HostnameValidator.validate(rawHostname) }
         catch { throw CertificateManagerError.invalidHostname(rawHostname) }
         try ensureCA()
         let certificate = paths.certificate(for: hostname)
         let privateKey = paths.privateKey(for: hostname)
-        if FileManager.default.fileExists(atPath: certificate.path),
+        if !force, FileManager.default.fileExists(atPath: certificate.path),
            FileManager.default.fileExists(atPath: privateKey.path),
            certificateIsValid(certificate, forAtLeastDays: days) {
             return
@@ -127,6 +127,52 @@ public struct CertificateManager: Sendable {
     private func setPermissions(_ permissions: mode_t, on url: URL) throws {
         guard chmod(url.path, permissions) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+}
+
+public struct CertificateSummary: Identifiable, Hashable, Sendable {
+    public var id: String { hostname }
+    public let hostname: String
+    public let certificate: URL
+    public let subject: String
+    public let issuer: String
+    public let serial: String
+    public let fingerprint: String
+    public let validFrom: Date?
+    public let expiresAt: Date?
+    public let error: String?
+    public var isExpired: Bool { expiresAt.map { $0 <= Date() } ?? true }
+}
+
+extension CertificateManager {
+    public func summary(of certificate: URL, hostname: String) -> CertificateSummary {
+        do {
+            let output = try runner.runChecked(executable: openssl,
+                arguments: ["x509", "-in", certificate.path, "-noout", "-subject", "-issuer", "-serial", "-startdate", "-enddate", "-fingerprint", "-sha256"], environment: environment).standardOutput
+            var fields: [String: String] = [:]
+            for line in output.split(separator: "\n") {
+                let pair = line.split(separator: "=", maxSplits: 1).map(String.init)
+                if pair.count == 2 { fields[pair[0]] = pair[1].trimmingCharacters(in: .whitespaces) }
+            }
+            let format = DateFormatter(); format.locale = Locale(identifier: "en_US_POSIX"); format.timeZone = TimeZone(secondsFromGMT: 0); format.dateFormat = "MMM d HH:mm:ss yyyy z"
+            return CertificateSummary(hostname: hostname, certificate: certificate, subject: fields["subject"] ?? "", issuer: fields["issuer"] ?? "", serial: fields["serial"] ?? "", fingerprint: fields["sha256 Fingerprint"] ?? "", validFrom: fields["notBefore"].flatMap(format.date), expiresAt: fields["notAfter"].flatMap(format.date), error: nil)
+        } catch {
+            return CertificateSummary(hostname: hostname, certificate: certificate, subject: "", issuer: "", serial: "", fingerprint: "", validFrom: nil, expiresAt: nil, error: error.localizedDescription)
+        }
+    }
+    public func leafSummaries() throws -> [CertificateSummary] {
+        let directory = paths.certificates.appendingPathComponent("sites")
+        guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
+        return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "pem" && !$0.lastPathComponent.hasSuffix("-key.pem") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .map { summary(of: $0, hostname: $0.deletingPathExtension().lastPathComponent) }
+    }
+    public func deleteLeafCertificate(for rawHostname: String) throws {
+        let hostname = try HostnameValidator.validate(rawHostname)
+        for file in [paths.certificate(for: hostname), paths.privateKey(for: hostname)] {
+            if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
         }
     }
 }

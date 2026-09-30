@@ -1,11 +1,17 @@
 # Interface verification
 
-DevStack uses native SwiftUI Liquid Glass panels, interactive glass controls, a glass sidebar, and an AppKit behind-window desktop backdrop. The title bar follows the same surface. Appearance follows System, Light, or Dark through native window appearance; colors use a dynamic teal accent matching the solid icon. The menu-bar symbol uses the icon's three-layer stack and terminal glyph. Window content is capped at 1400 points, with a 1040-point page column.
+DevStack is a compact macOS utility. It opens at 920 × 620 points, supports 820 × 540, and caps ordinary windows at 1100 points wide. Old oversized saved frames are reduced on launch; native Zoom respects the cap. Full-screen participation is disabled. The sidebar uses a single compact toggle.
 
-The dashboard has four service controls: Web Server, PHP, Database, and Mail. Apache/Nginx and PHP versions are selected with native menus. Individual Start/Stop, Restart and Logs actions operate on real services. PHP extensions share one selected-runtime panel. Each site retains its own PHP selection.
+The native SwiftUI Liquid Glass panels and interactive controls sample an AppKit behind-window desktop backdrop. Spacing is 8–10 points, panel padding is 12 points, and controls use the small size. Neutral surfaces, icons and status badges replace the teal accent and tinted gradient. Primary buttons share one compact interactive glass style across the toolbar, pages and sheets. Warning/error colors remain semantic. Ellipsis menus hide the redundant chevron.
 
-Verified through native accessibility and screenshots on macOS 27.0.1: app launch, stack startup, Apache/Nginx switching, Mailpit/PHP individual controls, PHP selection, live HTTPS site creation/removal, navigation, validation, and theme handling. See HANDOVER.md for runtime evidence and limitations.
+Dashboard services are aligned rows with selectors and independent controls. MySQL and PostgreSQL are separate rows with No MySQL / No PostgreSQL options. Start Stack uses the selected engines. Apache/Nginx share one selector; each site retains its own PHP version.
 
-The packaged app resolves resources from Contents/Resources and never falls back to SwiftPM files on Desktop. Runtime configuration and MySQL client resources also use installed paths. The successful installed-app startup did not display a Desktop permission prompt.
+Sites and PHP extensions use compact lists. The site editor uses a compact grid; advanced PHP overrides expand on demand. Database credentials use two columns, with socket details collapsed. Mail has real individual service controls. Logs use a compact control strip and readable monospaced output. Doctor defaults to warnings/errors and exposes left-aligned evidence and recovery actions through expandable rows. Intentionally omitted, unselected legacy runtimes are informational. Settings uses one compact panel.
 
-An ad-hoc build reports unavailable privileged integration honestly; registration does not imply that the helper authenticated. Browser CA trust remains a separate macOS authorization action.
+SSL shows one row per certificate with expiry, validity, Renew and actions. Clicking its hostname opens metadata in a sheet; CA details use the same sheet. All six existing certificates fit in the default window. Issue, export, reveal, protected deletion and live renewal retain their real backend behavior.
+
+The app icon stays simple and solid. Its menu-bar template uses separate outlined stack layers and a small terminal mark, so the silhouette does not merge into a filled blob at 19 points. macOS supplies the appropriate monochrome appearance.
+
+Inspected through native accessibility and screenshots on macOS 27.0.1: all nine pages, compact toolbar, site editor with expanded settings, six certificate rows, database selections, and light/system appearance. Backend integration evidence and distribution limitations are recorded in HANDOVER.md.
+
+Installed resource and runtime paths resolve within the app and Application Support. Successful installed-app startup did not request Desktop access. The ad-hoc build reports unavailable privileged integration honestly; CA trust requires native macOS authorization.

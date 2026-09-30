@@ -11,60 +11,50 @@ struct DashboardView: View {
                 Spacer()
             }
 
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Services").font(.system(size: 15, weight: .semibold))
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 16) {
+            SurfacePanel(title: "Services") {
+                VStack(spacing: 0) {
                     ServiceControl(title: "Web Server", service: model.configuration.selectedWebServer.service,
-                        detail: model.helperInstalled ? "HTTP 80 · HTTPS 443" : "HTTP 8080 · HTTPS 8443") {
+                        detail: "HTTP \(model.configuration.ports.webHTTP) · HTTPS \(model.configuration.ports.webHTTPS)") {
                         Picker("Web server", selection: Binding(get: { model.configuration.selectedWebServer }, set: { server in Task { await model.selectWebServer(server) } })) {
                             ForEach(WebServer.allCases) { server in
                                 Text(server.displayName).tag(server).disabled(!model.runtimeIsAvailable(server.service.runtimeID))
                             }
                         }
                     }
-                    ServiceControl(title: "PHP", service: ServiceKind(rawValue: model.configuration.defaultPHPRuntimeID) ?? .php85,
-                        detail: "Default for new sites and Terminal") {
-                        PHPVersionPicker()
-                    }
-                    ServiceControl(title: "Database", service: model.configuration.selectedDatabase == .mysql84 ? .mysql84 : .mysql57,
-                        detail: "127.0.0.1:3306") {
-                        Picker("Database engine", selection: Binding(get: { model.configuration.selectedDatabase }, set: { model.selectedDatabaseBinding = $0 })) {
-                            ForEach(DatabaseEngine.allCases, id: \.self) { engine in
-                                Text(engine.displayName).tag(engine).disabled(!model.runtimeIsAvailable(engine.rawValue))
-                            }
-                        }
-                    }
-                    ServiceControl(title: "Mail", service: .mailpit, detail: "SMTP 1025 · Inbox 8025") {
-                        Text("Mailpit").font(.system(size: 15, weight: .medium)).frame(height: 28, alignment: .leading)
-                    }
+                    Divider()
+                    ServiceControl(title: "PHP", service: ServiceKind(rawValue: model.configuration.defaultPHPRuntimeID) ?? .php85, detail: "Default runtime") { PHPVersionPicker() }
+                    Divider()
+                    DatabaseServiceControl(embedded: true)
+                    Divider()
+                    ServiceControl(title: "Mail", service: .mailpit, detail: "SMTP \(model.configuration.ports.mailpitSMTP) · Inbox \(model.configuration.ports.mailpitInbox)") { Text("Mailpit").font(.system(size: 12, weight: .medium)) }
                 }
             }
 
             SurfacePanel {
                 HStack {
-                    Text("Sites").font(.system(size: 15, weight: .semibold))
+                    Text("Sites").font(.system(size: 13, weight: .semibold))
                     Spacer()
                     if !model.configuration.sites.isEmpty {
                         Button("View All") { model.selectedSection = .sites }.buttonStyle(.borderless)
                     }
-                    Button { model.requestNewSite() } label: { Label("New Site", systemImage: "plus") }.buttonStyle(.glass)
+                    Button { model.requestNewSite() } label: { Label("New Site", systemImage: "plus") }.buttonStyle(DevStackGlassButtonStyle())
                 }
                 if model.configuration.sites.isEmpty {
-                    HStack(spacing: 14) {
+                    HStack(spacing: 8) {
                         FeatureIcon(symbol: "globe")
                         VStack(alignment: .leading, spacing: 5) {
                             Text("No sites yet").font(.system(size: 13, weight: .medium))
                             Text("Add a project folder to create a site.").font(.system(size: 12)).foregroundStyle(.secondary)
                         }
                         Spacer()
-                    }.padding(.vertical, 12)
+                    }.padding(.vertical, 4)
                 } else {
                     VStack(spacing: 0) {
                         ForEach(Array(model.configuration.sites.prefix(4).enumerated()), id: \.element.id) { index, site in
-                            if index > 0 { Divider().padding(.vertical, 10) }
-                            HStack(spacing: 12) {
+                            if index > 0 { Divider().padding(.vertical, 5) }
+                            HStack(spacing: 8) {
                                 FeatureIcon(symbol: "globe")
-                                VStack(alignment: .leading, spacing: 4) {
+                                VStack(alignment: .leading, spacing: 2) {
                                     Text(site.name).font(.system(size: 13, weight: .semibold))
                                     Text(site.hostname).font(.system(size: 12)).foregroundStyle(.secondary)
                                 }
@@ -79,10 +69,10 @@ struct DashboardView: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Tools").font(.system(size: 15, weight: .semibold))
-                GlassEffectContainer(spacing: 16) {
-                    HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Tools").font(.system(size: 13, weight: .semibold))
+                GlassEffectContainer(spacing: 8) {
+                    HStack(spacing: 8) {
                         QuickAccessTile(symbol: "externaldrive", title: "Database", subtitle: "Connections and backups") { model.selectedSection = .database }
                         QuickAccessTile(symbol: "tray", title: "Mail Inbox", subtitle: "Open mail tools") { model.selectedSection = .mailpit }
                         QuickAccessTile(symbol: "terminal", title: "Terminal", subtitle: "Open managed shell", action: model.openManagedShell)
@@ -103,26 +93,23 @@ private struct ServiceControl<Selector: View>: View {
     private var state: ServiceState { model.serviceState(service) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack(spacing: 10) {
-                Image(systemName: service.icon).font(.system(size: 17, weight: .medium)).foregroundStyle(DevStackDesign.accent)
-                Text(title).font(.system(size: 13, weight: .semibold))
-                Spacer()
-                StatusBadge(title: state.phase.rawValue.capitalized, color: state.phase.color, dot: true)
-            }
-            selector.pickerStyle(.menu).labelsHidden().controlSize(.large)
-                .disabled(model.isBusy).frame(maxWidth: .infinity, alignment: .leading)
-            HStack {
-                Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
-                Spacer(minLength: 12)
-                Button(state.phase == .running ? "Stop" : "Start") {
-                    Task {
-                        if state.phase == .running { await model.stopService(service) }
-                        else { await model.startService(service) }
-                    }
-                }.buttonStyle(DevStackGlassButtonStyle())
-                    .disabled(model.isBusy || !model.runtimeIsAvailable(service.runtimeID))
-                    .accessibilityLabel("\(state.phase == .running ? "Stop" : "Start") \(service.displayName)")
+        HStack(spacing: 8) {
+            Image(systemName: service.icon).foregroundStyle(.secondary).frame(width: 18)
+            Text(title).font(.system(size: 12, weight: .medium)).frame(width: 78, alignment: .leading)
+            selector.pickerStyle(.menu).labelsHidden().controlSize(.small)
+                .disabled(model.isBusy).frame(width: 175, alignment: .leading)
+            Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+            Spacer(minLength: 4)
+            StatusBadge(title: state.phase.rawValue.capitalized, color: state.phase.color, dot: true, dotColor: state.phase.dotColor).frame(width: 76, alignment: .trailing)
+            Button(state.phase == .running ? "Stop" : "Start") {
+                Task {
+                    if state.phase == .running { await model.stopService(service) }
+                    else { await model.startService(service) }
+                }
+            }.buttonStyle(DevStackGlassButtonStyle())
+                .disabled(model.isBusy || !model.runtimeIsAvailable(service.runtimeID))
+                .accessibilityLabel("\(state.phase == .running ? "Stop" : "Start") \(service.displayName)")
+                .frame(width: 55)
                 Menu {
                     Button("Open Logs") { model.selectedLogService = service; model.selectedSection = .logs }
                     Button("Restart") { Task { await model.restartService(service) } }
@@ -135,10 +122,8 @@ private struct ServiceControl<Selector: View>: View {
                         }
                     }
                 } label: { Image(systemName: "ellipsis") }
-                    .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("\(title) actions")
-            }
-        }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
-            .glassEffect(.regular, in: .rect(cornerRadius: 20))
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().frame(width: 22).accessibilityLabel("\(title) actions")
+        }.padding(.vertical, 6)
     }
 }
 
@@ -160,15 +145,15 @@ private struct QuickAccessTile: View {
     let action: () -> Void
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: symbol).font(.system(size: 18, weight: .light)).foregroundStyle(DevStackDesign.accent)
-                VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: symbol).font(.system(size: 14, weight: .light)).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
                     Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(.primary)
                     Text(subtitle).font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "arrow.up.right").font(.system(size: 9)).foregroundStyle(.tertiary)
-            }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
-        }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .rect(cornerRadius: 16))
+            }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
+        }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
     }
 }

@@ -11,14 +11,14 @@ struct DevStackApp: App {
         WindowGroup("DevStack") {
             RootView()
                 .environmentObject(model)
-                .frame(minWidth: 1000, minHeight: 680)
+                .frame(minWidth: 820, minHeight: 540)
                 .onAppear {
                     appDelegate.model = model
                     NSApp.applicationIconImage = DevStackDesign.icon
-                    appDelegate.limitWindowWidth()
+                    appDelegate.configureWindow()
                 }
         }
-        .defaultSize(width: 1200, height: 800)
+        .defaultSize(width: 920, height: 620)
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) {
@@ -33,6 +33,11 @@ struct DevStackApp: App {
                         .keyboardShortcut(KeyEquivalent(Character(String(index + 1))))
                 }
                 Divider()
+                #if DEBUG
+                Button("Compact Review Window") { NSApp.keyWindow?.setContentSize(NSSize(width: 820, height: 540)) }
+                Button("Default Review Window") { NSApp.keyWindow?.setContentSize(NSSize(width: 920, height: 620)) }
+                Divider()
+                #endif
                 Button("Start Stack") { Task { await model.startAll() } }.disabled(model.isBusy || model.stackIsRunning)
                 Button("Stop Stack") { Task { await model.stopAll() } }.disabled(model.isBusy || !model.hasRunningServices)
             }
@@ -52,13 +57,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
     private var isFinishingTermination = false
 
-    func limitWindowWidth() {
+    func configureWindow() {
         Task { @MainActor in
             await Task.yield()
-            for window in NSApp.windows where window.contentView?.bounds.width ?? 0 >= 1000 {
-                window.contentMaxSize = NSSize(width: 1400, height: window.contentMaxSize.height)
-                if let size = window.contentView?.bounds.size, size.width > 1400 {
-                    window.setContentSize(NSSize(width: 1400, height: size.height))
+            for window in NSApp.windows where window.contentView?.bounds.width ?? 0 >= 820 {
+                window.contentMaxSize = NSSize(width: 1100, height: window.contentMaxSize.height)
+                window.collectionBehavior.remove(.fullScreenPrimary)
+                window.collectionBehavior.insert(.fullScreenNone)
+                if let size = window.contentView?.bounds.size, size.width > 920 || size.height > 620 {
+                    window.setContentSize(NSSize(width: min(size.width, 920), height: min(size.height, 620)))
+                    window.center()
                 }
             }
         }
@@ -69,7 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let alert = NSAlert()
         alert.messageText = "Stop DevStack services before quitting?"
-        alert.informativeText = "Apache, PHP, MySQL, or Mailpit are still running."
+        alert.informativeText = "DevStack services are still running."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Stop Services and Quit")
         alert.addButton(withTitle: "Quit Without Stopping")
@@ -135,6 +143,7 @@ extension ServiceKind {
         case .php85: "PHP 8.5"
         case .mysql57: "MySQL 5.7"
         case .mysql84: "MySQL 8.4"
+        case .postgresql18: "PostgreSQL 18"
         case .mailpit: "Mailpit"
         }
     }
