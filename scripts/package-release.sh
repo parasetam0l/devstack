@@ -4,34 +4,31 @@ set -euo pipefail
 repository_root="$(cd "$(dirname "$0")/.." && pwd)"
 runtime_root="${DEVSTACK_RUNTIME_OUTPUT:-$repository_root/.build/Runtimes}"
 release_root="${DEVSTACK_RELEASE_ROOT:-$repository_root/.build/release}"
-application="$release_root/DevStack.app"
+build_stamp="$(date +%Y%m%d-%H%M%S)-$$"
+staging_root="$release_root/staging/$build_stamp"
+application="$staging_root/DevStack.app"
 identity="${DEVSTACK_SIGNING_IDENTITY:--}"
 
 [[ "$(uname -m)" == "arm64" ]] || { echo "Release packaging requires Apple Silicon." >&2; exit 69; }
 [[ -d "$runtime_root" ]] || { echo "Runtime payload is missing: $runtime_root" >&2; exit 66; }
 
-# Legacy runtimes are fail-closed: a failed feasibility gate removes the runtime
-# from this release instead of shipping an unverified payload.
-enforce_legacy_gate() {
-    local runtime_id="$1" gate="$2"
-    if [[ ! -d "$runtime_root/$runtime_id" ]]; then
-        echo "Legacy runtime $runtime_id is not present; it will not be packaged." >&2
-        return 0
-    fi
-    if "$repository_root/scripts/gates/$gate.sh"; then
-        return 0
-    fi
-    echo "Feasibility gate failed for $runtime_id; omitting it from this release." >&2
-    rm -rf "$runtime_root/$runtime_id"
-}
-
-enforce_legacy_gate php-7.4 php74
-enforce_legacy_gate mysql-5.7 mysql57
-
-swift build -c release --arch arm64
-swift run -c release --arch arm64 DevStackCoreChecks
-products="$(swift build -c release --arch arm64 --show-bin-path)"
-rm -rf "$release_root"
+runtime_ids=(apache-2.4 nginx-1.30 php-8.4 php-8.5 mysql-8.4 openssl-3.5 mailpit-1.31.1 phpmyadmin-5.2.3 adminer-6.1.1 composer-2.10.3 imagemagick-7.1)
+# Optional legacy payloads enter the release only after their feasibility gates pass.
+if [[ "${DEVSTACK_INCLUDE_LEGACY:-0}" == "1" ]]; then
+    for runtime_id in php-7.4 mysql-5.7; do
+        gate=php74
+        [[ "$runtime_id" != "mysql-5.7" ]] || gate=mysql57
+        if [[ -d "$runtime_root/$runtime_id" ]] && "$repository_root/scripts/gates/$gate.sh"; then
+            runtime_ids+=("$runtime_id")
+        else
+            echo "Omitting unverified legacy payload: $runtime_id" >&2
+        fi
+    done
+fi
+cd "$repository_root"
+swift build -c release --build-system native --jobs "${DEVSTACK_BUILD_JOBS:-4}"
+products="$(swift build -c release --build-system native --show-bin-path)"
+"$products/DevStackCoreChecks"
 mkdir -p "$application/Contents/MacOS" \
     "$application/Contents/Resources/Runtimes" \
     "$application/Contents/Library/LaunchServices" \
@@ -43,30 +40,41 @@ cp "$products/DevStack" "$application/Contents/MacOS/DevStack"
 cp "$products/DevStackPrivilegedHelper" "$application/Contents/Library/LaunchServices/DevStackPrivilegedHelper"
 cp "$repository_root/Sources/DevStackApp/Resources/app.devstack.desktop.helper.plist" "$application/Contents/Library/LaunchDaemons/app.devstack.desktop.helper.plist"
 cp "$repository_root/Sources/DevStackApp/Resources/runtime-lock.json" "$application/Contents/Resources/runtime-lock.json"
-cp -R "$runtime_root/." "$application/Contents/Resources/Runtimes/"
+for runtime_id in "${runtime_ids[@]}"; do
+    [[ -d "$runtime_root/$runtime_id" ]] || { echo "Missing runtime: $runtime_id" >&2; exit 66; }
+    cp -cR "$runtime_root/$runtime_id" "$application/Contents/Resources/Runtimes/$runtime_id"
+done
+"$repository_root/scripts/audit-runtime.sh" "$application/Contents/Resources/Runtimes" "$repository_root/.build/runtime-work"
 for resource_bundle in "$products"/*.bundle; do
     [[ -d "$resource_bundle" ]] && cp -R "$resource_bundle" "$application/Contents/Resources/"
 done
 
 if [[ -d "$repository_root/ThirdPartyNotices" ]]; then cp -R "$repository_root/ThirdPartyNotices" "$application/Contents/Resources/ThirdPartyNotices"; fi
-"$repository_root/scripts/generate-sbom.py" "$runtime_root" "$application/Contents/Resources/SBOM/runtime-sbom.cdx.json"
+"$repository_root/scripts/generate-sbom.py" "$application/Contents/Resources/Runtimes" "$application/Contents/Resources/SBOM/runtime-sbom.cdx.json"
 source_cache="${DEVSTACK_SOURCE_CACHE:-$repository_root/.build/runtime-cache}"
 if [[ -d "$source_cache" ]]; then cp -R "$source_cache" "$application/Contents/Resources/CorrespondingSources"; fi
+mkdir -p "$application/Contents/Resources/CorrespondingSources/DevStackPatches"
+cp "$repository_root/scripts/prepare-imagemagick.py" "$repository_root/scripts/configure-phpmyadmin.py" "$application/Contents/Resources/CorrespondingSources/DevStackPatches/"
 cp "$repository_root/LICENSE" "$application/Contents/Resources/LICENSE"
 
+signing_options=(--options runtime --timestamp)
+if [[ "$identity" == "-" ]]; then
+    signing_options=(--timestamp=none)
+    echo "No Developer ID identity configured: producing an ad-hoc development build." >&2
+fi
 while IFS= read -r -d '' binary; do
     if /usr/bin/file "$binary" | /usr/bin/grep -q 'Mach-O'; then
-        /usr/bin/codesign --force --options runtime --timestamp --sign "$identity" "$binary"
+        /usr/bin/codesign --force "${signing_options[@]}" --sign "$identity" "$binary"
     fi
-done < <(/usr/bin/find "$application/Contents/Resources/Runtimes" -type f -print0)
+done < <(/usr/bin/python3 "$repository_root/scripts/mach-o-files.py" "$application/Contents/Resources/Runtimes")
 
-/usr/bin/codesign --force --options runtime --timestamp --entitlements "$repository_root/Packaging/Helper.entitlements" --sign "$identity" "$application/Contents/Library/LaunchServices/DevStackPrivilegedHelper"
-/usr/bin/codesign --force --options runtime --timestamp --entitlements "$repository_root/Packaging/DevStack.entitlements" --sign "$identity" "$application"
+/usr/bin/codesign --force "${signing_options[@]}" --entitlements "$repository_root/Packaging/Helper.entitlements" --sign "$identity" "$application/Contents/Library/LaunchServices/DevStackPrivilegedHelper"
+/usr/bin/codesign --force "${signing_options[@]}" --entitlements "$repository_root/Packaging/DevStack.entitlements" --sign "$identity" "$application"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$application"
 
-dmg="$release_root/DevStack-0.1.0-arm64.dmg"
+dmg="$staging_root/DevStack-0.1.0-arm64.dmg"
 /usr/bin/hdiutil create -volname DevStack -srcfolder "$application" -ov -format UDZO "$dmg"
-/usr/bin/codesign --force --timestamp --sign "$identity" "$dmg"
+/usr/bin/codesign --force "${signing_options[@]}" --sign "$identity" "$dmg"
 
 if [[ -n "${DEVSTACK_NOTARY_PROFILE:-}" ]]; then
     xcrun notarytool submit "$dmg" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" --wait
@@ -77,4 +85,9 @@ else
     echo "DEVSTACK_NOTARY_PROFILE is unset; DMG was signed but not notarized or stapled." >&2
 fi
 
-echo "Release image: $dmg"
+mkdir -p "$release_root/previous/$build_stamp"
+for artifact in DevStack.app DevStack-0.1.0-arm64.dmg; do
+    if [[ -e "$release_root/$artifact" ]]; then mv "$release_root/$artifact" "$release_root/previous/$build_stamp/"; fi
+    mv "$staging_root/$artifact" "$release_root/$artifact"
+done
+echo "Release image: $release_root/DevStack-0.1.0-arm64.dmg"
