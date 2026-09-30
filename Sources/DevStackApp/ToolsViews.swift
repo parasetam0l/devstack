@@ -8,14 +8,8 @@ struct PHPView: View {
     @EnvironmentObject private var model: AppModel
     var body: some View {
         WorkspacePage {
-            HStack {
-                PageHeading(title: "PHP", subtitle: "Default runtime and extensions.")
-                Spacer()
-                PHPVersionPicker().labelsHidden().controlSize(.small).frame(width: 200)
-            }
-            runtimePanel(id: model.configuration.defaultPHPRuntimeID,
-                title: "PHP " + (model.availablePHPRuntimes.first { $0.id == model.configuration.defaultPHPRuntimeID }?.version ?? ""),
-                subtitle: "Default for new sites and Terminal", legacy: model.configuration.defaultPHPRuntimeID == "php-7.4")
+            PageHeading(title: "PHP", subtitle: "Choose the default runtime and manage its extensions.")
+            runtimePanel(id: model.configuration.defaultPHPRuntimeID, legacy: model.configuration.defaultPHPRuntimeID == "php-7.4")
             SurfacePanel(title: "Runtime details") {
                 DisclosureGroup("Sources, licenses, and build information") {
                     VStack(alignment: .leading, spacing: 8) {
@@ -28,19 +22,33 @@ struct PHPView: View {
         }
     }
 
-    private func runtimePanel(id: String, title: String, subtitle: String, legacy: Bool) -> some View {
-        SurfacePanel {
+    private func runtimePanel(id: String, legacy: Bool) -> some View {
+        let installed = model.runtimeIsAvailable(id)
+        let phase = model.serviceState(ServiceKind(rawValue: id) ?? .php85).phase
+        return SurfacePanel {
             HStack(spacing: 8) {
                 FeatureIcon(symbol: "chevron.left.forwardslash.chevron.right", color: legacy ? .orange : DevStackDesign.accent)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: 13, weight: .semibold))
-                    Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("Default runtime").font(.system(size: 13, weight: .semibold))
+                    Text("Used for new sites and the managed Terminal").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
-                StatusBadge(title: model.runtimeIsAvailable(id) ? legacy ? "Legacy" : "Installed" : "Not installed", color: model.runtimeIsAvailable(id) ? legacy ? .orange : DevStackDesign.accent : .secondary)
+                StatusBadge(
+                    title: phase == .running ? "Running" : installed ? (legacy ? "Legacy" : "Installed") : "Not installed",
+                    color: phase == .running ? phase.color : installed ? (legacy ? .orange : DevStackDesign.accent) : .secondary,
+                    dot: phase == .running,
+                    dotColor: phase.dotColor
+                )
+                PHPDefaultRuntimePicker()
             }
             if legacy {
                 InfoNotice(symbol: "exclamationmark.triangle", title: "Legacy compatibility", message: "PHP 7.4 no longer receives security fixes. Use it only for older projects that need it.", color: .orange)
+            }
+            Divider()
+            HStack {
+                Text("Extensions").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                Spacer()
+                Text("Changes restart PHP automatically.").font(.system(size: 10)).foregroundStyle(.tertiary)
             }
             VStack(spacing: 0) {
                 ForEach(Array([("xdebug", "Xdebug", "Step debugging · 127.0.0.1:9003"), ("redis", "Redis", "Redis client"), ("imagick", "Imagick", "ImageMagick image processing"), ("pgsql", "PostgreSQL", "Native PostgreSQL functions"), ("pdo_pgsql", "PDO PostgreSQL", "PostgreSQL driver for PDO")].enumerated()), id: \.offset) { index, item in
@@ -58,6 +66,28 @@ struct PHPView: View {
     }
     private func extensionBinding(_ name: String, runtimeID: String) -> Binding<Bool> {
         Binding(get: { model.extensionIsAvailable(name, runtimeID: runtimeID) && model.configuration.enabledExtensions[runtimeID]?.contains(name) == true }, set: { enabled in Task { await model.setExtension(name, enabled: enabled, runtimeID: runtimeID) } })
+    }
+}
+
+/// Segmented default-runtime picker for the PHP page: all installed versions
+/// are visible at a glance instead of hidden behind a menu.
+private struct PHPDefaultRuntimePicker: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        let running = model.serviceIsRunning(ServiceKind(rawValue: model.configuration.defaultPHPRuntimeID) ?? .php85)
+        return Picker("PHP", selection: Binding(
+            get: { model.configuration.defaultPHPRuntimeID },
+            set: { id in Task { await model.selectPHP(id) } }
+        )) {
+            ForEach(model.availablePHPRuntimes) { runtime in
+                Text(runtime.version.split(separator: ".").prefix(2).joined(separator: ".")).tag(runtime.id)
+            }
+        }
+        .pickerStyle(.segmented)
+        .fixedSize()
+        .disabled(model.isBusy || running)
+        .help(running ? "Stop PHP before changing the default version." : "Choose the default PHP runtime.")
     }
 }
 
