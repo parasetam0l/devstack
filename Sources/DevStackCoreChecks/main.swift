@@ -150,7 +150,8 @@ enum DevStackCoreChecks {
         let paths = DevStackPaths(
             applicationSupport: temporary.appendingPathComponent("support"),
             logs: temporary.appendingPathComponent("logs"),
-            builtInRuntimes: temporary.appendingPathComponent("runtimes")
+            builtInRuntimes: temporary.appendingPathComponent("runtimes"),
+            defaultSiteRoot: temporary.appendingPathComponent("DevStack")
         )
         try paths.createRequiredDirectories()
         let site = SiteDefinition(
@@ -182,6 +183,10 @@ enum DevStackCoreChecks {
         try expect(DefaultSiteContent.ensurePlaceholderIndex(in: placeholderRoot, hostname: "localhost", isDefaultSite: true), "Placeholder index.php was not created")
         try expect(FileManager.default.fileExists(atPath: placeholderRoot.appendingPathComponent("index.php").path), "Placeholder index.php is missing")
         try expect(!DefaultSiteContent.ensurePlaceholderIndex(in: placeholderRoot, hostname: "localhost", isDefaultSite: true), "Placeholder overwrote an existing index")
+        try AtomicFileWriter.write("<?php // DevStack placeholder. Replace this file with your project's entry point.\n", to: placeholderRoot.appendingPathComponent("index.php"), permissions: 0o644)
+        try expect(DefaultSiteContent.refreshPlaceholderIndex(in: placeholderRoot, hostname: "localhost", isDefaultSite: true), "Stale placeholder was not refreshed")
+        try AtomicFileWriter.write("<?php // user project\n", to: placeholderRoot.appendingPathComponent("index.php"), permissions: 0o644)
+        try expect(!DefaultSiteContent.refreshPlaceholderIndex(in: placeholderRoot, hostname: "localhost", isDefaultSite: true), "Refresh overwrote a user-edited index")
         let php = try renderer.phpFPMConfiguration(runtimeID: "php-8.5", sites: [site], includeManagementPool: true)
         try expect(php.contains("[management]"), "PHP management pool was not rendered")
         try expect(php.contains(site.id.uuidString.replacingOccurrences(of: "-", with: "_").lowercased()), "Site PHP pool was not rendered")

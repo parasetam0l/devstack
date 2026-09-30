@@ -196,6 +196,36 @@ final class AppModel: ObservableObject {
         do {
             try paths.createRequiredDirectories()
             configuration = try await store.load()
+            // The default site document root moved from Application Support to
+            // ~/DevStack so project files are visible and user-editable.
+            if let index = configuration.sites.firstIndex(where: { $0.hostname == "localhost" }) {
+                let legacyRoot = paths.applicationSupport.appendingPathComponent("DefaultSite", isDirectory: true)
+                if configuration.sites[index].documentRoot == legacyRoot.path, paths.defaultSiteRoot.path != legacyRoot.path {
+                    let legacyIndex = legacyRoot.appendingPathComponent("index.php")
+                    if !FileManager.default.fileExists(atPath: paths.defaultSiteRoot.path) {
+                        try? FileManager.default.moveItem(at: legacyRoot, to: paths.defaultSiteRoot)
+                    } else if !FileManager.default.fileExists(atPath: paths.defaultSiteRoot.appendingPathComponent("index.php").path),
+                              FileManager.default.fileExists(atPath: legacyIndex.path) {
+                        try? FileManager.default.moveItem(at: legacyIndex, to: paths.defaultSiteRoot.appendingPathComponent("index.php"))
+                    }
+                    if (try? FileManager.default.contentsOfDirectory(atPath: legacyRoot.path))?.isEmpty == true {
+                        try? FileManager.default.removeItem(at: legacyRoot)
+                    }
+                    configuration.sites[index].documentRoot = paths.defaultSiteRoot.path
+                    try await store.save(configuration)
+                    DefaultSiteContent.refreshPlaceholderIndex(in: paths.defaultSiteRoot, hostname: "localhost", isDefaultSite: true)
+                    try? generateConfiguration()
+                }
+            }
+            // Keep the generated default placeholder in sync with its document
+            // root without ever touching user-edited files.
+            if let defaultSite = configuration.sites.first(where: { $0.hostname == "localhost" }) {
+                DefaultSiteContent.refreshPlaceholderIndex(
+                    in: URL(fileURLWithPath: defaultSite.documentRoot),
+                    hostname: defaultSite.hostname,
+                    isDefaultSite: true
+                )
+            }
             // The default site always exists so localhost/127.0.0.1 have a
             // working page and unmatched hostnames never hit phpMyAdmin.
             if !configuration.sites.contains(where: { $0.hostname == "localhost" }) {

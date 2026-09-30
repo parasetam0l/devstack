@@ -13,7 +13,7 @@ import SwiftUI
 
     static func makeModel() -> AppModel {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("DevStack-UIReview")
-        let model = AppModel(paths: DevStackPaths(applicationSupport: root, logs: root.appendingPathComponent("Logs")), automaticallyLoad: false)
+        let model = AppModel(paths: DevStackPaths(applicationSupport: root, logs: root.appendingPathComponent("Logs"), defaultSiteRoot: root.appendingPathComponent("DevStack")), automaticallyLoad: false)
         model.appearance = CommandLine.arguments.contains("--dark") ? .dark : .light
         model.selectedSection = NavigationSection.allCases.first { $0.rawValue.lowercased() == argument("--ui-review")?.lowercased() } ?? .dashboard
         if let url = DevStackResources.bundle.url(forResource: "runtime-lock", withExtension: "json"),

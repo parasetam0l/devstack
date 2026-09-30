@@ -6,11 +6,16 @@ public struct DevStackPaths: Sendable {
     public let applicationSupport: URL
     public let logs: URL
     public let builtInRuntimes: URL
+    /// Document root of the built-in localhost default site. It lives in the
+    /// home folder so project files stay visible and user-editable, unlike app
+    /// state under Application Support.
+    public let defaultSiteRoot: URL
 
     public init(
         applicationSupport: URL? = nil,
         logs: URL? = nil,
         builtInRuntimes: URL? = nil,
+        defaultSiteRoot: URL? = nil,
         fileManager: FileManager = .default
     ) {
         let supportBase = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -18,6 +23,7 @@ public struct DevStackPaths: Sendable {
         self.applicationSupport = applicationSupport ?? supportBase.appendingPathComponent("DevStack", isDirectory: true)
         self.logs = logs ?? logsBase.appendingPathComponent("DevStack", isDirectory: true)
         self.builtInRuntimes = builtInRuntimes ?? Bundle.main.resourceURL?.appendingPathComponent("Runtimes", isDirectory: true) ?? URL(fileURLWithPath: "/Applications/DevStack.app/Contents/Resources/Runtimes")
+        self.defaultSiteRoot = defaultSiteRoot ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("DevStack", isDirectory: true)
     }
 
     public var configurationFile: URL { applicationSupport.appendingPathComponent("configuration.json") }
@@ -37,8 +43,6 @@ public struct DevStackPaths: Sendable {
         return URL(fileURLWithPath: "/tmp/devstack-\(getuid())-\(digest)", isDirectory: true)
     }
     public var certificates: URL { applicationSupport.appendingPathComponent("Certificates", isDirectory: true) }
-    /// Document root of the built-in localhost default site.
-    public var defaultSiteRoot: URL { applicationSupport.appendingPathComponent("DefaultSite", isDirectory: true) }
     public var mailpit: URL { applicationSupport.appendingPathComponent("Mailpit", isDirectory: true) }
     public var mailpitDatabase: URL { mailpit.appendingPathComponent("mailpit.db") }
     public var backups: URL { applicationSupport.appendingPathComponent("Backups", isDirectory: true) }

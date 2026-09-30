@@ -48,6 +48,45 @@ public enum DefaultSiteContent {
         }
     }
 
+    static let marker = "DevStack placeholder. Replace this file with your project's entry point."
+
+    public static func isPlaceholder(at url: URL) -> Bool {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return false }
+        return text.contains(marker)
+    }
+
+    /// Regenerates the generated placeholder when it is stale (for example
+    /// after the document root moved). User-edited files are never touched.
+    @discardableResult
+    public static func refreshPlaceholderIndex(
+        in documentRoot: URL,
+        hostname: String,
+        isDefaultSite: Bool,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        let destination = documentRoot.appendingPathComponent("index.php")
+        if fileManager.fileExists(atPath: destination.path) {
+            guard isPlaceholder(at: destination),
+                  let text = try? String(contentsOf: destination, encoding: .utf8),
+                  !text.contains(documentRoot.path) else { return false }
+        } else {
+            for name in ["index.html", "index.htm"] where fileManager.fileExists(atPath: documentRoot.appendingPathComponent(name).path) {
+                return false
+            }
+        }
+        do {
+            try AtomicFileWriter.write(
+                placeholderIndexPHP(hostname: hostname, documentRoot: documentRoot.path, isDefaultSite: isDefaultSite),
+                to: destination,
+                permissions: 0o644,
+                fileManager: fileManager
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
     static func placeholderIndexPHP(hostname: String, documentRoot: String, isDefaultSite: Bool) -> String {
         let heading = isDefaultSite ? "Your local stack is running" : "It works!"
         let detail = isDefaultSite

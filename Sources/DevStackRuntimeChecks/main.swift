@@ -20,7 +20,7 @@ struct RuntimeChecks {
         }
         let root = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? ".build/Runtimes").standardizedFileURL
         let work = URL(fileURLWithPath: "/tmp/dvs-check-\(UUID().uuidString.prefix(8))")
-        let paths = DevStackPaths(applicationSupport: work, logs: work.appendingPathComponent("Logs"), builtInRuntimes: root)
+        let paths = DevStackPaths(applicationSupport: work, logs: work.appendingPathComponent("Logs"), builtInRuntimes: root, defaultSiteRoot: work.appendingPathComponent("DevStack"))
         let supervisor = ServiceSupervisor(recordsURL: work.appendingPathComponent("processes.json"))
         do {
             try await run(root: root, paths: paths, supervisor: supervisor)
