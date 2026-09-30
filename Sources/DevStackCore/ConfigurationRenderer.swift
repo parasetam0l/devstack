@@ -113,11 +113,11 @@ public struct ConfigurationRenderer: Sendable {
 
         <VirtualHost *:\(ports.webHTTPSListen)>
             ServerName adminer.localhost
-            DocumentRoot \(quote(runtimeDirectory("adminer-6.1.1").path))
+            DocumentRoot \(quote(paths.generatedAdminer.path))
             SSLEngine on
             SSLCertificateFile \(quote(paths.certificate(for: "adminer.localhost").path))
             SSLCertificateKeyFile \(quote(paths.privateKey(for: "adminer.localhost").path))
-            <Directory \(quote(runtimeDirectory("adminer-6.1.1").path))>
+            <Directory \(quote(paths.generatedAdminer.path))>
                 AllowOverride None
                 Require local
                 <FilesMatch "\\.php$">
@@ -440,12 +440,51 @@ public struct ConfigurationRenderer: Sendable {
         }
         return """
         <?php
+        // DevStack local development: sign in with the managed development
+        // account instead of showing a login form.
         $cfg['blowfish_secret'] = '\(cookieSecret)';
-        $cfg['Servers'][1]['auth_type'] = 'cookie';
+        $cfg['Servers'][1]['auth_type'] = 'config';
         $cfg['Servers'][1]['host'] = '127.0.0.1';
         $cfg['Servers'][1]['port'] = '\(ports.mysqlListen)';
+        $cfg['Servers'][1]['user'] = 'root';
+        $cfg['Servers'][1]['password'] = 'root';
         $cfg['Servers'][1]['AllowNoPassword'] = false;
         $cfg['VersionCheck'] = false;
+        """
+    }
+
+    /// Wrapper served as the Adminer document root. It pre-seeds Adminer's
+    /// session with the development credentials and authorizes every login so
+    /// the tool opens directly on the database; the vhost is loopback-only.
+    public func adminerWrapperPHP(adminerIndex: URL) -> String {
+        let indexPath = adminerIndex.path.replacingOccurrences(of: "'", with: "\\'")
+        return """
+        <?php
+        // DevStack-managed Adminer wrapper. Local development only.
+        function adminer_object() {
+            class DevStackAdminer extends Adminer\\Adminer {
+                function credentials() {
+                    return isset($_GET['pgsql'])
+                        ? ['127.0.0.1:\(ports.postgresqlListen)', 'devstack', 'devstack']
+                        : ['127.0.0.1:\(ports.mysqlListen)', 'root', 'root'];
+                }
+                function login($login, $password) {
+                    return true;
+                }
+            }
+            return new DevStackAdminer;
+        }
+
+        // Seed the session password so the first request connects directly
+        // instead of rendering the login form.
+        session_start();
+        $driver = isset($_GET['pgsql']) ? 'pgsql' : 'server';
+        $server = (string) ($_GET[$driver] ?? '');
+        $username = (string) ($_GET['username'] ?? '');
+        $_SESSION['pwds'][$driver][$server][$username] = isset($_GET['pgsql']) ? 'devstack' : 'root';
+        session_write_close();
+
+        include '\(indexPath)';
         """
     }
 

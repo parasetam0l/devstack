@@ -865,6 +865,11 @@ final class AppModel: ObservableObject {
         }
         try AtomicFileWriter.write(try renderer.phpMyAdminConfiguration(cookieSecret: cookieSecret),
             to: paths.phpMyAdmin.appendingPathComponent("config.inc.php"), permissions: 0o600)
+        try AtomicFileWriter.write(
+            renderer.adminerWrapperPHP(adminerIndex: runtimeDirectory("adminer-6.1.1").appendingPathComponent("index.php")),
+            to: paths.generatedAdminer.appendingPathComponent("index.php"),
+            permissions: 0o644
+        )
         try AtomicFileWriter.write(try renderer.apacheConfiguration(sites: configuration.sites), to: paths.generatedApache.appendingPathComponent("httpd.conf"), permissions: 0o644)
         for runtimeID in ["php-7.4", "php-8.4", "php-8.5"] {
             try AtomicFileWriter.write(

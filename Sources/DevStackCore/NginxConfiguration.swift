@@ -95,7 +95,7 @@ extension ConfigurationRenderer {
                 server_name \(host);
                 ssl_certificate \(try nginxQuote(paths.certificate(for: host).path));
                 ssl_certificate_key \(try nginxQuote(paths.privateKey(for: host).path));
-                root \(try nginxQuote(runtimeDirectory(runtimeID).path));
+                root \(try nginxQuote(host == "adminer.localhost" ? paths.generatedAdminer.path : runtimeDirectory(runtimeID).path));
                 index index.php;
                 location / { try_files $uri $uri/ =404; }
                 location ~ \\.php$ {
