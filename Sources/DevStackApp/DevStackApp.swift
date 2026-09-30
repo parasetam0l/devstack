@@ -118,6 +118,15 @@ private struct MenuBarView: View {
             }
         }
         Divider()
+        let dnsRunning = model.helperStatus?.dnsEnabled == true
+        Menu {
+            Button(dnsRunning ? "Stop" : "Start") {
+                Task { await model.setLocalNetworkAccess(!dnsRunning) }
+            }.disabled(model.isBusy || !model.helperInstalled)
+        } label: {
+            Label("Local DNS · \(dnsRunning ? "Running" : "Stopped")", systemImage: "wifi.router")
+        }
+        Divider()
         Button("Open DevStack") {
             NSApplication.shared.activate(ignoringOtherApps: true)
             NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)

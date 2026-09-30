@@ -27,6 +27,8 @@ struct DashboardView: View {
                     DatabaseServiceControl(embedded: true)
                     Divider()
                     ServiceControl(title: "Mail", service: .mailpit, detail: "SMTP \(model.configuration.ports.mailpitSMTP) · Inbox \(model.configuration.ports.mailpitInbox)") { Text("Mailpit").font(.system(size: 12, weight: .medium)) }
+                    Divider()
+                    LocalDNSServiceControl()
                 }
             }
 
@@ -127,6 +129,59 @@ private struct ServiceControl<Selector: View>: View {
                 } label: { Image(systemName: "ellipsis") }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().frame(width: 22).accessibilityLabel("\(title) actions")
         }.padding(.vertical, 6)
+    }
+}
+
+/// The helper's local DNS responder shown as a service row: it answers
+/// DevStack hostnames for phones and other devices on the network.
+private struct LocalDNSServiceControl: View {
+    @EnvironmentObject private var model: AppModel
+
+    private var running: Bool { model.helperStatus?.dnsEnabled == true }
+    private var available: Bool { model.helperInstalled }
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "wifi.router").foregroundStyle(.secondary).frame(width: 16)
+            Text("Local DNS").font(.system(size: 12, weight: .medium)).lineLimit(1).frame(width: 80, alignment: .leading)
+            Text(model.localNetworkAddress.map { "\($0):53" } ?? "No network")
+                .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                .lineLimit(1).frame(width: 140, alignment: .leading)
+            Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                .layoutPriority(-1)
+            Spacer(minLength: 4)
+            StatusBadge(
+                title: available ? (running ? "Running" : "Stopped") : "Unavailable",
+                color: available ? (running ? DevStackDesign.success : .secondary) : .secondary,
+                dot: true,
+                dotColor: running ? .green : nil
+            ).frame(minWidth: 64, alignment: .trailing)
+            Button(running ? "Stop" : "Start") {
+                Task { await model.setLocalNetworkAccess(!running) }
+            }.buttonStyle(DevStackGlassButtonStyle())
+                .disabled(model.isBusy || !available)
+                .help(available ? "Answer DevStack hostnames for devices on this network" : "Requires the privileged helper")
+                .accessibilityLabel(running ? "Stop local DNS" : "Start local DNS")
+                .frame(width: 55)
+            Menu {
+                Button("Local network settings…") { model.selectedSection = .settings }
+                if let address = model.localNetworkAddress {
+                    Button("Copy DNS address") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(address, forType: .string)
+                    }
+                }
+                Button("Run Doctor") { model.selectedSection = .doctor }
+            } label: { Image(systemName: "ellipsis") }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().frame(width: 22)
+                .help("Local DNS actions").accessibilityLabel("Local DNS actions")
+        }.padding(.vertical, 6)
+    }
+
+    private var detail: String {
+        guard available else { return "Set up the helper in Settings" }
+        guard running else { return "Off — serve DevStack hostnames to this network" }
+        return "Answers DevStack hostnames · other queries forwarded"
     }
 }
 

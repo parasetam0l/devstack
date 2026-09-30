@@ -123,10 +123,10 @@ struct RootView: View {
 
     private var statusFooter: some View {
         HStack(spacing: 7) {
-            let running = model.serviceStates.filter { $0.phase == .running }.count
+            let running = model.serviceStates.filter { $0.phase == .running }.count + (model.helperStatus?.dnsEnabled == true ? 1 : 0)
             let failed = model.serviceStates.contains { $0.phase == .failed }
             Circle().fill(failed ? Color.red : running > 0 ? DevStackDesign.success : .secondary).frame(width: 5, height: 5)
-            Text(failed ? "Service needs attention" : running > 0 ? "\(running) services running" : "Stack stopped")
+            Text(failed ? "Service needs attention" : running > 0 ? "\(running) service\(running == 1 ? "" : "s") running" : "Stack stopped")
             Spacer()
             Text("\(model.configuration.sites.count) \(model.configuration.sites.count == 1 ? "site" : "sites")")
             Button("View Logs") { model.selectedSection = .logs }.buttonStyle(.borderless).padding(.leading, 9)
