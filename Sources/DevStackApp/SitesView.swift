@@ -104,7 +104,7 @@ private struct SiteRow: View {
                 StatusBadge(title: site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP "))
                 StatusBadge(title: site.tlsEnabled ? "HTTPS" : "HTTP", color: site.tlsEnabled ? DevStackDesign.accent : .secondary)
             }
-            Button { model.openURL(model.siteURL(site)) } label: { Image(systemName: "arrow.up.right.square") }
+            Button { model.openURL(model.siteURL(site)) } label: { Image(systemName: "arrow.up.right") }
                 .buttonStyle(.borderless).help("Open \(site.name)").accessibilityLabel("Open \(site.name)")
             Menu {
                 Button("Edit Site…", systemImage: "pencil", action: edit)

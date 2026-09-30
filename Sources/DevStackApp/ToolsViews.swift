@@ -111,10 +111,14 @@ struct DatabaseView: View {
                 }
             }
             DatabaseServiceControl()
-            Picker("Connection and backup tools", selection: $state.postgreSQL) {
-                Text("MySQL").tag(false)
-                Text("PostgreSQL").tag(true)
-            }.pickerStyle(.segmented).labelsHidden().frame(maxWidth: 240).disabled(model.isBusy)
+            HStack(spacing: 8) {
+                Text("Tools for").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                Picker("Connection and backup tools", selection: $state.postgreSQL) {
+                    Text("MySQL").tag(false)
+                    Text("PostgreSQL").tag(true)
+                }.pickerStyle(.segmented).labelsHidden().fixedSize().disabled(model.isBusy)
+                Spacer()
+            }.padding(.horizontal, 4)
             SurfacePanel(title: "Connection") {
                 HStack(alignment: .top, spacing: 24) {
                     VStack(spacing: 8) {
@@ -240,7 +244,7 @@ struct LogsView: View {
             HStack(spacing: 8) {
                 Picker("Service", selection: $model.selectedLogService) {
                     ForEach(ServiceKind.allCases) { service in Text(service.displayName).tag(service) }
-                }.frame(width: 205)
+                }.pickerStyle(.menu).fixedSize()
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField("Filter output", text: $state.filter).textFieldStyle(.plain)
@@ -251,6 +255,9 @@ struct LogsView: View {
                     NSPasteboard.general.clearContents(); NSPasteboard.general.setString(filteredContents, forType: .string)
                 } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless).help("Copy displayed output").accessibilityLabel("Copy displayed output")
             }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .glassEffect(.regular, in: .rect(cornerRadius: 12))
             VStack(spacing: 0) {
                 HStack(spacing: 7) {
                     Circle().fill(currentPhase.color).frame(width: 6, height: 6)
