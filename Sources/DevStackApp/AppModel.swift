@@ -515,7 +515,7 @@ final class AppModel: ObservableObject {
             helperInstalled = false; helperStatus = nil
             // Path-aware: most "helper unavailable" reports are just the user
             // running the ad-hoc preview instead of the signed install.
-            helperSetupState = .unavailable("You are running \(helper.runningBundlePath) (ad-hoc, no Team ID). Quit this build and open /Applications/DevStack.app for the helper; 8080/8443 with .localhost work here without it.")
+            helperSetupState = .unavailable("This build cannot drive the helper. Open the signed DevStack build in Applications for custom domains and ports 80/443; high ports with .localhost work here without it.")
             return
         }
         switch helper.registrationStatus {

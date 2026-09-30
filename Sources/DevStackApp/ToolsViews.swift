@@ -374,11 +374,6 @@ struct SettingsView: View {
                     }
                 }
                 Text(model.helperSetupState.message).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 6) {
-                    Text("Running: \(model.runningBundlePath)").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                    Spacer(minLength: 6)
-                    Text(model.runningTeamID.map { "Team \($0)" } ?? "Ad-hoc").font(.system(size: 10)).foregroundStyle(model.runningTeamID == nil ? .orange : .secondary)
-                }
                 if model.isPreviewBuild {
                     HStack {
                         Text("Helper needs the signed /Applications install.").font(.system(size: 11)).foregroundStyle(.orange)

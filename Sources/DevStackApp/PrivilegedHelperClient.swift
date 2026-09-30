@@ -37,7 +37,7 @@ struct PrivilegedHelperClient: @unchecked Sendable {
     func register() throws {
         guard canAuthenticate else {
             throw NSError(domain: "app.devstack.desktop.helper", code: 2, userInfo: [NSLocalizedDescriptionKey:
-                "This build (\(runningBundlePath)) is ad-hoc signed and cannot drive the helper. Quit it and open /Applications/DevStack.app (Developer ID signed) instead."])
+                "This build is ad-hoc signed and cannot drive the helper. Open the signed DevStack build in Applications instead."])
         }
         guard service.status != .enabled, service.status != .requiresApproval else { return }
         try service.register()

@@ -171,11 +171,8 @@ struct HelperNoticeSheet: View {
             if case .unavailable(let reason) = model.helperSetupState {
                 Text(reason).font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }
-            if model.isPreviewBuild {
-                Text("Running: \(model.runningBundlePath)").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
-                if model.runningTeamID == nil {
-                    Text("Ad-hoc build detected. The helper can only run from the signed /Applications install.").font(.system(size: 11)).foregroundStyle(.orange)
-                }
+            if model.isPreviewBuild, model.runningTeamID == nil {
+                Text("This preview build cannot drive the helper. Open the signed build in Applications instead.").font(.system(size: 11)).foregroundStyle(.orange)
             }
             if !blocking {
                 Toggle("Do not show this again", isOn: $suppress).toggleStyle(.checkbox).controlSize(.small)
