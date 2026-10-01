@@ -250,6 +250,9 @@ public struct ConfigurationRenderer: Sendable {
         opcache.enable_cli=0
         opcache.jit=disable
         opcache.jit_buffer_size=0
+        ; The hardened runtime denies executable memory, so PCRE JIT cannot
+        ; initialize and warns on the first regex call in every worker.
+        pcre.jit=0
 
         \(settings.joined(separator: "\n"))
         """
