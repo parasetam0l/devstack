@@ -437,13 +437,13 @@ public struct ConfigurationRenderer: Sendable {
         pm.process_idle_timeout = 10s
         catch_workers_output = yes
         chdir = \(site.documentRoot)
-        php_admin_value[display_errors] = \(site.phpOverrides.displayErrors ? "On" : "Off")
+        php_value[display_errors] = \(site.phpOverrides.displayErrors ? "On" : "Off")
         php_admin_value[memory_limit] = \(site.phpOverrides.memoryLimit)
         php_admin_value[max_execution_time] = \(site.phpOverrides.maxExecutionTime)
         php_admin_value[upload_max_filesize] = \(site.phpOverrides.uploadMaxFilesize)
         php_admin_value[post_max_size] = \(site.phpOverrides.postMaxSize)
         php_admin_value[max_input_vars] = \(site.phpOverrides.maxInputVars)
-        php_admin_value[error_log] = \(site.logs.error)
+        php_value[error_log] = \(site.logs.error)
         """
     }
 

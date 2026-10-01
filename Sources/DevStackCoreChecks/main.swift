@@ -195,6 +195,10 @@ enum DevStackCoreChecks {
         let php = try renderer.phpFPMConfiguration(runtimeID: "php-8.5", sites: [site], includeManagementPool: true)
         try expect(php.contains("[management]"), "PHP management pool was not rendered")
         try expect(php.contains(site.id.uuidString.replacingOccurrences(of: "-", with: "_").lowercased()), "Site PHP pool was not rendered")
+        // Sites must be able to override their error handling with ini_set().
+        try expect(php.contains("php_value[display_errors]"), "Site display_errors is not overridable")
+        try expect(php.contains("php_value[error_log]"), "Site error_log is not overridable")
+        try expect(!php.contains("php_admin_value[display_errors] = On"), "Site display_errors is still forced on")
         let phpMyAdminConfig = try renderer.phpMyAdminConfiguration(cookieSecret: String(repeating: "a", count: 32))
         try expect(phpMyAdminConfig.contains("['auth_type'] = 'config'") && phpMyAdminConfig.contains("['user'] = 'root'"), "phpMyAdmin does not sign in automatically")
         let adminerWrapper = renderer.adminerWrapperPHP(adminerIndex: URL(fileURLWithPath: "/tmp/adminer/index.php"))
