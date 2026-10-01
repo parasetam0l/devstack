@@ -8,7 +8,7 @@ struct DevStackApp: App {
     @StateObject private var model = AppModel.makeForLaunch()
 
     var body: some Scene {
-        WindowGroup("DevStack") {
+        WindowGroup("DevStack", id: "main") {
             RootView()
                 .environmentObject(model)
                 .frame(minWidth: 820, minHeight: 540)
@@ -59,15 +59,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func configureWindow() {
         Task { @MainActor in
-            await Task.yield()
-            for window in NSApp.windows where window.contentView?.bounds.width ?? 0 >= 820 {
-                window.contentMaxSize = NSSize(width: 1100, height: window.contentMaxSize.height)
-                window.collectionBehavior.remove(.fullScreenPrimary)
-                window.collectionBehavior.insert(.fullScreenNone)
-                if let size = window.contentView?.bounds.size, size.width > 920 || size.height > 620 {
-                    window.setContentSize(NSSize(width: min(size.width, 920), height: min(size.height, 620)))
-                    window.center()
+            // The window may not be registered or laid out yet when SwiftUI recreates
+            // it through openWindow, so poll briefly instead of giving up.
+            for _ in 0..<40 {
+                if let window = MainWindowLocator.current {
+                    window.contentMaxSize = NSSize(width: 1100, height: window.contentMaxSize.height)
+                    window.collectionBehavior.remove(.fullScreenPrimary)
+                    window.collectionBehavior.insert(.fullScreenNone)
+                    if let size = window.contentView?.bounds.size, size.width > 920 || size.height > 620 {
+                        window.setContentSize(NSSize(width: min(size.width, 920), height: min(size.height, 620)))
+                        window.center()
+                    }
+                    return
                 }
+                try? await Task.sleep(for: .milliseconds(50))
             }
         }
     }
@@ -95,6 +100,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .terminateNow
         default:
             return .terminateCancel
+        }
+    }
+}
+
+// SwiftUI wraps the app delegate, so NSApp.delegate is not AppDelegate; both the
+// delegate and the model use this locator instead of casting.
+@MainActor
+enum MainWindowLocator {
+    static var current: NSWindow? {
+        NSApp.windows.first { window in
+            !(window is NSPanel) && (window.contentView?.bounds.width ?? 0) >= 820
         }
     }
 }
@@ -128,8 +144,7 @@ private struct MenuBarView: View {
         }
         Divider()
         Button("Open DevStack") {
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
+            model.showMainWindow()
         }
         Button("Start All") { Task { await model.startAll() } }
             .disabled(model.isBusy || model.stackIsRunning)

@@ -5,6 +5,7 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.openWindow) private var openWindow
     @StateObject private var navigation = RootNavigationState()
 
     var body: some View {
@@ -76,7 +77,10 @@ struct RootView: View {
         .background(WindowBackdrop().ignoresSafeArea())
         .tint(Color(nsColor: .controlAccentColor))
         .controlSize(.small)
-        .onAppear { model.applyAppearance() }
+        .onAppear {
+            model.applyAppearance()
+            model.openMainWindow = { openWindow(id: "main") }
+        }
         .onChange(of: model.appearance) { _, _ in model.applyAppearance() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await model.refreshHelperStatus() }

@@ -110,6 +110,10 @@ final class AppModel: ObservableObject {
         didSet { if !isReviewMode { UserDefaults.standard.set(appearance.rawValue, forKey: "DevStackAppearance") } }
     }
 
+    // Set by the window content: SwiftUI's action for opening a new main window after
+    // the user closed the previous one.
+    var openMainWindow: (() -> Void)?
+
     let paths: DevStackPaths
     let isReviewMode: Bool
     private let store: AppConfigurationStore
@@ -147,6 +151,18 @@ final class AppModel: ObservableObject {
     func requestNewSite() {
         selectedSection = .sites
         isPresentingNewSite = true
+    }
+
+    // Menu bar "Open DevStack": bring the window back, or ask SwiftUI to create a new
+    // one when the user closed the only window.
+    func showMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = MainWindowLocator.current {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            openMainWindow?()
+        }
     }
 
     func runtimeIsAvailable(_ id: String) -> Bool {
