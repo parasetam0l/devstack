@@ -33,21 +33,26 @@ public struct PrivilegedHelperStatus: Codable, Hashable, Sendable {
     public var hostMappingsInstalled: Bool
     public var portForwardingEnabled: Bool
     public var version: String
+    /// App build the running helper was started with. When this differs from
+    /// the installed app's build, the helper predates an app update and the
+    /// app retires it so launchd starts the current binary.
+    public var build: String
     public var dnsEnabled: Bool
     public var dnsAnswerAddress: String?
     public var dnsFailure: String?
 
-    public init(hostMappingsInstalled: Bool, portForwardingEnabled: Bool, version: String, dnsEnabled: Bool = false, dnsAnswerAddress: String? = nil, dnsFailure: String? = nil) {
+    public init(hostMappingsInstalled: Bool, portForwardingEnabled: Bool, version: String, build: String = "", dnsEnabled: Bool = false, dnsAnswerAddress: String? = nil, dnsFailure: String? = nil) {
         self.hostMappingsInstalled = hostMappingsInstalled
         self.portForwardingEnabled = portForwardingEnabled
         self.version = version
+        self.build = build
         self.dnsEnabled = dnsEnabled
         self.dnsAnswerAddress = dnsAnswerAddress
         self.dnsFailure = dnsFailure
     }
 
     private enum CodingKeys: String, CodingKey {
-        case hostMappingsInstalled, portForwardingEnabled, version
+        case hostMappingsInstalled, portForwardingEnabled, version, build
         case dnsEnabled, dnsAnswerAddress, dnsFailure
     }
 
@@ -56,6 +61,7 @@ public struct PrivilegedHelperStatus: Codable, Hashable, Sendable {
         self.hostMappingsInstalled = try c.decode(Bool.self, forKey: .hostMappingsInstalled)
         self.portForwardingEnabled = try c.decode(Bool.self, forKey: .portForwardingEnabled)
         self.version = try c.decode(String.self, forKey: .version)
+        self.build = try c.decodeIfPresent(String.self, forKey: .build) ?? ""
         self.dnsEnabled = try c.decodeIfPresent(Bool.self, forKey: .dnsEnabled) ?? false
         self.dnsAnswerAddress = try c.decodeIfPresent(String.self, forKey: .dnsAnswerAddress)
         self.dnsFailure = try c.decodeIfPresent(String.self, forKey: .dnsFailure)
@@ -68,6 +74,9 @@ public struct PrivilegedHelperStatus: Codable, Hashable, Sendable {
     func setDNSConfiguration(_ request: Data, withReply reply: @escaping (Data?, NSError?) -> Void)
     func removeManagedState(withReply reply: @escaping (Data?, NSError?) -> Void)
     func status(withReply reply: @escaping (Data?, NSError?) -> Void)
+    /// Exits after replying so launchd starts the helper binary that is now on
+    /// disk. The app calls this when the running helper's build is outdated.
+    func retire(withReply reply: @escaping (Data?, NSError?) -> Void)
 }
 
 public enum PrivilegedRequestValidationError: LocalizedError, Equatable, Sendable {

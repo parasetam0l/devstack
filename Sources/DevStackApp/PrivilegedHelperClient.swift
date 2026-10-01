@@ -76,6 +76,39 @@ struct PrivilegedHelperClient: @unchecked Sendable {
     }
 
     func status() async throws -> PrivilegedHelperStatus {
+        try await refreshStatus().status
+    }
+
+    /// Result of a helper status refresh: the helper's state plus whether an
+    /// outdated helper was retired, in which case the caller re-applies the
+    /// managed state to the freshly started helper.
+    struct StatusRefresh: Sendable {
+        var status: PrivilegedHelperStatus
+        var restarted: Bool
+    }
+
+    /// Asks the helper for its status. When the running helper was started from
+    /// an older app build, it is retired and launchd starts the current binary
+    /// on the next request; the status is then fetched again.
+    func refreshStatus() async throws -> StatusRefresh {
+        let status = try await rawStatus()
+        guard let currentBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+              !currentBuild.isEmpty, !status.build.isEmpty, status.build != currentBuild else {
+            return StatusRefresh(status: status, restarted: false)
+        }
+        let _: HelperAcknowledgement? = try? await call { proxy, reply in
+            proxy.retire(withReply: reply)
+        }
+        for _ in 0..<10 {
+            try? await Task.sleep(for: .milliseconds(400))
+            if let fresh = try? await rawStatus(), fresh.build == currentBuild {
+                return StatusRefresh(status: fresh, restarted: true)
+            }
+        }
+        return StatusRefresh(status: status, restarted: true)
+    }
+
+    private func rawStatus() async throws -> PrivilegedHelperStatus {
         try await call { proxy, reply in proxy.status(withReply: reply) }
     }
 

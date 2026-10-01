@@ -422,6 +422,13 @@ final class AppModel: ObservableObject {
         guard !isBusy else { return }
         isBusy = true
         await supervisor.stopAll()
+        if helperInstalled, helper.canAuthenticate {
+            // The forwarders and the DNS responder belong to the running stack;
+            // stop them so nothing keeps listening in the background.
+            try? await helper.setPortForwarding(PortForwardingConfiguration(enabled: false))
+            try? await helper.setDNSConfiguration(DNSConfiguration(enabled: false))
+            helperStatus = try? await helper.status()
+        }
         await refreshServiceStates()
         isBusy = false
     }
@@ -489,8 +496,11 @@ final class AppModel: ObservableObject {
         isBusy = true
         defer { isBusy = false }
         do {
-            if helper.registrationStatus == .notRegistered {
-                try helper.register()
+            // .notFound means launchd has no usable record for the daemon in
+            // this bundle; registering rebuilds it instead of waiting forever.
+            switch helper.registrationStatus {
+            case .notRegistered, .notFound: try helper.register()
+            default: break
             }
             await refreshHelperStatus()
             if helperSetupState == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
@@ -500,6 +510,9 @@ final class AppModel: ObservableObject {
                 if helperInstalled { return }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 await refreshHelperStatus()
+            }
+            if !helperInstalled {
+                helperSetupState = .unavailable("The helper is still waiting for approval. Approve DevStack in System Settings → General → Login Items & Extensions, then run this step again.")
             }
         } catch {
             helperInstalled = false
@@ -739,10 +752,15 @@ final class AppModel: ObservableObject {
         case .enabled:
             if helperSetupState != .ready { helperSetupState = .connecting }
             do {
-                helperStatus = try await helper.status()
+                let refreshed = try await helper.refreshStatus()
+                helperStatus = refreshed.status
                 helperInstalled = true
                 helperSetupState = .ready
-                if configuration.localNetworkAccess {
+                if refreshed.restarted, hasRunningServices {
+                    // A freshly started helper has no listeners or DNS yet.
+                    try? await applyPrivilegedNetworking(hostnames: configuration.sites.map(\.hostname) + Self.managementHostnames)
+                    helperStatus = (try? await helper.status()) ?? refreshed.status
+                } else if configuration.localNetworkAccess {
                     try? await applyPrivilegedNetworking(hostnames: configuration.sites.map(\.hostname) + Self.managementHostnames)
                     // Re-read after applying so the UI reflects listeners that
                     // were started by this refresh instead of the pre-apply state.

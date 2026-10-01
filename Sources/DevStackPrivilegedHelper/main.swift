@@ -48,6 +48,25 @@ private enum CodeSignatureValidator {
 }
 
 private final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtocol, @unchecked Sendable {
+    /// Build number of the app bundle this helper was started from. Read once
+    /// at startup: after an app update the running helper still reports the old
+    /// build, so the app knows to retire it.
+    private static let launchBuild: String = {
+        let executable = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+        var contentsCandidates = [executable.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()]
+        // Bundle.main.bundleURL is the executable's directory for a daemon
+        // binary, so its Contents directory is two levels up as well.
+        contentsCandidates.append(Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent())
+        contentsCandidates.append(Bundle.main.bundleURL)
+        for contents in contentsCandidates {
+            let info = contents.appendingPathComponent("Info.plist")
+            if let build = (NSDictionary(contentsOf: info)?["CFBundleVersion"] as? String), !build.isEmpty {
+                return build
+            }
+        }
+        return ""
+    }()
+
     private let lock = NSLock()
     private let hostsURL = URL(fileURLWithPath: "/etc/hosts")
     private let stateDirectory = URL(fileURLWithPath: "/Library/Application Support/DevStack", isDirectory: true)
@@ -108,11 +127,22 @@ private final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtoc
                 hostMappingsInstalled: hosts.contains(PrivilegedHelperConstants.hostsBeginMarker),
                 portForwardingEnabled: self.forwarder.isEnabled,
                 version: "0.1.0",
+                build: Self.launchBuild,
                 dnsEnabled: self.dnsResponder.isEnabled,
                 dnsAnswerAddress: self.dnsResponder.answerAddress,
                 dnsFailure: self.dnsResponder.failureDescription
             )
             return try self.encoder.encode(status)
+        }
+    }
+
+    func retire(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        perform(reply) {
+            // The app replaced this helper on disk. Exit after the reply so
+            // launchd starts the current binary on the next request instead of
+            // keeping the outdated one running.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(EXIT_SUCCESS) }
+            return try self.encodeSuccess()
         }
     }
 
