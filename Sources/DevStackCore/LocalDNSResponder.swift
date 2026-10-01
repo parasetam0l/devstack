@@ -14,6 +14,7 @@ public final class LocalDNSResponder: @unchecked Sendable {
     private var udpListener: NWListener?
     private var tcpListener: NWListener?
     private var failure: String?
+    private var retired: Set<ObjectIdentifier> = []
     private var configuration = DNSConfiguration(enabled: false)
     private var managedNames: Set<String> = []
     private var upstreams: [String] = []
@@ -55,6 +56,11 @@ public final class LocalDNSResponder: @unchecked Sendable {
     }
 
     public func stop() {
+        // Retire the listeners before cancelling so their asynchronous
+        // .cancelled updates are not mistaken for unexpected failures when a
+        // new configuration starts listeners again right away.
+        if let udpListener { retired.insert(ObjectIdentifier(udpListener)) }
+        if let tcpListener { retired.insert(ObjectIdentifier(tcpListener)) }
         udpListener?.cancel()
         tcpListener?.cancel()
         udpListener = nil
@@ -68,13 +74,16 @@ public final class LocalDNSResponder: @unchecked Sendable {
         let parameters: NWParameters = proto == .udp ? .udp : .tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "0.0.0.0", port: port)
         let listener = try NWListener(using: parameters)
-        listener.stateUpdateHandler = { [weak self] state in
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
+            guard let self, let listener else { return }
             if case .failed(let error) = state {
-                self?.queue.async { [weak self] in self?.failure = "\(error)" }
+                self.queue.async { [weak self] in
+                    guard let self, !self.isRetired(listener) else { return }
+                    self.failure = "\(error)"
+                }
             } else if case .cancelled = state {
-                // Intentional stop clears in stop(); unexpected cancel surfaces.
-                self?.queue.async { [weak self] in
-                    guard let self, self.udpListener != nil || self.tcpListener != nil else { return }
+                self.queue.async { [weak self] in
+                    guard let self, !self.isRetired(listener) else { return }
                     if self.failure == nil { self.failure = "DNS listener cancelled unexpectedly." }
                 }
             }
@@ -86,6 +95,10 @@ public final class LocalDNSResponder: @unchecked Sendable {
         }
         listener.start(queue: queue)
         return listener
+    }
+
+    private func isRetired(_ listener: NWListener) -> Bool {
+        retired.remove(ObjectIdentifier(listener)) != nil
     }
 
     // MARK: - UDP (one datagram per receive, loop for reuse)

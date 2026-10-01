@@ -744,6 +744,9 @@ final class AppModel: ObservableObject {
                 helperSetupState = .ready
                 if configuration.localNetworkAccess {
                     try? await applyPrivilegedNetworking(hostnames: configuration.sites.map(\.hostname) + Self.managementHostnames)
+                    // Re-read after applying so the UI reflects listeners that
+                    // were started by this refresh instead of the pre-apply state.
+                    helperStatus = try? await helper.status()
                 }
             } catch {
                 helperInstalled = false; helperStatus = nil
