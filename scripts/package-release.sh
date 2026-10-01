@@ -8,6 +8,8 @@ build_stamp="$(date +%Y%m%d-%H%M%S)-$$"
 staging_root="$release_root/staging/$build_stamp"
 application="$staging_root/DevStack.app"
 identity="${DEVSTACK_SIGNING_IDENTITY:--}"
+release_version="$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$repository_root/Packaging/Info.plist")"
+release_name="DevStack-$release_version-arm64.dmg"
 
 [[ "$(uname -m)" == "arm64" ]] || { echo "Release packaging requires Apple Silicon." >&2; exit 69; }
 [[ -d "$runtime_root" ]] || { echo "Runtime payload is missing: $runtime_root" >&2; exit 66; }
@@ -91,7 +93,7 @@ EOF
     echo "Signed: $identity (Team $app_team). App and helper teams match." >&2
 fi
 
-dmg="$staging_root/DevStack-0.1.0-arm64.dmg"
+dmg="$staging_root/$release_name"
 dmg_root="$staging_root/dmg-root"
 rm -rf "$dmg_root"
 mkdir -p "$dmg_root"
@@ -111,10 +113,10 @@ else
 fi
 
 mkdir -p "$release_root/previous/$build_stamp"
-for artifact in DevStack.app DevStack-0.1.0-arm64.dmg; do
+for artifact in DevStack.app "$release_name"; do
     if [[ -e "$release_root/$artifact" ]]; then mv "$release_root/$artifact" "$release_root/previous/$build_stamp/"; fi
     mv "$staging_root/$artifact" "$release_root/$artifact"
 done
-echo "Release image: $release_root/DevStack-0.1.0-arm64.dmg"
+echo "Release image: $release_root/$release_name"
 echo "Next: copy DevStack.app to /Applications via the DMG, open it from Finder (not swift run / preview)," >&2
 echo "then Settings → System integration → Set Up and approve in Login Items & Extensions." >&2
