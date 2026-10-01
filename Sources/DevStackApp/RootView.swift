@@ -93,6 +93,7 @@ struct RootView: View {
             Button("Open Doctor") { model.errorMessage = nil; model.selectedSection = .doctor }
         } message: { Text(model.errorMessage ?? "Unknown error") }
         .sheet(isPresented: helperNoticeIsPresented) { HelperNoticeSheet().environmentObject(model) }
+        .sheet(isPresented: $model.isPresentingSetupWizard) { SetupWizardView().environmentObject(model) }
     }
 
     private func sidebarRow(_ section: NavigationSection) -> some View {

@@ -105,6 +105,7 @@ final class AppModel: ObservableObject {
     @Published var helperNotice: HelperNotice?
     @Published var lastDatabaseBackup: URL?
     @Published var isPresentingNewSite = false
+    @Published var isPresentingSetupWizard = false
     @Published var appearance = AppAppearance(rawValue: UserDefaults.standard.string(forKey: "DevStackAppearance") ?? "") ?? .system {
         didSet { if !isReviewMode { UserDefaults.standard.set(appearance.rawValue, forKey: "DevStackAppearance") } }
     }
@@ -246,7 +247,20 @@ final class AppModel: ObservableObject {
             await refreshHelperStatus()
             localCATrusted = certificateManager.isTrusted()
             await refreshServiceStates()
-            if !helperInstalled, !configuration.helperNoticeDismissed, !isReviewMode { helperNotice = .welcome }
+            // Fresh installs get the setup wizard; an already healthy install
+            // (helper answering and CA trusted) is marked complete silently so
+            // the wizard never appears after an update.
+            if !configuration.setupWizardCompleted, !isReviewMode {
+                if helperInstalled, localCATrusted {
+                    configuration.setupWizardCompleted = true
+                    try? await store.save(configuration)
+                } else {
+                    isPresentingSetupWizard = true
+                }
+            }
+            if !helperInstalled, !configuration.helperNoticeDismissed, !isReviewMode, !isPresentingSetupWizard {
+                helperNotice = .welcome
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -465,6 +479,93 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Setup wizard
+
+    /// Registers the helper once and waits for the system approval, updating the
+    /// helper state as it changes. No unregister/re-register cycles, so macOS
+    /// shows at most one approval prompt.
+    func setUpHelperForWizard() async {
+        guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            if helper.registrationStatus == .notRegistered {
+                try helper.register()
+            }
+            await refreshHelperStatus()
+            if helperSetupState == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+            // Wait for the user to approve in System Settings, then for the
+            // daemon to answer. Bounded so the wizard never polls forever.
+            for _ in 0..<60 {
+                if helperInstalled { return }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                await refreshHelperStatus()
+            }
+        } catch {
+            helperInstalled = false
+            helperSetupState = .unavailable("Setup failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Installs the DevStack CA into the system trust store (one administrator
+    /// prompt). Returns nil on success or a message to show inline.
+    func installSystemCertificate() async -> String? {
+        guard !isBusy else { return "Another setup step is still running." }
+        isBusy = true
+        defer { isBusy = false }
+        let certificates = certificateManager
+        do {
+            try await Task.detached { try certificates.trustForSystem() }.value
+            localCATrusted = certificates.isTrusted()
+            return localCATrusted ? nil : "The CA is still not trusted."
+        } catch {
+            localCATrusted = certificates.isTrusted()
+            return error.localizedDescription
+        }
+    }
+
+    /// Applies the web ports chosen in the wizard. Returns nil on success or a
+    /// message to show inline.
+    func applyWizardPorts(http: UInt16, https: UInt16) async -> String? {
+        guard !isBusy else { return "Another setup step is still running." }
+        guard !hasRunningServices else { return "Stop the stack before changing ports." }
+        isBusy = true
+        defer { isBusy = false }
+        var ports = configuration.ports
+        ports.webHTTP = http
+        ports.webHTTPS = https
+        guard ports.isValid else {
+            if ports.collisions.isEmpty { return "Port 22 is reserved and cannot be assigned to a DevStack service." }
+            return "These ports conflict: \(ports.collisions.map(String.init).joined(separator: ", "))."
+        }
+        let previous = configuration.ports
+        configuration.ports = ports
+        do {
+            try generateConfiguration()
+            try await store.save(configuration)
+            if helperInstalled {
+                try await applyPrivilegedNetworking(hostnames: configuration.sites.map(\.hostname) + Self.managementHostnames)
+            }
+            return nil
+        } catch {
+            configuration.ports = previous
+            try? generateConfiguration()
+            return error.localizedDescription
+        }
+    }
+
+    /// Marks the wizard complete and closes it.
+    func completeSetupWizard() async {
+        configuration.setupWizardCompleted = true
+        try? await store.save(configuration)
+        isPresentingSetupWizard = false
+    }
+
+    func presentSetupWizard() {
+        helperNotice = nil
+        isPresentingSetupWizard = true
+    }
+
     var helperIsRegistered: Bool { helper.registrationStatus == .enabled || helper.registrationStatus == .requiresApproval }
 
     /// Which build the user actually launched. The helper only works from the
@@ -636,7 +737,7 @@ final class AppModel: ObservableObject {
         case .requiresApproval:
             helperInstalled = false; helperStatus = nil; helperSetupState = .requiresApproval
         case .enabled:
-            helperSetupState = .connecting
+            if helperSetupState != .ready { helperSetupState = .connecting }
             do {
                 helperStatus = try await helper.status()
                 helperInstalled = true
@@ -1002,16 +1103,8 @@ final class AppModel: ObservableObject {
             try certificates.refreshTrustBundle()
         }.value
         exportCACertificateForLocalNetwork()
-        // User trust is enough for browser HTTPS on this account and needs no
-        // administrator authorization, so it can be installed automatically.
-        // System-wide trust cannot be set from the privileged helper: macOS
-        // requires an interactive authorization prompt that a launchd daemon
-        // has no way to present (SecTrustSettingsSetTrustSettings fails with
-        // "no user interaction was possible"). Best effort here; the SSL tab
-        // still offers the explicit action.
-        if !certificates.isTrusted() {
-            try? await Task.detached { try certificates.trustForCurrentUser() }.value
-        }
+        // Trust is only installed from explicit user actions (the setup wizard
+        // or the SSL tab) so macOS never asks for credentials repeatedly.
         localCATrusted = certificates.isTrusted()
         guard helperInstalled else { return }
         let hostnames = (configuration.sites.map(\.hostname) + managementHosts).filter { $0 != "localhost" }

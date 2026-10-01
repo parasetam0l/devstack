@@ -400,6 +400,9 @@ struct SettingsView: View {
                 HStack {
                     Label("System integration", systemImage: "lock.shield").fontWeight(.medium)
                     Spacer()
+                    Button("Setup Wizard…") { model.presentSetupWizard() }
+                        .buttonStyle(DevStackGlassButtonStyle())
+                        .disabled(model.isBusy)
                     if model.helperIsRegistered {
                         StatusBadge(title: model.helperInstalled ? "Ready" : "Not responding", color: model.helperInstalled ? DevStackDesign.success : .orange)
                         if !model.helperInstalled {

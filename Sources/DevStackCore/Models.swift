@@ -315,7 +315,7 @@ public enum WebServer: String, Codable, CaseIterable, Identifiable, Sendable {
 }
 
 public struct AppConfiguration: Codable, Hashable, Sendable {
-    public static let currentSchemaVersion = 4
+    public static let currentSchemaVersion = 5
 
     public var schemaVersion: Int
     public var sites: [SiteDefinition]
@@ -329,6 +329,8 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
     public var ports: ServicePorts
     public var helperNoticeDismissed: Bool
     public var localNetworkAccess: Bool
+    /// Set once the first-run setup wizard has been completed or skipped.
+    public var setupWizardCompleted: Bool
 
     public init(
         schemaVersion: Int = currentSchemaVersion,
@@ -346,7 +348,8 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
         defaultPHPRuntimeID: String = "php-8.5",
         ports: ServicePorts = ServicePorts(),
         helperNoticeDismissed: Bool = false,
-        localNetworkAccess: Bool = false
+        localNetworkAccess: Bool = false,
+        setupWizardCompleted: Bool = false
     ) {
         self.schemaVersion = schemaVersion
         self.sites = sites
@@ -360,6 +363,7 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
         self.ports = ports
         self.helperNoticeDismissed = helperNoticeDismissed
         self.localNetworkAccess = localNetworkAccess
+        self.setupWizardCompleted = setupWizardCompleted
     }
 
     public var selectedDatabaseServices: [ServiceKind] {
@@ -367,7 +371,7 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, sites, selectedDatabase, selectedPostgreSQL, enabledExtensions, startAtLogin, importedRuntimeIDs, selectedWebServer, defaultPHPRuntimeID, ports, helperNoticeDismissed, localNetworkAccess
+        case schemaVersion, sites, selectedDatabase, selectedPostgreSQL, enabledExtensions, startAtLogin, importedRuntimeIDs, selectedWebServer, defaultPHPRuntimeID, ports, helperNoticeDismissed, localNetworkAccess, setupWizardCompleted
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -383,7 +387,8 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
             defaultPHPRuntimeID: try values.decodeIfPresent(String.self, forKey: .defaultPHPRuntimeID) ?? "php-8.5",
             ports: try values.decodeIfPresent(ServicePorts.self, forKey: .ports) ?? ServicePorts(),
             helperNoticeDismissed: try values.decodeIfPresent(Bool.self, forKey: .helperNoticeDismissed) ?? false,
-            localNetworkAccess: try values.decodeIfPresent(Bool.self, forKey: .localNetworkAccess) ?? false
+            localNetworkAccess: try values.decodeIfPresent(Bool.self, forKey: .localNetworkAccess) ?? false,
+            setupWizardCompleted: try values.decodeIfPresent(Bool.self, forKey: .setupWizardCompleted) ?? false
         )
         if schemaVersion < 2 {
             for id in ["php-8.4", "php-8.5"] { enabledExtensions[id, default: []].formUnion(["pgsql", "pdo_pgsql"]) }

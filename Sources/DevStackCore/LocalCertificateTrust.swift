@@ -26,4 +26,19 @@ extension CertificateManager {
             throw CertificateManagerError.certificateGenerationFailed("macOS did not authorize this CA for HTTPS. Approve the native certificate trust dialog and retry.")
         }
     }
+
+    /// Adds the CA to the system trust store so every user and browser on this
+    /// Mac accepts DevStack certificates. macOS shows one administrator prompt;
+    /// credentials never pass through DevStack.
+    public func trustForSystem() throws {
+        try ensureCertificates(for: ["phpmyadmin.localhost", "adminer.localhost", "mailpit.localhost"])
+        if isTrusted() { return }
+        _ = try ProcessRunner().runChecked(executable: URL(fileURLWithPath: "/usr/bin/security"), arguments: [
+            "add-trusted-cert", "-d", "-r", "trustRoot", "-p", "ssl",
+            "-k", "/Library/Keychains/System.keychain", caCertificate.path
+        ], timeout: 300)
+        guard isTrusted() else {
+            throw CertificateManagerError.certificateGenerationFailed("The CA was not added to the system trust store. Approve the administrator prompt and retry, or trust it for this user only.")
+        }
+    }
 }
