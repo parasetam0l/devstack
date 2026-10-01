@@ -92,6 +92,8 @@ public struct ConfigurationRenderer: Sendable {
         PidFile \(quote(paths.generatedApache.appendingPathComponent("httpd.pid").path))
         ErrorLog \(quote(paths.logs.appendingPathComponent("apache-error.log").path))
         LogLevel warn
+        LogFormat '%h %l %u %t "%r" %>s %b "%{Referer}i" "%{User-Agent}i"' combined
+        LogFormat '%h %l %u %t "%r" %>s %b' common
         ServerName devstack.test
         \(listenDirectives)
 
