@@ -106,11 +106,23 @@ struct PrivilegedHelperClient: @unchecked Sendable {
             return already
         }
         guard !alreadyRetired else { return StatusRefresh(status: status, restarted: false) }
+        // Helpers from 0.2.3 on retire themselves through XPC. Older helpers do
+        // not know that call, so unregistering is the fallback that stops them
+        // before launchd starts the current binary.
         let _: HelperAcknowledgement? = try? await call { proxy, reply in
             proxy.retire(withReply: reply)
         }
-        for _ in 0..<10 {
+        for _ in 0..<8 {
             try? await Task.sleep(for: .milliseconds(400))
+            if let fresh = try? await rawStatus(), fresh.build == currentBuild {
+                return StatusRefresh(status: fresh, restarted: true)
+            }
+        }
+        try? await service.unregister()
+        try? await Task.sleep(for: .milliseconds(500))
+        try? register()
+        for _ in 0..<15 {
+            try? await Task.sleep(for: .milliseconds(600))
             if let fresh = try? await rawStatus(), fresh.build == currentBuild {
                 return StatusRefresh(status: fresh, restarted: true)
             }

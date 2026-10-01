@@ -756,9 +756,19 @@ final class AppModel: ObservableObject {
                 helperStatus = refreshed.status
                 helperInstalled = true
                 helperSetupState = .ready
-                if refreshed.restarted, hasRunningServices {
-                    // A freshly started helper has no listeners or DNS yet.
-                    try? await applyPrivilegedNetworking(hostnames: configuration.sites.map(\.hostname) + Self.managementHostnames)
+                if refreshed.restarted {
+                    // An outdated helper is stopped and the current binary takes
+                    // over; macOS may ask for approval again after that.
+                    if helper.registrationStatus == .requiresApproval {
+                        helperInstalled = false
+                        helperStatus = nil
+                        helperSetupState = .requiresApproval
+                        return
+                    }
+                    if hasRunningServices {
+                        // A freshly started helper has no listeners or DNS yet.
+                        try? await applyPrivilegedNetworking(hostnames: configuration.sites.map(\.hostname) + Self.managementHostnames)
+                    }
                     helperStatus = (try? await helper.status()) ?? refreshed.status
                 } else if configuration.localNetworkAccess {
                     try? await applyPrivilegedNetworking(hostnames: configuration.sites.map(\.hostname) + Self.managementHostnames)
