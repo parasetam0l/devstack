@@ -142,21 +142,51 @@ private final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtoc
 
 private final class LoopbackForwarder: @unchecked Sendable {
     private let queue = DispatchQueue(label: "app.devstack.desktop.helper.forwarding")
-    private var listeners: [NWListener] = []
+    private var active: [ListenerKey: NWListener] = [:]
+    private var activeBindings: [ListenerKey: ForwardBinding] = [:]
     private(set) var isEnabled = false
 
-    private struct ForwardBinding {
+    private struct ForwardBinding: Hashable {
         let port: UInt16
         let upstream: UInt16
         let localSourcesOnly: Bool
     }
 
-    func apply(_ configuration: PortForwardingConfiguration) throws {
-        listeners.forEach { $0.cancel() }
-        listeners.removeAll()
-        isEnabled = false
-        guard configuration.enabled else { return }
+    private struct ListenerKey: Hashable {
+        let host: String
+        let port: UInt16
+    }
 
+    /// (Re)binds the forwarding listeners. Repeated calls with the same
+    /// configuration are a no-op, so the periodic XPC refreshes from the app
+    /// never interrupt live listeners. When listeners must change, obsolete
+    /// ones are cancelled and awaited before the replacement binds, with
+    /// retries for the window where the old socket is still closing.
+    func apply(_ configuration: PortForwardingConfiguration) throws {
+        let desired = Self.desiredListeners(for: configuration)
+        if desired == activeBindings, desired.isEmpty == !isEnabled { return }
+
+        // Cancel listeners that are no longer wanted or whose upstream changed.
+        for (key, listener) in active where desired[key] != activeBindings[key] {
+            waitForCancellation(listener, timeout: 1.0)
+            active.removeValue(forKey: key)
+            activeBindings.removeValue(forKey: key)
+        }
+        // Start missing listeners; retry while the old socket is still closing.
+        for (key, binding) in desired where active[key] == nil {
+            do {
+                active[key] = try startListener(host: key.host, binding: binding)
+                activeBindings[key] = binding
+            } catch {
+                isEnabled = !active.isEmpty
+                throw error
+            }
+        }
+        isEnabled = !active.isEmpty
+    }
+
+    private static func desiredListeners(for configuration: PortForwardingConfiguration) -> [ListenerKey: ForwardBinding] {
+        guard configuration.enabled else { return [:] }
         var bindings: [UInt16: ForwardBinding] = [:]
         for entry in configuration.entries {
             bindings[entry.publicPort] = ForwardBinding(port: entry.publicPort, upstream: entry.upstreamPort, localSourcesOnly: false)
@@ -165,45 +195,87 @@ private final class LoopbackForwarder: @unchecked Sendable {
             // A LAN binding covers loopback too, so it replaces the loopback binding for that port.
             bindings[entry.publicPort] = ForwardBinding(port: entry.publicPort, upstream: entry.upstreamPort, localSourcesOnly: true)
         }
-        guard !bindings.isEmpty else { return }
-        var started: [NWListener] = []
-        do {
-            for binding in bindings.values {
-                if binding.localSourcesOnly {
-                    started.append(try makeListener(host: "0.0.0.0", binding: binding))
-                } else {
-                    for host in ["127.0.0.1", "::1"] {
-                        started.append(try makeListener(host: host, binding: binding))
-                    }
+        var desired: [ListenerKey: ForwardBinding] = [:]
+        for binding in bindings.values {
+            if binding.localSourcesOnly {
+                desired[ListenerKey(host: "0.0.0.0", port: binding.port)] = binding
+            } else {
+                desired[ListenerKey(host: "127.0.0.1", port: binding.port)] = binding
+                desired[ListenerKey(host: "::1", port: binding.port)] = binding
+            }
+        }
+        return desired
+    }
+
+    /// Starts a listener and waits until it is ready, retrying when the port is
+    /// still held by the previous socket.
+    private func startListener(host: String, binding: ForwardBinding) throws -> NWListener {
+        var lastError: Error = ForwarderError.bindFailed(host: host, port: binding.port)
+        for attempt in 0..<4 {
+            if attempt > 0 { Thread.sleep(forTimeInterval: 0.15 * Double(attempt)) }
+            let parameters = NWParameters.tcp
+            parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: binding.port)!)
+            let listener = try NWListener(using: parameters)
+            listener.newConnectionHandler = { [weak self] incoming in
+                if binding.localSourcesOnly, !LocalNetwork.isLocalSource(Self.hostDescription(incoming.endpoint)) {
+                    incoming.cancel()
+                    return
+                }
+                self?.accept(incoming, upstreamPort: binding.upstream)
+            }
+            let semaphore = DispatchSemaphore(value: 0)
+            let outcome = ListenerOutcome()
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    semaphore.signal()
+                case .failed(let error):
+                    outcome.failure = error
+                    semaphore.signal()
+                default:
+                    break
                 }
             }
-        } catch {
-            started.forEach { $0.cancel() }
-            listeners.removeAll()
-            isEnabled = false
-            throw error
-        }
-        listeners = started
-        isEnabled = true
-    }
-
-    private func makeListener(host: String, binding: ForwardBinding) throws -> NWListener {
-        let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: binding.port)!)
-        let listener = try NWListener(using: parameters)
-        listener.newConnectionHandler = { [weak self] incoming in
-            if binding.localSourcesOnly, !LocalNetwork.isLocalSource(Self.hostDescription(incoming.endpoint)) {
-                incoming.cancel()
-                return
+            listener.start(queue: queue)
+            if semaphore.wait(timeout: .now() + 3) == .timedOut {
+                waitForCancellation(listener, timeout: 1.0)
+                lastError = ForwarderError.bindTimedOut(host: host, port: binding.port)
+                continue
             }
-            self?.accept(incoming, upstreamPort: binding.upstream)
+            if let failure = outcome.failure {
+                waitForCancellation(listener, timeout: 1.0)
+                lastError = failure
+                continue
+            }
+            return listener
         }
-        listener.start(queue: queue)
-        return listener
+        throw lastError
     }
 
-    private func startListener(host: String, binding: ForwardBinding) throws {
-        listeners.append(try makeListener(host: host, binding: binding))
+    /// Cancels a listener and waits for Network.framework to release the socket.
+    private func waitForCancellation(_ listener: NWListener, timeout: TimeInterval) {
+        let semaphore = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { state in
+            if case .cancelled = state { semaphore.signal() }
+        }
+        listener.cancel()
+        _ = semaphore.wait(timeout: .now() + timeout)
+    }
+
+    private final class ListenerOutcome: @unchecked Sendable {
+        var failure: Error?
+    }
+
+    private enum ForwarderError: LocalizedError {
+        case bindFailed(host: String, port: UInt16)
+        case bindTimedOut(host: String, port: UInt16)
+
+        var errorDescription: String? {
+            switch self {
+            case .bindFailed(let host, let port): "Could not bind \(host):\(port) for port forwarding."
+            case .bindTimedOut(let host, let port): "Timed out binding \(host):\(port) for port forwarding."
+            }
+        }
     }
 
     private static func hostDescription(_ endpoint: NWEndpoint) -> String {
