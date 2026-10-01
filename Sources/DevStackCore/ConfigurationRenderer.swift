@@ -302,7 +302,7 @@ public struct ConfigurationRenderer: Sendable {
         return """
         #!/bin/sh
         \(environment)
-        exec \(shellQuote(base.appendingPathComponent("bin/\(client)").path)) --no-defaults --no-login-paths --character-sets-dir=\(shellQuote(base.appendingPathComponent("share/charsets").path)) --plugin-dir=\(shellQuote(base.appendingPathComponent("lib/plugin").path)) --socket=\(shellQuote(paths.sockets.appendingPathComponent("mysql.sock").path)) "$@"
+        exec \(shellQuote(base.appendingPathComponent("bin/\(client)").path)) --no-defaults --character-sets-dir=\(shellQuote(base.appendingPathComponent("share/charsets").path)) --plugin-dir=\(shellQuote(base.appendingPathComponent("lib/plugin").path)) --socket=\(shellQuote(paths.sockets.appendingPathComponent("mysql.sock").path)) "$@"
         """
     }
 

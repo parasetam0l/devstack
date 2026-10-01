@@ -160,7 +160,7 @@ public struct DatabaseManager: Sendable {
     }
 
     private func connectionArguments(_ engine: DatabaseEngine, passwordConfigured: Bool) -> [String] {
-        var result = ["--no-defaults", "--no-login-paths",
+        var result = ["--no-defaults",
             "--character-sets-dir=\(runtimeRoot.appendingPathComponent("\(engine.rawValue)/share/charsets").path)",
             "--plugin-dir=\(runtimeRoot.appendingPathComponent("\(engine.rawValue)/lib/plugin").path)",
             "--protocol=TCP", "--host=127.0.0.1", "--port=\(port)", "--user=root"]

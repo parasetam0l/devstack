@@ -78,7 +78,7 @@ struct RuntimeChecks {
         guard !((try database.initializeIfNeeded(.mysql84))) else { throw CheckFailure(message: "Database initialization was repeated") }
         try database.configureDevelopmentRootPassword(.mysql84)
         let mysql = root.appendingPathComponent("mysql-8.4/bin/mysql")
-        let sqlArgs = ["--no-defaults", "--no-login-paths", "--character-sets-dir=\(root.appendingPathComponent("mysql-8.4/share/charsets").path)", "--socket=\(paths.sockets.appendingPathComponent("mysql.sock").path)", "--user=root"]
+        let sqlArgs = ["--no-defaults", "--character-sets-dir=\(root.appendingPathComponent("mysql-8.4/share/charsets").path)", "--socket=\(paths.sockets.appendingPathComponent("mysql.sock").path)", "--user=root"]
         _ = try runner.runChecked(executable: mysql, arguments: sqlArgs + ["-e", "CREATE DATABASE devstack_smoke; CREATE TABLE devstack_smoke.checks (id INT PRIMARY KEY, value VARCHAR(30)); INSERT INTO devstack_smoke.checks VALUES (1,'working');"], environment: ["MYSQL_PWD": "root"])
         let backup = try database.exportSQL(.mysql84, database: "devstack_smoke")
         _ = try runner.runChecked(executable: mysql, arguments: sqlArgs + ["-e", "TRUNCATE TABLE devstack_smoke.checks"], environment: ["MYSQL_PWD": "root"])
