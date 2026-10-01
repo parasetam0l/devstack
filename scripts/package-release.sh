@@ -95,12 +95,25 @@ fi
 
 dmg="$staging_root/$release_name"
 dmg_root="$staging_root/dmg-root"
-rm -rf "$dmg_root"
-mkdir -p "$dmg_root"
+rw_dmg="$staging_root/DevStack-layout.dmg"
+mount_point="$staging_root/dmg-mount"
+rm -rf "$dmg_root" "$rw_dmg" "$mount_point" "$dmg"
+mkdir -p "$dmg_root" "$mount_point"
 cp -cR "$application" "$dmg_root/DevStack.app"
 ln -s /Applications "$dmg_root/Applications"
-/usr/sbin/diskutil image create from --volumeName DevStack --format UDZO "$dmg_root" "$dmg"
-rm -rf "$dmg_root"
+
+# Lay the installer window out on a read-write image, then compress it: the app
+# and the Applications drop target sit at the arrow of a branded background,
+# with large icons. The layout is written straight into .DS_Store so packaging
+# never depends on Finder automation.
+/usr/bin/hdiutil create -srcfolder "$dmg_root" -volname DevStack -fs HFS+ -format UDRW -ov "$rw_dmg" >/dev/null
+/usr/bin/hdiutil attach "$rw_dmg" -nobrowse -readwrite -mountpoint "$mount_point" >/dev/null
+/usr/bin/python3 "$repository_root/scripts/write-dmg-dsstore.py" \
+    "$mount_point" "$repository_root/Packaging/dmg-background.tiff" \
+    "240,180,660,420" 128 13 "DevStack.app:165:200" "Applications:495:200"
+/usr/bin/hdiutil detach "$mount_point" >/dev/null
+/usr/bin/hdiutil convert "$rw_dmg" -format UDZO -o "$dmg" >/dev/null
+rm -rf "$dmg_root" "$rw_dmg" "$mount_point"
 /usr/bin/codesign --force "${signing_options[@]}" --sign "$identity" "$dmg"
 
 if [[ -n "${DEVSTACK_NOTARY_PROFILE:-}" ]]; then
