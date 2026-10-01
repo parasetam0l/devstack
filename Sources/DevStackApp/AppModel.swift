@@ -1371,7 +1371,16 @@ final class AppModel: ObservableObject {
             try manager.writeConfiguration()
         }.value
         try await supervisor.start(manager.specification)
-        guard await Task.detached(operation: { manager.ping() }).value else {
+        // The supervisor's TCP probe succeeds as soon as PostgreSQL binds its
+        // socket, which is before it accepts connections. Retry briefly so a
+        // server that is still starting up is not reported as a credential
+        // failure.
+        var ready = false
+        for _ in 0..<40 {
+            if await Task.detached(operation: { manager.ping() }).value { ready = true; break }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        guard ready else {
             await supervisor.stop(.postgresql18)
             throw ServiceFailure(message: "PostgreSQL did not accept the managed credentials.")
         }
