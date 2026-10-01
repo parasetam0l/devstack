@@ -167,6 +167,13 @@ struct SiteEditor: View {
                     Text("SSL").foregroundStyle(.secondary)
                     Toggle("HTTPS", isOn: $editor.site.tlsEnabled).toggleStyle(.switch).disabled(isDefaultSite)
                 }
+                GridRow {
+                    Text("Starter file").foregroundStyle(.secondary)
+                    Toggle("Add index.php", isOn: $editor.site.createPlaceholderIndex)
+                        .toggleStyle(.checkbox)
+                        .disabled(isDefaultSite)
+                        .help("Writes a starter index.php when the folder has no index file. Existing files are never overwritten.")
+                }
             }.textFieldStyle(.roundedBorder)
             if isDefaultSite {
                 Label("The default site always serves localhost and 127.0.0.1 over HTTP and HTTPS.", systemImage: "info.circle").foregroundStyle(.secondary)

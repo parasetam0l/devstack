@@ -283,11 +283,13 @@ final class AppModel: ObservableObject {
         guard FileManager.default.fileExists(atPath: site.documentRoot, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: site.documentRoot])
         }
-        DefaultSiteContent.ensurePlaceholderIndex(
-            in: URL(fileURLWithPath: site.documentRoot),
-            hostname: site.hostname,
-            isDefaultSite: site.hostname == "localhost"
-        )
+        if site.hostname == "localhost" || site.createPlaceholderIndex {
+            DefaultSiteContent.ensurePlaceholderIndex(
+                in: URL(fileURLWithPath: site.documentRoot),
+                hostname: site.hostname,
+                isDefaultSite: site.hostname == "localhost"
+            )
+        }
         var sites = configuration.sites
         if let index = sites.firstIndex(where: { $0.id == site.id }) { sites[index] = site }
         else { sites.append(site) }

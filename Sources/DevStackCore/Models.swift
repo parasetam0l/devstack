@@ -234,6 +234,10 @@ public struct SiteDefinition: Codable, Hashable, Identifiable, Sendable {
     public var phpOverrides: PHPSiteOverrides
     public var extensionProfile: String
     public var logs: SiteLogPaths
+    /// Writes a starter index.php into the document root when the folder has no
+    /// index file yet. Existing files are never overwritten and the default
+    /// site always keeps its placeholder.
+    public var createPlaceholderIndex: Bool
 
     public init(
         id: UUID = UUID(),
@@ -244,6 +248,7 @@ public struct SiteDefinition: Codable, Hashable, Identifiable, Sendable {
         phpRuntimeID: String = "php-8.5",
         phpOverrides: PHPSiteOverrides = .init(),
         extensionProfile: String = "default",
+        createPlaceholderIndex: Bool = true,
         logs: SiteLogPaths
     ) {
         self.id = id
@@ -254,7 +259,27 @@ public struct SiteDefinition: Codable, Hashable, Identifiable, Sendable {
         self.phpRuntimeID = phpRuntimeID
         self.phpOverrides = phpOverrides
         self.extensionProfile = extensionProfile
+        self.createPlaceholderIndex = createPlaceholderIndex
         self.logs = logs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, hostname, documentRoot, tlsEnabled, phpRuntimeID
+        case phpOverrides, extensionProfile, logs, createPlaceholderIndex
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        hostname = try container.decode(String.self, forKey: .hostname)
+        documentRoot = try container.decode(String.self, forKey: .documentRoot)
+        tlsEnabled = try container.decode(Bool.self, forKey: .tlsEnabled)
+        phpRuntimeID = try container.decode(String.self, forKey: .phpRuntimeID)
+        phpOverrides = try container.decode(PHPSiteOverrides.self, forKey: .phpOverrides)
+        extensionProfile = try container.decode(String.self, forKey: .extensionProfile)
+        logs = try container.decode(SiteLogPaths.self, forKey: .logs)
+        createPlaceholderIndex = try container.decodeIfPresent(Bool.self, forKey: .createPlaceholderIndex) ?? true
     }
 }
 
