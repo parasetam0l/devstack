@@ -12,6 +12,6 @@ SSL shows one row per certificate with expiry, validity, Renew and actions. Clic
 
 The app icon stays simple and solid. Its menu-bar template uses separate outlined stack layers and a small terminal mark, so the silhouette does not merge into a filled blob at 19 points. macOS supplies the appropriate monochrome appearance.
 
-Inspected through native accessibility and screenshots on macOS 27.0.1: all nine pages, compact toolbar, site editor with expanded settings, six certificate rows, database selections, and light/system appearance. Backend integration evidence and distribution limitations are recorded in HANDOVER.md.
+Inspected through native accessibility and screenshots on macOS 27.0.1: all nine pages, compact toolbar, site editor with expanded settings, six certificate rows, database selections, and light/system appearance.
 
 Installed resource and runtime paths resolve within the app and Application Support. Successful installed-app startup did not request Desktop access. The ad-hoc build reports unavailable privileged integration honestly; CA trust requires native macOS authorization.

@@ -37,6 +37,4 @@ DEVSTACK_NOTARY_PROFILE=DevStack \
   signed DMG, build directory layout and cleanup.
 - [Documentation/RuntimeBuild.md](Documentation/RuntimeBuild.md) — bundled
   runtime payload pipeline.
-- [Documentation/HANDOVER.md](Documentation/HANDOVER.md) — verification state
-  and known limitations.
 - `scripts/clean-build.sh` — prune generated state under `.build`.
