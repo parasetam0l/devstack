@@ -257,11 +257,19 @@ extension RuntimeKind {
 
 struct DevStackGlassButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var enabled
+    @Environment(\.keyboardShortcut) private var shortcut
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label.font(.system(size: 12, weight: .medium))
+        // Custom styles own the default-button emphasis (Apple: use the
+        // keyboardShortcut environment value). The system focus effect draws a
+        // blurred blue outline around the default button that does not follow
+        // the glass shape, so it is disabled there and replaced with the ring.
+        let isDefaultAction = shortcut == .defaultAction
+        return configuration.label.font(.system(size: 12, weight: .medium))
             .foregroundStyle(enabled ? Color.primary : Color.secondary)
             .padding(.horizontal, 11).padding(.vertical, 5)
             .glassEffect(.regular.interactive(), in: .capsule)
+            .overlay(Capsule().strokeBorder(.white.opacity(isDefaultAction ? 0.4 : 0), lineWidth: 1))
+            .focusEffectDisabled(isDefaultAction)
             .opacity(enabled ? 1 : 0.5)
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
     }
@@ -269,10 +277,13 @@ struct DevStackGlassButtonStyle: ButtonStyle {
 
 struct DevStackProminentButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var enabled
+    @Environment(\.keyboardShortcut) private var shortcut
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label.font(.system(size: 12, weight: .semibold))
+        let isDefaultAction = shortcut == .defaultAction
+        return configuration.label.font(.system(size: 12, weight: .semibold))
             .padding(.horizontal, 13).padding(.vertical, 5)
-            .glassEffect(.regular.tint(DevStackDesign.accent.opacity(0.35)).interactive(), in: .capsule)
+            .glassEffect(.regular.tint(DevStackDesign.accent.opacity(isDefaultAction ? 0.5 : 0.35)).interactive(), in: .capsule)
+            .focusEffectDisabled(isDefaultAction)
             .opacity(enabled ? 1 : 0.5)
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
     }
