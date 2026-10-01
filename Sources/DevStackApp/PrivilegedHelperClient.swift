@@ -2,6 +2,7 @@ import DevStackCore
 import Foundation
 import ServiceManagement
 import Security
+import Synchronization
 
 struct PrivilegedHelperClient: @unchecked Sendable {
     private let service = SMAppService.daemon(plistName: "app.devstack.desktop.helper.plist")
@@ -88,14 +89,23 @@ struct PrivilegedHelperClient: @unchecked Sendable {
     }
 
     /// Asks the helper for its status. When the running helper was started from
-    /// an older app build, it is retired and launchd starts the current binary
-    /// on the next request; the status is then fetched again.
+    /// an older app build (including builds that predate the build field), it
+    /// is retired and launchd starts the current binary on the next request;
+    /// the status is then fetched again.
     func refreshStatus() async throws -> StatusRefresh {
         let status = try await rawStatus()
         guard let currentBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
-              !currentBuild.isEmpty, !status.build.isEmpty, status.build != currentBuild else {
+              !currentBuild.isEmpty, status.build != currentBuild else {
             return StatusRefresh(status: status, restarted: false)
         }
+        // Retire each outdated build only once: a helper that cannot report a
+        // build at all would otherwise restart on every refresh.
+        let alreadyRetired = Self.retiredBuilds.withLock { builds in
+            let already = builds.contains(status.build)
+            builds.insert(status.build)
+            return already
+        }
+        guard !alreadyRetired else { return StatusRefresh(status: status, restarted: false) }
         let _: HelperAcknowledgement? = try? await call { proxy, reply in
             proxy.retire(withReply: reply)
         }
@@ -111,6 +121,8 @@ struct PrivilegedHelperClient: @unchecked Sendable {
     private func rawStatus() async throws -> PrivilegedHelperStatus {
         try await call { proxy, reply in proxy.status(withReply: reply) }
     }
+
+    private static let retiredBuilds = Mutex<Set<String>>([])
 
     private func call<Response: Decodable & Sendable>(
         _ operation: @escaping (PrivilegedHelperXPCProtocol, @escaping (Data?, NSError?) -> Void) -> Void
