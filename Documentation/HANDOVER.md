@@ -1,5 +1,7 @@
 # DevStack handover
 
+> Current build and release instructions live in [Building.md](Building.md).
+
 Verified 30 September 2026 on Apple Silicon macOS 27.0.1 (Europe/Istanbul).
 
 ## Usable build
