@@ -259,17 +259,17 @@ struct DevStackGlassButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var enabled
     @Environment(\.keyboardShortcut) private var shortcut
     func makeBody(configuration: Configuration) -> some View {
-        // Custom styles own the default-button emphasis (Apple: use the
-        // keyboardShortcut environment value). The system focus effect draws a
-        // blurred blue outline around the default button that does not follow
-        // the glass shape, so it is disabled there and replaced with the ring.
+        // Custom styles own the emphasis; the system focus effect draws a
+        // blue rectangle that does not follow the glass capsule (and lags the
+        // pressed scaling), so it is disabled here. The default action keeps
+        // its own ring/tint from the keyboardShortcut environment.
         let isDefaultAction = shortcut == .defaultAction
         return configuration.label.font(.system(size: 12, weight: .medium))
             .foregroundStyle(enabled ? Color.primary : Color.secondary)
             .padding(.horizontal, 11).padding(.vertical, 5)
             .glassEffect(.regular.interactive(), in: .capsule)
             .overlay(Capsule().strokeBorder(.white.opacity(isDefaultAction ? 0.4 : 0), lineWidth: 1))
-            .focusEffectDisabled(isDefaultAction)
+            .focusEffectDisabled()
             .opacity(enabled ? 1 : 0.5)
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
     }
@@ -283,7 +283,7 @@ struct DevStackProminentButtonStyle: ButtonStyle {
         return configuration.label.font(.system(size: 12, weight: .semibold))
             .padding(.horizontal, 13).padding(.vertical, 5)
             .glassEffect(.regular.tint(DevStackDesign.accent.opacity(isDefaultAction ? 0.5 : 0.35)).interactive(), in: .capsule)
-            .focusEffectDisabled(isDefaultAction)
+            .focusEffectDisabled()
             .opacity(enabled ? 1 : 0.5)
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
     }

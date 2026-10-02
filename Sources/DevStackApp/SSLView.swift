@@ -69,7 +69,7 @@ struct SSLView: View {
                     Button("Issue") { let host = state.hostname; state.issuing = false; Task { await model.issueCertificate(for: host) } }
                         .buttonStyle(DevStackGlassButtonStyle()).keyboardShortcut(.defaultAction).disabled(state.hostname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-            }.padding(18)
+            }.padding(18).focusEffectDisabled()
         }
         .sheet(item: $state.detailCertificate) { certificate in
             VStack(alignment: .leading, spacing: 14) {
@@ -84,7 +84,7 @@ struct SSLView: View {
                     Spacer()
                     Button("Done") { state.detailCertificate = nil }.buttonStyle(DevStackGlassButtonStyle()).keyboardShortcut(.defaultAction)
                 }
-            }.padding(18).frame(width: 580).controlSize(.small)
+            }.padding(18).frame(width: 580).controlSize(.small).focusEffectDisabled()
         }
         .alert("Delete certificate?", isPresented: $state.confirmingDelete, presenting: state.pendingDelete) { certificate in
             Button("Delete", role: .destructive) { Task { await model.deleteCertificate(certificate) }; state.pendingDelete = nil }

@@ -77,6 +77,7 @@ struct RootView: View {
         .background(WindowBackdrop().ignoresSafeArea())
         .tint(Color(nsColor: .controlAccentColor))
         .controlSize(.small)
+        .focusEffectDisabled()
         .onAppear {
             model.applyAppearance()
             model.openMainWindow = { openWindow(id: "main") }
@@ -96,8 +97,8 @@ struct RootView: View {
             Button("Dismiss", role: .cancel) { model.errorMessage = nil }
             Button("Open Doctor") { model.errorMessage = nil; model.selectedSection = .doctor }
         } message: { Text(model.errorMessage ?? "Unknown error") }
-        .sheet(isPresented: helperNoticeIsPresented) { HelperNoticeSheet().environmentObject(model) }
-        .sheet(isPresented: $model.isPresentingSetupWizard) { SetupWizardView().environmentObject(model) }
+        .sheet(isPresented: helperNoticeIsPresented) { HelperNoticeSheet().environmentObject(model).focusEffectDisabled() }
+        .sheet(isPresented: $model.isPresentingSetupWizard) { SetupWizardView().environmentObject(model).focusEffectDisabled() }
     }
 
     private func sidebarRow(_ section: NavigationSection) -> some View {

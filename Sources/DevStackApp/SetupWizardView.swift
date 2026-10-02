@@ -48,6 +48,7 @@ struct SetupWizardView: View {
             footer
         }
         .frame(width: 560)
+        .focusEffectDisabled()
         .interactiveDismissDisabled(true)
         .onChange(of: step) { _, newStep in
             if newStep == .ports { syncPorts() }

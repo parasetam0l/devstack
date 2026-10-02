@@ -48,6 +48,7 @@ struct SitesView: View {
         .sheet(item: $state.editingSite) { site in
             SiteEditor(site: site, isNew: !model.configuration.sites.contains { $0.id == site.id }) { saved in try await model.saveSite(saved) }
                 .environmentObject(model)
+                .focusEffectDisabled()
         }
         .alert("Remove this site?", isPresented: Binding(get: { state.deletingSite != nil }, set: { if !$0 { state.deletingSite = nil } }), presenting: state.deletingSite) { site in
             Button("Remove Site", role: .destructive) { state.deletingSite = nil; Task { await model.deleteSite(site) } }
