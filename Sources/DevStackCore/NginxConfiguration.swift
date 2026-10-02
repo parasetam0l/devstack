@@ -7,6 +7,12 @@ extension ConfigurationRenderer {
         // loopback and private ranges; otherwise the server stays on loopback.
         let httpHost = localNetworkAccess ? "0.0.0.0" : "127.0.0.1"
         let httpHost6 = localNetworkAccess ? "[::]" : "[::1]"
+        let proxyHTTP = ports.proxyHTTPListen
+        let proxyHTTPS = ports.proxyHTTPSListen
+        // Extra loopback listeners receive the helper's PROXY protocol
+        // connections; realip turns the forwarded address into $remote_addr.
+        let httpListen = "listen \(httpHost):\(ports.webHTTPListen); listen \(httpHost6):\(ports.webHTTPListen);" + (proxyHTTP.map { "\n    listen 127.0.0.1:\($0) proxy_protocol;" } ?? "")
+        let httpsListen = "listen \(httpHost):\(ports.webHTTPSListen) ssl; listen \(httpHost6):\(ports.webHTTPSListen) ssl;" + (proxyHTTPS.map { "\n    listen 127.0.0.1:\($0) ssl proxy_protocol;" } ?? "")
         let accessRules = localNetworkAccess ? """
             allow 127.0.0.1;
             allow ::1;
@@ -40,12 +46,12 @@ extension ConfigurationRenderer {
             """
             servers.append("""
             server {
-                listen \(httpHost):\(ports.webHTTPListen); listen \(httpHost6):\(ports.webHTTPListen);
+                \(httpListen)
                 server_name localhost 127.0.0.1 _;
                 \(locations)
             }
             server {
-                listen \(httpHost):\(ports.webHTTPSListen) ssl; listen \(httpHost6):\(ports.webHTTPSListen) ssl;
+                \(httpsListen)
                 server_name localhost 127.0.0.1 _;
                 ssl_certificate \(try nginxQuote(paths.certificate(for: "localhost").path));
                 ssl_certificate_key \(try nginxQuote(paths.privateKey(for: "localhost").path));
@@ -75,12 +81,12 @@ extension ConfigurationRenderer {
             if site.tlsEnabled {
                 return """
                 server {
-                    listen \(httpHost):\(ports.webHTTPListen); listen \(httpHost6):\(ports.webHTTPListen);
+                    \(httpListen)
                     server_name \(hostname);
                     return 302 https://$host\(ports.webHTTPS == 443 ? "" : ":\(ports.webHTTPS)")$request_uri;
                 }
                 server {
-                    listen \(httpHost):\(ports.webHTTPSListen) ssl; listen \(httpHost6):\(ports.webHTTPSListen) ssl;
+                    \(httpsListen)
                     server_name \(hostname);
                     ssl_certificate \(try nginxQuote(paths.certificate(for: hostname).path));
                     ssl_certificate_key \(try nginxQuote(paths.privateKey(for: hostname).path));
@@ -90,7 +96,7 @@ extension ConfigurationRenderer {
             }
             return """
             server {
-                listen \(httpHost):\(ports.webHTTPListen); listen \(httpHost6):\(ports.webHTTPListen);
+                \(httpListen)
                 server_name \(hostname);
                 \(locations)
             }
@@ -98,7 +104,7 @@ extension ConfigurationRenderer {
         })
         servers.append("""
         server {
-            listen \(httpHost):\(ports.webHTTPListen); listen \(httpHost6):\(ports.webHTTPListen);
+            \(httpListen)
             server_name phpmyadmin.localhost adminer.localhost mailpit.localhost;
             return 302 https://$host\(ports.webHTTPS == 443 ? "" : ":\(ports.webHTTPS)")$request_uri;
         }
@@ -106,7 +112,7 @@ extension ConfigurationRenderer {
         for (host, runtimeID, pool) in [("phpmyadmin.localhost", "phpmyadmin-5.2.3", "management"), ("adminer.localhost", "adminer-6.1.1", "adminer")] {
             servers.append("""
             server {
-                listen \(httpHost):\(ports.webHTTPSListen) ssl; listen \(httpHost6):\(ports.webHTTPSListen) ssl;
+                \(httpsListen)
                 server_name \(host);
                 ssl_certificate \(try nginxQuote(paths.certificate(for: host).path));
                 ssl_certificate_key \(try nginxQuote(paths.privateKey(for: host).path));
@@ -125,7 +131,7 @@ extension ConfigurationRenderer {
         }
         servers.append("""
         server {
-            listen \(httpHost):\(ports.webHTTPSListen) ssl; listen \(httpHost6):\(ports.webHTTPSListen) ssl;
+            \(httpsListen)
             server_name mailpit.localhost;
             ssl_certificate \(try nginxQuote(paths.certificate(for: "mailpit.localhost").path));
             ssl_certificate_key \(try nginxQuote(paths.privateKey(for: "mailpit.localhost").path));
@@ -147,6 +153,8 @@ extension ConfigurationRenderer {
             include \(try nginxQuote(root.appendingPathComponent("conf/mime.types").path));
             default_type application/octet-stream;
             server_tokens off;
+            set_real_ip_from 127.0.0.1;
+            real_ip_header proxy_protocol;
             \(accessRules)
             client_max_body_size 64m;
             ssl_protocols TLSv1.2 TLSv1.3;

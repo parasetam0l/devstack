@@ -20,9 +20,14 @@ public struct DNSQuestion: Equatable, Sendable {
 /// to the system resolvers untouched.
 public enum DNSMessage {
     public static let typeA: UInt16 = 1
+    public static let typeSOA: UInt16 = 6
     public static let typeAAAA: UInt16 = 28
     public static let classIN: UInt16 = 1
     public static let rcodeServerFailure: UInt16 = 2
+    public static let rcodeNameError: UInt16 = 3
+    /// DevStack answers one second of caching: local hostnames and addresses
+    /// change often, and a longer TTL outlives the change in client caches.
+    public static let localTTL: UInt32 = 1
 
     public static func parseQuestion(_ message: Data) -> DNSQuestion? {
         let bytes = [UInt8](message)
@@ -52,28 +57,65 @@ public enum DNSMessage {
     }
 
     /// A direct A answer for a managed hostname. AAAA and other types answer
-    /// NODATA so remote clients fall back to IPv4 instead of guessing addresses.
-    public static func localResponse(for question: DNSQuestion, address: String, ttl: UInt32 = 30) -> Data {
+    /// NODATA (with a 1-second SOA) so remote clients fall back to IPv4 instead
+    /// of guessing addresses, and so the NODATA is not cached long enough to
+    /// survive a configuration change.
+    public static func localResponse(for question: DNSQuestion, address: String, ttl: UInt32 = localTTL) -> Data {
         var data = Data()
         appendUInt16(question.id, to: &data)
-        let answerCount: UInt16 = question.type == typeA && ipv4Octets(address) != nil ? 1 : 0
+        let hasAnswer = question.type == typeA && ipv4Octets(address) != nil
         appendUInt16(0x8180, to: &data)
         appendUInt16(1, to: &data)
-        appendUInt16(answerCount, to: &data)
-        appendUInt16(0, to: &data)
+        appendUInt16(hasAnswer ? 1 : 0, to: &data)
+        appendUInt16(hasAnswer ? 0 : 1, to: &data)
         appendUInt16(0, to: &data)
         appendName(question.name, to: &data)
         appendUInt16(question.type, to: &data)
         appendUInt16(question.klass, to: &data)
-        if answerCount == 1, let octets = ipv4Octets(address) {
+        if hasAnswer, let octets = ipv4Octets(address) {
             appendUInt16(0xC00C, to: &data)
             appendUInt16(typeA, to: &data)
             appendUInt16(classIN, to: &data)
             appendUInt32(ttl, to: &data)
             appendUInt16(4, to: &data)
             data.append(contentsOf: octets)
+        } else {
+            appendSOA(ttl: ttl, to: &data)
         }
         return data
+    }
+
+    /// NXDOMAIN for unmanaged names under DevStack's own suffixes. Answering
+    /// locally keeps remote negative caching (which can last minutes) from
+    /// hiding a site or hostname that is added right after a query.
+    public static func negativeResponse(for question: DNSQuestion, ttl: UInt32 = localTTL) -> Data {
+        var data = Data()
+        appendUInt16(question.id, to: &data)
+        appendUInt16(0x8180 | (rcodeNameError & 0x000F), to: &data)
+        appendUInt16(1, to: &data)
+        appendUInt16(0, to: &data)
+        appendUInt16(1, to: &data)
+        appendUInt16(0, to: &data)
+        appendName(question.name, to: &data)
+        appendUInt16(question.type, to: &data)
+        appendUInt16(question.klass, to: &data)
+        appendSOA(ttl: ttl, to: &data)
+        return data
+    }
+
+    /// Authority SOA that bounds negative caching of local NODATA and NXDOMAIN
+    /// answers to the local TTL.
+    private static func appendSOA(ttl: UInt32, to data: inout Data) {
+        appendUInt16(0xC00C, to: &data)
+        appendUInt16(typeSOA, to: &data)
+        appendUInt16(classIN, to: &data)
+        appendUInt32(ttl, to: &data)
+        var rdata = Data()
+        appendName("ns.devstack.localhost", to: &rdata)
+        appendName("hostmaster.devstack.localhost", to: &rdata)
+        for value: UInt32 in [1, 1, 1, 1, ttl] { appendUInt32(value, to: &rdata) }
+        appendUInt16(UInt16(rdata.count), to: &data)
+        data.append(rdata)
     }
 
     public static func failureResponse(for question: DNSQuestion?, rcode: UInt16) -> Data {

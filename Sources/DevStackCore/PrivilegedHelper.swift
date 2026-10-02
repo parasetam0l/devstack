@@ -7,6 +7,12 @@ public enum PrivilegedHelperConstants {
     public static let hostsEndMarker = "# END DEVSTACK MANAGED"
 }
 
+public enum PrivilegedHelperCapabilities {
+    /// The helper prefixes forwarded web connections with a PROXY protocol
+    /// header so the web server can recover the real client address.
+    public static let proxyProtocol = "proxy-protocol"
+}
+
 public struct LocalCARequest: Codable, Hashable, Sendable {
     public var certificateDER: Data
 
@@ -40,8 +46,11 @@ public struct PrivilegedHelperStatus: Codable, Hashable, Sendable {
     public var dnsEnabled: Bool
     public var dnsAnswerAddress: String?
     public var dnsFailure: String?
+    /// Optional features this helper implements. Absent from helpers that
+    /// predate the field, so treat a missing list as "no capabilities".
+    public var capabilities: [String]
 
-    public init(hostMappingsInstalled: Bool, portForwardingEnabled: Bool, version: String, build: String = "", dnsEnabled: Bool = false, dnsAnswerAddress: String? = nil, dnsFailure: String? = nil) {
+    public init(hostMappingsInstalled: Bool, portForwardingEnabled: Bool, version: String, build: String = "", dnsEnabled: Bool = false, dnsAnswerAddress: String? = nil, dnsFailure: String? = nil, capabilities: [String] = []) {
         self.hostMappingsInstalled = hostMappingsInstalled
         self.portForwardingEnabled = portForwardingEnabled
         self.version = version
@@ -49,11 +58,12 @@ public struct PrivilegedHelperStatus: Codable, Hashable, Sendable {
         self.dnsEnabled = dnsEnabled
         self.dnsAnswerAddress = dnsAnswerAddress
         self.dnsFailure = dnsFailure
+        self.capabilities = capabilities
     }
 
     private enum CodingKeys: String, CodingKey {
         case hostMappingsInstalled, portForwardingEnabled, version, build
-        case dnsEnabled, dnsAnswerAddress, dnsFailure
+        case dnsEnabled, dnsAnswerAddress, dnsFailure, capabilities
     }
 
     public init(from decoder: Decoder) throws {
@@ -65,6 +75,7 @@ public struct PrivilegedHelperStatus: Codable, Hashable, Sendable {
         self.dnsEnabled = try c.decodeIfPresent(Bool.self, forKey: .dnsEnabled) ?? false
         self.dnsAnswerAddress = try c.decodeIfPresent(String.self, forKey: .dnsAnswerAddress)
         self.dnsFailure = try c.decodeIfPresent(String.self, forKey: .dnsFailure)
+        self.capabilities = try c.decodeIfPresent([String].self, forKey: .capabilities) ?? []
     }
 }
 
@@ -122,6 +133,13 @@ public enum PrivilegedRequestValidator {
                   !ServicePorts.reservedPorts.contains(entry.publicPort),
                   publicPorts.insert(entry.publicPort).inserted else {
                 throw PrivilegedRequestValidationError.invalidPortForwarding
+            }
+            // PROXY headers may only be sent to the web server's dedicated
+            // listeners; never to a database or mail port.
+            if entry.proxyProtocol {
+                guard entry.upstreamPort == ServicePorts.proxyHTTPFallback || entry.upstreamPort == ServicePorts.proxyHTTPSFallback else {
+                    throw PrivilegedRequestValidationError.invalidPortForwarding
+                }
             }
         }
         guard configuration.lanEntries.count <= 8 else {

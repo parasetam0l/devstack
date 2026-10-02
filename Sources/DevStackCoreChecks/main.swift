@@ -213,12 +213,40 @@ enum DevStackCoreChecks {
         let privilegedPorts = ServicePorts(webHTTP: 80, webHTTPS: 9443)
         try expect(privilegedPorts.webHTTPListen == ServicePorts.webHTTPFallback, "Privileged HTTP port did not fall back to the unprivileged listener")
         try expect(privilegedPorts.forwardings == [PortForwardingEntry(publicPort: 80, upstreamPort: ServicePorts.webHTTPFallback)], "Privileged port did not produce the expected forwarding")
+        try expect(privilegedPorts.forwardingEntries(proxyProtocol: true) == [PortForwardingEntry(publicPort: 80, upstreamPort: ServicePorts.proxyHTTPFallback, proxyProtocol: true)], "Privileged port did not produce a PROXY protocol forwarding")
         try expect(privilegedPorts.requiresHelper, "Privileged port did not report the helper requirement")
         try expect(ServicePorts(mysql: ServicePorts.webHTTPFallback).collisions == [ServicePorts.webHTTPFallback], "Port collisions were not detected")
+        let legacyEntry = try JSONDecoder().decode(PortForwardingEntry.self, from: Data(#"{"publicPort":80,"upstreamPort":8080}"#.utf8))
+        try expect(legacyEntry.proxyProtocol == false, "Forwarding entry without a proxy-protocol field must decode as false")
+        let proxyForwarding = try PrivilegedRequestValidator.portForwarding(.init(enabled: true, entries: [.init(publicPort: 80, upstreamPort: ServicePorts.proxyHTTPFallback, proxyProtocol: true)]))
+        try expect(proxyForwarding.entries.first?.proxyProtocol == true, "PROXY protocol forwarding was rejected")
+        do {
+            _ = try PrivilegedRequestValidator.portForwarding(.init(enabled: true, entries: [.init(publicPort: 80, upstreamPort: 8080, proxyProtocol: true)]))
+            throw CheckFailure(description: "A PROXY header to a non-web listener was accepted")
+        } catch PrivilegedRequestValidationError.invalidPortForwarding {
+            // Expected.
+        }
+        let legacyStatus = try JSONDecoder().decode(PrivilegedHelperStatus.self, from: Data(#"{"hostMappingsInstalled":true,"portForwardingEnabled":false,"version":"0.1.0"}"#.utf8))
+        try expect(legacyStatus.capabilities.isEmpty && legacyStatus.build.isEmpty, "Legacy helper status must decode with empty defaults")
+        let proxyStatus = try JSONDecoder().decode(PrivilegedHelperStatus.self, from: Data(#"{"hostMappingsInstalled":true,"portForwardingEnabled":true,"version":"0.1.0","capabilities":["proxy-protocol"]}"#.utf8))
+        try expect(proxyStatus.capabilities.contains(PrivilegedHelperCapabilities.proxyProtocol), "Helper capabilities were not decoded")
         let customRenderer = ConfigurationRenderer(paths: paths, runtimeRoot: paths.builtInRuntimes, ports: privilegedPorts)
         let customApache = try customRenderer.apacheConfiguration(sites: [site])
         try expect(customApache.contains("Listen 127.0.0.1:\(ServicePorts.webHTTPFallback)") && customApache.contains("Listen 127.0.0.1:9443"), "Custom Apache listeners were not rendered")
         try expect(customApache.contains("https://example.test:9443/"), "Custom HTTPS redirect port was not rendered")
+        let mixedProxyCount = customApache.components(separatedBy: "RemoteIPProxyProtocol On").count - 1
+        try expect(customApache.contains("<VirtualHost *:\(ServicePorts.proxyHTTPFallback)>") && mixedProxyCount == 1, "Mixed-privilege Apache config did not isolate the PROXY protocol vhost")
+        let bothPrivileged = ServicePorts(webHTTP: 80, webHTTPS: 443)
+        let proxyRenderer = ConfigurationRenderer(paths: paths, runtimeRoot: paths.builtInRuntimes, ports: bothPrivileged)
+        let proxyApache = try proxyRenderer.apacheConfiguration(sites: [site, defaultSite])
+        try expect(proxyApache.contains("Listen 127.0.0.1:\(ServicePorts.proxyHTTPFallback)") && proxyApache.contains("Listen 127.0.0.1:\(ServicePorts.proxyHTTPSFallback)"), "Apache PROXY listeners were not rendered")
+        try expect(proxyApache.contains("LoadModule remoteip_module"), "Apache remoteip module was not loaded")
+        try expect(proxyApache.contains("<VirtualHost *:\(ServicePorts.proxyHTTPFallback)>") && proxyApache.contains("RemoteIPProxyProtocol On"), "Apache PROXY vhosts were not rendered")
+        let proxyNginx = try proxyRenderer.nginxConfiguration(sites: [site, defaultSite])
+        try expect(!proxyNginx.contains(";;") && !proxyNginx.contains("listen listen"), "nginx listener directives are malformed")
+        try expect(proxyNginx.contains("listen 127.0.0.1:\(ServicePorts.proxyHTTPFallback) proxy_protocol;"), "nginx PROXY HTTP listener was not rendered")
+        try expect(proxyNginx.contains("listen 127.0.0.1:\(ServicePorts.proxyHTTPSFallback) ssl proxy_protocol;"), "nginx PROXY HTTPS listener was not rendered")
+        try expect(proxyNginx.contains("real_ip_header proxy_protocol;") && proxyNginx.contains("set_real_ip_from 127.0.0.1;"), "nginx realip was not configured")
         let customINI = try customRenderer.phpINI(runtimeID: "php-8.5", enabledExtensions: [], mailpitBinary: URL(fileURLWithPath: "/tmp/mailpit"))
         try expect(customINI.contains("mysqli.default_port=\(ServicePorts.mysqlFallback)"), "Configured PHP database port was not rendered")
         try expect(customRenderer.mailpitArguments().contains("127.0.0.1:\(ServicePorts.mailpitInboxFallback)"), "Configured Mailpit listener was not rendered")
@@ -244,8 +272,18 @@ enum DevStackCoreChecks {
         }
         let nodata = DNSMessage.localResponse(for: aaaa, address: "192.168.1.50")
         try expect(UInt16(nodata[6]) << 8 | UInt16(nodata[7]) == 0, "AAAA for a managed hostname must answer NODATA")
+        try expect(UInt16(nodata[8]) << 8 | UInt16(nodata[9]) == 1, "NODATA answer must carry an SOA authority record")
         let failure = DNSMessage.failureResponse(for: question, rcode: DNSMessage.rcodeServerFailure)
         try expect(failure[3] & 0x0F == 2, "DNS failure rcode is wrong")
+        let ttlRange = (localAnswer.count - 10)..<(localAnswer.count - 6)
+        try expect(Array(localAnswer[ttlRange]) == [0, 0, 0, 1], "Local DNS TTL must be one second")
+        guard let missingQuestion = DNSMessage.parseQuestion(dnsQuery("missing.test", DNSMessage.typeA, 3)) else {
+            throw CheckFailure(description: "Negative query did not parse")
+        }
+        let negative = DNSMessage.negativeResponse(for: missingQuestion)
+        try expect(negative[3] & 0x0F == 3, "Negative response rcode is wrong")
+        try expect(UInt16(negative[8]) << 8 | UInt16(negative[9]) == 1, "Negative response must carry an SOA authority record")
+        try expect(LocalDNSResponder.isDevStackName("new-site.test") && LocalDNSResponder.isDevStackName("phpmyadmin.localhost") && !LocalDNSResponder.isDevStackName("example.com"), "DevStack suffix classification failed")
         try expect(DNSUpstreams.parseResolvConf("nameserver 192.168.1.1\nnameserver 8.8.8.8 # lan\n").count == 2, "resolv.conf parsing failed")
         try expect(DNSUpstreams.usableResolvers(contents: "nameserver 127.0.0.1\nnameserver 192.168.1.1\n", excluding: []).count == 1, "Loopback resolver was not excluded")
         try expect(LocalNetwork.isPrivateIPv4("192.168.1.5") && LocalNetwork.isPrivateIPv4("10.0.0.1") && !LocalNetwork.isPrivateIPv4("8.8.8.8"), "Private IPv4 classification failed")
@@ -284,12 +322,17 @@ enum DevStackCoreChecks {
             }
         }
         let responder = LocalDNSResponder(port: 15453)
-        try responder.apply(DNSConfiguration(enabled: true, hostnames: ["site.test"], answerAddress: "192.168.1.50"), upstreams: [])
+        let liveAddress = LocalNetwork.primaryIPv4Address() ?? "192.168.1.50"
+        try responder.apply(DNSConfiguration(enabled: true, hostnames: ["site.test"], answerAddress: liveAddress), upstreams: [])
         defer { responder.stop() }
         try await Task.sleep(for: .milliseconds(300))
         let liveAnswer = try await udpRoundTrip(dnsQuery("site.test", DNSMessage.typeA, 0x2222), port: 15453)
         try expect(liveAnswer.count >= 12 && UInt16(liveAnswer[6]) << 8 | UInt16(liveAnswer[7]) == 1, "Live DNS responder did not answer")
-        try expect(liveAnswer.suffix(4) == Data([192, 168, 1, 50]), "Live DNS responder answered the wrong address")
+        if let octets = DNSMessage.ipv4Octets(liveAddress) {
+            try expect(liveAnswer.suffix(4) == Data(octets), "Live DNS responder answered the wrong address")
+        }
+        let liveNegative = try await udpRoundTrip(dnsQuery("missing.test", DNSMessage.typeA, 0x4444), port: 15453)
+        try expect(liveNegative[3] & 0x0F == 3, "Unmanaged .test name did not answer NXDOMAIN")
         let liveRefusal = try await udpRoundTrip(dnsQuery("example.com", DNSMessage.typeA, 0x3333), port: 15453)
         try expect(liveRefusal[3] & 0x0F == 2, "DNS responder did not fail closed without upstreams")
         var unsafeSite = site

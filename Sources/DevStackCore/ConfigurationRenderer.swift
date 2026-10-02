@@ -44,20 +44,14 @@ public struct ConfigurationRenderer: Sendable {
     private var listenDirectives: String {
         let http = ports.webHTTPListen
         let https = ports.webHTTPSListen
-        if localNetworkAccess {
-            return """
-            Listen 0.0.0.0:\(http)
-            Listen 0.0.0.0:\(https)
-            Listen [::]:\(http)
-            Listen [::]:\(https)
-            """
-        }
-        return """
-        Listen 127.0.0.1:\(http)
-        Listen 127.0.0.1:\(https)
-        Listen [::1]:\(http)
-        Listen [::1]:\(https)
-        """
+        var lines = localNetworkAccess
+            ? ["Listen 0.0.0.0:\(http)", "Listen 0.0.0.0:\(https)", "Listen [::]:\(http)", "Listen [::]:\(https)"]
+            : ["Listen 127.0.0.1:\(http)", "Listen 127.0.0.1:\(https)", "Listen [::1]:\(http)", "Listen [::1]:\(https)"]
+        // The helper forwards public web traffic here with a PROXY protocol
+        // header, so the server can log and forward the real client address.
+        if let proxyHTTPListen = ports.proxyHTTPListen { lines.append("Listen 127.0.0.1:\(proxyHTTPListen)") }
+        if let proxyHTTPSListen = ports.proxyHTTPSListen { lines.append("Listen 127.0.0.1:\(proxyHTTPSListen)") }
+        return lines.joined(separator: "\n")
     }
 
     /// Loopback only, or loopback plus the private ranges the helper also
@@ -80,12 +74,7 @@ public struct ConfigurationRenderer: Sendable {
             return lhs.hostname < rhs.hostname
         }
         let siteBlocks = try orderedSites.map(apacheVirtualHost).joined(separator: "\n\n")
-        let phpMyAdminCertificate = quote(paths.certificate(for: "phpmyadmin.localhost").path)
-        let phpMyAdminKey = quote(paths.privateKey(for: "phpmyadmin.localhost").path)
-        let mailpitCertificate = quote(paths.certificate(for: "mailpit.localhost").path)
-        let mailpitKey = quote(paths.privateKey(for: "mailpit.localhost").path)
-        let phpMyAdminRoot = quote(runtimeDirectory("phpmyadmin-5.2.3").path)
-        let managementSocket = escapeQuotedContent(paths.sockets.appendingPathComponent("php-8.5-management.sock").path)
+        let managementBlocks = try apacheManagementVirtualHosts()
 
         return """
         ServerRoot \(quote(apache.path))
@@ -111,6 +100,7 @@ public struct ConfigurationRenderer: Sendable {
         LoadModule proxy_fcgi_module \(quote(moduleDirectory.appendingPathComponent("mod_proxy_fcgi.so").path))
         LoadModule proxy_http_module \(quote(moduleDirectory.appendingPathComponent("mod_proxy_http.so").path))
         LoadModule headers_module \(quote(moduleDirectory.appendingPathComponent("mod_headers.so").path))
+        LoadModule remoteip_module \(quote(moduleDirectory.appendingPathComponent("mod_remoteip.so").path))
 
         TypesConfig \(quote(apache.appendingPathComponent("conf/mime.types").path))
         DirectoryIndex index.php index.html
@@ -126,47 +116,7 @@ public struct ConfigurationRenderer: Sendable {
 
         \(siteBlocks)
 
-        <VirtualHost *:\(ports.webHTTPSListen)>
-            ServerName phpmyadmin.localhost
-            DocumentRoot \(phpMyAdminRoot)
-            SSLEngine on
-            SSLCertificateFile \(phpMyAdminCertificate)
-            SSLCertificateKeyFile \(phpMyAdminKey)
-            <Directory \(phpMyAdminRoot)>
-                Options FollowSymLinks
-                AllowOverride None
-                \(directoryAccess)
-                <FilesMatch "\\.php$">
-                    SetHandler "proxy:unix:\(managementSocket)|fcgi://localhost/"
-                </FilesMatch>
-            </Directory>
-        </VirtualHost>
-
-        <VirtualHost *:\(ports.webHTTPSListen)>
-            ServerName adminer.localhost
-            DocumentRoot \(quote(paths.generatedAdminer.path))
-            SSLEngine on
-            SSLCertificateFile \(quote(paths.certificate(for: "adminer.localhost").path))
-            SSLCertificateKeyFile \(quote(paths.privateKey(for: "adminer.localhost").path))
-            <Directory \(quote(paths.generatedAdminer.path))>
-                AllowOverride None
-                \(directoryAccess)
-                <FilesMatch "\\.php$">
-                    SetHandler "proxy:unix:\(escapeQuotedContent(paths.sockets.appendingPathComponent("php-8.5-adminer.sock").path))|fcgi://localhost/"
-                </FilesMatch>
-            </Directory>
-        </VirtualHost>
-
-        <VirtualHost *:\(ports.webHTTPSListen)>
-            ServerName mailpit.localhost
-            SSLEngine on
-            SSLCertificateFile \(mailpitCertificate)
-            SSLCertificateKeyFile \(mailpitKey)
-            ProxyPreserveHost On
-            ProxyPass / http://127.0.0.1:\(ports.mailpitInboxListen)/
-            ProxyPassReverse / http://127.0.0.1:\(ports.mailpitInboxListen)/
-            RequestHeader set X-Forwarded-Proto "https"
-        </VirtualHost>
+        \(managementBlocks)
         """
     }
 
@@ -333,6 +283,25 @@ public struct ConfigurationRenderer: Sendable {
     }
 
     private func apacheVirtualHost(_ site: SiteDefinition) throws -> String {
+        // Direct vhosts plus, for each forwarded scheme, a PROXY protocol
+        // variant on the dedicated listener.
+        var httpVariants: [(port: UInt16, proxy: Bool)] = [(ports.webHTTPListen, false)]
+        if let proxy = ports.proxyHTTPListen { httpVariants.append((proxy, true)) }
+        var httpsVariants: [(port: UInt16, proxy: Bool)] = [(ports.webHTTPSListen, false)]
+        if let proxy = ports.proxyHTTPSListen { httpsVariants.append((proxy, true)) }
+        var blocks: [String] = []
+        for variant in httpVariants {
+            blocks.append(try apacheVirtualHostBlocks(site, httpPort: variant.port, httpsPort: nil, httpProxy: variant.proxy, httpsProxy: false))
+        }
+        for variant in httpsVariants {
+            blocks.append(try apacheVirtualHostBlocks(site, httpPort: nil, httpsPort: variant.port, httpProxy: false, httpsProxy: variant.proxy))
+        }
+        return blocks.joined(separator: "\n\n")
+    }
+
+    /// Site vhosts for one scheme and port. The proxy-protocol variant enables
+    /// mod_remoteip so the helper's forwarded client address is used.
+    private func apacheVirtualHostBlocks(_ site: SiteDefinition, httpPort: UInt16?, httpsPort: UInt16?, httpProxy: Bool, httpsProxy: Bool) throws -> String {
         _ = try HostnameValidator.validate(site.hostname)
         try requireSafe(site.documentRoot)
         let hostname = site.hostname
@@ -340,6 +309,8 @@ public struct ConfigurationRenderer: Sendable {
         let socket = escapeQuotedContent(paths.phpSocket(runtimeID: site.phpRuntimeID, siteID: site.id).path)
         let accessLog = quote(site.logs.access)
         let errorLog = quote(site.logs.error)
+        let httpDirective = httpProxy ? "\n    RemoteIPProxyProtocol On" : ""
+        let httpsDirective = httpsProxy ? "\n    RemoteIPProxyProtocol On" : ""
         let directory = """
             <Directory \(root)>
                 Options FollowSymLinks
@@ -355,49 +326,57 @@ public struct ConfigurationRenderer: Sendable {
         // so localhost, 127.0.0.1 and unmatched hostnames never fall through
         // to the web server's built-in default page.
         if hostname == "localhost" {
-            return """
-            <VirtualHost *:\(ports.webHTTPListen)>
-                ServerName localhost
-                ServerAlias 127.0.0.1
-                DocumentRoot \(root)
-                ErrorLog \(errorLog)
-                CustomLog \(accessLog) combined
-                \(directory)
-            </VirtualHost>
+            var blocks: [String] = []
+            if let httpPort {
+                blocks.append("""
+                <VirtualHost *:\(httpPort)>
+                    ServerName localhost
+                    ServerAlias 127.0.0.1\(httpDirective)
+                    DocumentRoot \(root)
+                    ErrorLog \(errorLog)
+                    CustomLog \(accessLog) combined
+                    \(directory)
+                </VirtualHost>
+                """)
+            }
+            if let httpsPort {
+                blocks.append("""
+                <VirtualHost *:\(httpsPort)>
+                    ServerName localhost
+                    ServerAlias 127.0.0.1\(httpsDirective)
+                    DocumentRoot \(root)
+                    ErrorLog \(errorLog)
+                    CustomLog \(accessLog) combined
+                    SSLEngine on
+                    SSLCertificateFile \(quote(paths.certificate(for: hostname).path))
+                    SSLCertificateKeyFile \(quote(paths.privateKey(for: hostname).path))
+                    Header always set X-Content-Type-Options "nosniff"
+                    \(directory)
+                </VirtualHost>
+                """)
+            }
+            return blocks.joined(separator: "\n\n")
+        }
 
-            <VirtualHost *:\(ports.webHTTPSListen)>
-                ServerName localhost
-                ServerAlias 127.0.0.1
-                DocumentRoot \(root)
+        var result = ""
+        if let httpPort {
+            let httpBehavior = site.tlsEnabled
+                ? "Redirect permanent / https://\(hostname)\(ports.webHTTPS == 443 ? "" : ":\(ports.webHTTPS)")/"
+                : "DocumentRoot \(root)\n\(directory)"
+            result = """
+            <VirtualHost *:\(httpPort)>
+                ServerName \(hostname)\(httpDirective)
                 ErrorLog \(errorLog)
                 CustomLog \(accessLog) combined
-                SSLEngine on
-                SSLCertificateFile \(quote(paths.certificate(for: hostname).path))
-                SSLCertificateKeyFile \(quote(paths.privateKey(for: hostname).path))
-                Header always set X-Content-Type-Options "nosniff"
-                \(directory)
+                \(httpBehavior)
             </VirtualHost>
             """
         }
 
-        let httpBehavior = site.tlsEnabled
-            ? "Redirect permanent / https://\(hostname)\(ports.webHTTPS == 443 ? "" : ":\(ports.webHTTPS)")/"
-            : "DocumentRoot \(root)\n\(directory)"
-
-        var result = """
-        <VirtualHost *:\(ports.webHTTPListen)>
-            ServerName \(hostname)
-            ErrorLog \(errorLog)
-            CustomLog \(accessLog) combined
-            \(httpBehavior)
-        </VirtualHost>
-        """
-
-        if site.tlsEnabled {
-            result += """
-
-            <VirtualHost *:\(ports.webHTTPSListen)>
-                ServerName \(hostname)
+        if site.tlsEnabled, let httpsPort {
+            let httpsBlock = """
+            <VirtualHost *:\(httpsPort)>
+                ServerName \(hostname)\(httpsDirective)
                 DocumentRoot \(root)
                 ErrorLog \(errorLog)
                 CustomLog \(accessLog) combined
@@ -408,8 +387,66 @@ public struct ConfigurationRenderer: Sendable {
                 \(directory)
             </VirtualHost>
             """
+            result = result.isEmpty ? httpsBlock : result + "\n\n" + httpsBlock
         }
         return result
+    }
+
+    /// phpMyAdmin, Adminer and Mailpit vhosts, emitted for the direct HTTPS
+    /// port and, when forwarding is possible, for the PROXY protocol port.
+    private func apacheManagementVirtualHosts() throws -> String {
+        var variants: [(https: UInt16, proxy: Bool)] = [(ports.webHTTPSListen, false)]
+        if let proxyHTTPS = ports.proxyHTTPSListen { variants.append((proxyHTTPS, true)) }
+        let phpMyAdminRoot = quote(runtimeDirectory("phpmyadmin-5.2.3").path)
+        let managementSocket = escapeQuotedContent(paths.sockets.appendingPathComponent("php-8.5-management.sock").path)
+        let adminerRoot = quote(paths.generatedAdminer.path)
+        let adminerSocket = escapeQuotedContent(paths.sockets.appendingPathComponent("php-8.5-adminer.sock").path)
+        return variants.map { variant in
+            let proxy = variant.proxy ? "\n    RemoteIPProxyProtocol On" : ""
+            return """
+            <VirtualHost *:\(variant.https)>
+                ServerName phpmyadmin.localhost\(proxy)
+                DocumentRoot \(phpMyAdminRoot)
+                SSLEngine on
+                SSLCertificateFile \(quote(paths.certificate(for: "phpmyadmin.localhost").path))
+                SSLCertificateKeyFile \(quote(paths.privateKey(for: "phpmyadmin.localhost").path))
+                <Directory \(phpMyAdminRoot)>
+                    Options FollowSymLinks
+                    AllowOverride None
+                    \(directoryAccess)
+                    <FilesMatch "\\.php$">
+                        SetHandler "proxy:unix:\(managementSocket)|fcgi://localhost/"
+                    </FilesMatch>
+                </Directory>
+            </VirtualHost>
+
+            <VirtualHost *:\(variant.https)>
+                ServerName adminer.localhost\(proxy)
+                DocumentRoot \(adminerRoot)
+                SSLEngine on
+                SSLCertificateFile \(quote(paths.certificate(for: "adminer.localhost").path))
+                SSLCertificateKeyFile \(quote(paths.privateKey(for: "adminer.localhost").path))
+                <Directory \(adminerRoot)>
+                    AllowOverride None
+                    \(directoryAccess)
+                    <FilesMatch "\\.php$">
+                        SetHandler "proxy:unix:\(adminerSocket)|fcgi://localhost/"
+                    </FilesMatch>
+                </Directory>
+            </VirtualHost>
+
+            <VirtualHost *:\(variant.https)>
+                ServerName mailpit.localhost\(proxy)
+                SSLEngine on
+                SSLCertificateFile \(quote(paths.certificate(for: "mailpit.localhost").path))
+                SSLCertificateKeyFile \(quote(paths.privateKey(for: "mailpit.localhost").path))
+                ProxyPreserveHost On
+                ProxyPass / http://127.0.0.1:\(ports.mailpitInboxListen)/
+                ProxyPassReverse / http://127.0.0.1:\(ports.mailpitInboxListen)/
+                RequestHeader set X-Forwarded-Proto "https"
+            </VirtualHost>
+            """
+        }.joined(separator: "\n\n")
     }
 
     private func phpPool(_ site: SiteDefinition) throws -> String {

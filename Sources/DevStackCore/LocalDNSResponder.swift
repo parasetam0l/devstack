@@ -135,7 +135,11 @@ public final class LocalDNSResponder: @unchecked Sendable {
             return
         }
         if managedNames.contains(question.name) {
-            sendUDP(DNSMessage.localResponse(for: question, address: configuration.answerAddress), on: connection)
+            sendUDP(DNSMessage.localResponse(for: question, address: currentAnswerAddress()), on: connection)
+            return
+        }
+        if Self.isDevStackName(question.name) {
+            sendUDP(DNSMessage.negativeResponse(for: question), on: connection)
             return
         }
         forward(query, upstreamIndex: 0, on: connection, isTCP: false)
@@ -183,10 +187,32 @@ public final class LocalDNSResponder: @unchecked Sendable {
             return
         }
         if managedNames.contains(question.name) {
-            sendTCP(DNSMessage.localResponse(for: question, address: configuration.answerAddress), on: connection)
+            sendTCP(DNSMessage.localResponse(for: question, address: currentAnswerAddress()), on: connection)
+            return
+        }
+        if Self.isDevStackName(question.name) {
+            sendTCP(DNSMessage.negativeResponse(for: question), on: connection)
             return
         }
         forward(query, upstreamIndex: 0, on: connection, isTCP: true)
+    }
+
+    /// DevStack answers authoritatively for its own suffixes. Forwarding an
+    /// unmanaged `.test`/`.localhost` query upstream would let a remote
+    /// negative cache outlive a site that is added moments later.
+    public static func isDevStackName(_ name: String) -> Bool {
+        name == "test" || name.hasSuffix(".test") || name == "localhost" || name.hasSuffix(".localhost")
+    }
+
+    /// The configured address while it is still assigned to an interface;
+    /// otherwise the current primary LAN address, so a network change does not
+    /// keep handing out a stale address until the app re-applies.
+    private func currentAnswerAddress() -> String {
+        let configured = configuration.answerAddress
+        if !configured.isEmpty, LocalNetwork.activeIPv4Addresses().contains(where: { $0.address == configured }) {
+            return configured
+        }
+        return LocalNetwork.primaryIPv4Address() ?? configured
     }
 
     private func sendTCP(_ response: Data, on connection: NWConnection) {

@@ -130,7 +130,8 @@ private final class PrivilegedHelperService: NSObject, PrivilegedHelperXPCProtoc
                 build: Self.launchBuild,
                 dnsEnabled: self.dnsResponder.isEnabled,
                 dnsAnswerAddress: self.dnsResponder.answerAddress,
-                dnsFailure: self.dnsResponder.failureDescription
+                dnsFailure: self.dnsResponder.failureDescription,
+                capabilities: [PrivilegedHelperCapabilities.proxyProtocol]
             )
             return try self.encoder.encode(status)
         }
@@ -180,6 +181,7 @@ private final class LoopbackForwarder: @unchecked Sendable {
         let port: UInt16
         let upstream: UInt16
         let localSourcesOnly: Bool
+        let proxyProtocol: Bool
     }
 
     private struct ListenerKey: Hashable {
@@ -219,11 +221,11 @@ private final class LoopbackForwarder: @unchecked Sendable {
         guard configuration.enabled else { return [:] }
         var bindings: [UInt16: ForwardBinding] = [:]
         for entry in configuration.entries {
-            bindings[entry.publicPort] = ForwardBinding(port: entry.publicPort, upstream: entry.upstreamPort, localSourcesOnly: false)
+            bindings[entry.publicPort] = ForwardBinding(port: entry.publicPort, upstream: entry.upstreamPort, localSourcesOnly: false, proxyProtocol: entry.proxyProtocol)
         }
         for entry in configuration.lanEntries {
             // A LAN binding covers loopback too, so it replaces the loopback binding for that port.
-            bindings[entry.publicPort] = ForwardBinding(port: entry.publicPort, upstream: entry.upstreamPort, localSourcesOnly: true)
+            bindings[entry.publicPort] = ForwardBinding(port: entry.publicPort, upstream: entry.upstreamPort, localSourcesOnly: true, proxyProtocol: entry.proxyProtocol)
         }
         var desired: [ListenerKey: ForwardBinding] = [:]
         for binding in bindings.values {
@@ -251,7 +253,7 @@ private final class LoopbackForwarder: @unchecked Sendable {
                     incoming.cancel()
                     return
                 }
-                self?.accept(incoming, upstreamPort: binding.upstream)
+                self?.accept(incoming, binding: binding)
             }
             let semaphore = DispatchSemaphore(value: 0)
             let outcome = ListenerOutcome()
@@ -296,6 +298,54 @@ private final class LoopbackForwarder: @unchecked Sendable {
         var failure: Error?
     }
 
+    /// One forwarded connection. Both sides must be ready and, when the binding
+    /// uses the PROXY protocol, the header must reach the web server before any
+    /// client byte. All access happens on the forwarder's serial queue, so no
+    /// locking is required.
+    private final class ForwardSession: @unchecked Sendable {
+        private let incoming: NWConnection
+        private let outgoing: NWConnection
+        private let header: Data?
+        private var incomingReady = false
+        private var outgoingReady = false
+        private var started = false
+
+        init(incoming: NWConnection, outgoing: NWConnection, header: Data?) {
+            self.incoming = incoming
+            self.outgoing = outgoing
+            self.header = header
+        }
+
+        func incomingBecameReady() {
+            incomingReady = true
+            startIfReady()
+        }
+
+        func outgoingBecameReady() {
+            outgoingReady = true
+            startIfReady()
+        }
+
+        private func startIfReady() {
+            guard !started, incomingReady, outgoingReady else { return }
+            started = true
+            guard let header else {
+                LoopbackForwarder.pipe(from: incoming, to: outgoing)
+                LoopbackForwarder.pipe(from: outgoing, to: incoming)
+                return
+            }
+            outgoing.send(content: header, completion: .contentProcessed { [incoming, outgoing] error in
+                guard error == nil else {
+                    incoming.cancel()
+                    outgoing.cancel()
+                    return
+                }
+                LoopbackForwarder.pipe(from: incoming, to: outgoing)
+                LoopbackForwarder.pipe(from: outgoing, to: incoming)
+            })
+        }
+    }
+
     private enum ForwarderError: LocalizedError {
         case bindFailed(host: String, port: UInt16)
         case bindTimedOut(host: String, port: UInt16)
@@ -313,16 +363,52 @@ private final class LoopbackForwarder: @unchecked Sendable {
         return "\(host)"
     }
 
-    private func accept(_ incoming: NWConnection, upstreamPort: UInt16) {
-        let outgoing = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: upstreamPort)!, using: .tcp)
-        incoming.stateUpdateHandler = { state in
-            if case .ready = state { Self.pipe(from: incoming, to: outgoing) }
+    private func accept(_ incoming: NWConnection, binding: ForwardBinding) {
+        let outgoing = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: binding.upstream)!, using: .tcp)
+        let header = binding.proxyProtocol ? Self.proxyHeader(for: incoming.endpoint, publicPort: binding.port) : nil
+        let session = ForwardSession(incoming: incoming, outgoing: outgoing, header: header)
+        incoming.stateUpdateHandler = { connectionState in
+            switch connectionState {
+            case .ready:
+                session.incomingBecameReady()
+            case .failed:
+                outgoing.cancel()
+            default:
+                break
+            }
         }
-        outgoing.stateUpdateHandler = { state in
-            if case .ready = state { Self.pipe(from: outgoing, to: incoming) }
+        outgoing.stateUpdateHandler = { connectionState in
+            switch connectionState {
+            case .ready:
+                session.outgoingBecameReady()
+            case .failed:
+                incoming.cancel()
+            default:
+                break
+            }
         }
         incoming.start(queue: queue)
         outgoing.start(queue: queue)
+    }
+
+    /// PROXY protocol v1 line carrying the real client address. The destination
+    /// fields are loopback placeholders; realip consumers only read the source.
+    private static func proxyHeader(for endpoint: NWEndpoint, publicPort: UInt16) -> Data? {
+        guard case let .hostPort(host, port) = endpoint else { return nil }
+        let source: String
+        let family: String
+        switch host {
+        case .ipv4(let address):
+            source = "\(address)"
+            family = "TCP4"
+        case .ipv6(let address):
+            source = "\(address)".split(separator: "%").first.map(String.init) ?? "\(address)"
+            family = "TCP6"
+        default:
+            return nil
+        }
+        let destination = family == "TCP4" ? "127.0.0.1" : "::1"
+        return Data("PROXY \(family) \(source) \(destination) \(port.rawValue) \(publicPort)\r\n".utf8)
     }
 
     private static func pipe(from source: NWConnection, to destination: NWConnection) {

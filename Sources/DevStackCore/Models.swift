@@ -516,10 +516,28 @@ public struct HostMapping: Codable, Hashable, Sendable {
 public struct PortForwardingEntry: Codable, Hashable, Sendable {
     public var publicPort: UInt16
     public var upstreamPort: UInt16
+    /// When true the forwarder prefixes each connection with a PROXY protocol
+    /// header so the web server can recover the real client address instead of
+    /// seeing the loopback forwarder.
+    public var proxyProtocol: Bool
 
-    public init(publicPort: UInt16, upstreamPort: UInt16) {
+    public init(publicPort: UInt16, upstreamPort: UInt16, proxyProtocol: Bool = false) {
         self.publicPort = publicPort
         self.upstreamPort = upstreamPort
+        self.proxyProtocol = proxyProtocol
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case publicPort, upstreamPort, proxyProtocol
+    }
+
+    // Older helpers simply ignore the key; accepting its absence keeps the
+    // payload decodable in both directions.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.publicPort = try container.decode(UInt16.self, forKey: .publicPort)
+        self.upstreamPort = try container.decode(UInt16.self, forKey: .upstreamPort)
+        self.proxyProtocol = try container.decodeIfPresent(Bool.self, forKey: .proxyProtocol) ?? false
     }
 }
 
@@ -570,6 +588,10 @@ public struct ServicePorts: Codable, Hashable, Sendable {
     public static let postgresqlFallback: UInt16 = 5432
     public static let mailpitSMTPFallback: UInt16 = 1025
     public static let mailpitInboxFallback: UInt16 = 8025
+    /// Loopback listeners that accept the helper's PROXY protocol connections.
+    /// They exist only while the corresponding public port is forwarded.
+    public static let proxyHTTPFallback: UInt16 = 8082
+    public static let proxyHTTPSFallback: UInt16 = 8444
 
     /// The port the web server actually listens on.
     public var webHTTPListen: UInt16 { webHTTP < 1024 ? Self.webHTTPFallback : webHTTP }
@@ -579,18 +601,34 @@ public struct ServicePorts: Codable, Hashable, Sendable {
     public var mailpitSMTPListen: UInt16 { mailpitSMTP < 1024 ? Self.mailpitSMTPFallback : mailpitSMTP }
     public var mailpitInboxListen: UInt16 { mailpitInbox < 1024 ? Self.mailpitInboxFallback : mailpitInbox }
 
-    /// Public ports the helper must forward to the unprivileged listener.
-    public var forwardings: [PortForwardingEntry] {
-        let pairs: [(UInt16, UInt16)] = [
-            (webHTTP, webHTTPListen),
-            (webHTTPS, webHTTPSListen),
-            (mysql, mysqlListen),
-            (postgresql, postgresqlListen),
-            (mailpitSMTP, mailpitSMTPListen),
-            (mailpitInbox, mailpitInboxListen)
-        ]
-        return pairs.filter { $0.0 < 1024 }.map { PortForwardingEntry(publicPort: $0.0, upstreamPort: $0.1) }
+    /// PROXY-protocol listener for forwarded HTTP, when the public port needs
+    /// the helper. The helper sends the client address ahead of the request.
+    public var proxyHTTPListen: UInt16? { webHTTP < 1024 ? Self.proxyHTTPFallback : nil }
+    public var proxyHTTPSListen: UInt16? { webHTTPS < 1024 ? Self.proxyHTTPSFallback : nil }
+
+    /// Public ports the helper must forward to the unprivileged listener. When
+    /// the helper supports the PROXY protocol, web traffic is forwarded to the
+    /// dedicated listeners so the web server learns the real client address.
+    public func forwardingEntries(proxyProtocol: Bool) -> [PortForwardingEntry] {
+        var entries: [PortForwardingEntry] = []
+        func append(_ publicPort: UInt16, direct: UInt16, proxy: UInt16? = nil, web: Bool = false) {
+            guard publicPort < 1024, publicPort != direct else { return }
+            if web, proxyProtocol, let proxy {
+                entries.append(PortForwardingEntry(publicPort: publicPort, upstreamPort: proxy, proxyProtocol: true))
+            } else {
+                entries.append(PortForwardingEntry(publicPort: publicPort, upstreamPort: direct))
+            }
+        }
+        append(webHTTP, direct: webHTTPListen, proxy: proxyHTTPListen, web: true)
+        append(webHTTPS, direct: webHTTPSListen, proxy: proxyHTTPSListen, web: true)
+        append(mysql, direct: mysqlListen)
+        append(postgresql, direct: postgresqlListen)
+        append(mailpitSMTP, direct: mailpitSMTPListen)
+        append(mailpitInbox, direct: mailpitInboxListen)
+        return entries
     }
+
+    public var forwardings: [PortForwardingEntry] { forwardingEntries(proxyProtocol: false) }
 
     public var requiresHelper: Bool { !forwardings.isEmpty }
 
@@ -604,7 +642,9 @@ public struct ServicePorts: Codable, Hashable, Sendable {
 
     /// Listener conflicts that make the stack unable to start.
     public var collisions: [UInt16] {
-        let listeners: [UInt16] = [webHTTPListen, webHTTPSListen, mysqlListen, postgresqlListen, mailpitSMTPListen, mailpitInboxListen]
+        var listeners: [UInt16] = [webHTTPListen, webHTTPSListen, mysqlListen, postgresqlListen, mailpitSMTPListen, mailpitInboxListen]
+        if let proxyHTTPListen { listeners.append(proxyHTTPListen) }
+        if let proxyHTTPSListen { listeners.append(proxyHTTPSListen) }
         var seen = Set<UInt16>()
         var duplicates = Set<UInt16>()
         for port in listeners where !seen.insert(port).inserted { duplicates.insert(port) }

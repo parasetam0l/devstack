@@ -673,20 +673,25 @@ final class AppModel: ObservableObject {
     /// Ports the helper forwards to the web server for local-network clients.
     /// Unprivileged ports are bound directly by the web server, so only
     /// privileged public ports need forwarding.
-    var localNetworkLanEntries: [PortForwardingEntry] {
+    func localNetworkLanEntries(supportsProxyProtocol: Bool) -> [PortForwardingEntry] {
         guard configuration.localNetworkAccess else { return [] }
-        let candidates = [
-            PortForwardingEntry(publicPort: configuration.ports.webHTTP, upstreamPort: configuration.ports.webHTTPListen),
-            PortForwardingEntry(publicPort: configuration.ports.webHTTPS, upstreamPort: configuration.ports.webHTTPSListen)
-        ]
-        return candidates.filter { $0.publicPort < 1024 && $0.publicPort != $0.upstreamPort }
+        let webPorts: Set<UInt16> = [configuration.ports.webHTTP, configuration.ports.webHTTPS]
+        return configuration.ports.forwardingEntries(proxyProtocol: supportsProxyProtocol)
+            .filter { webPorts.contains($0.publicPort) }
     }
 
     /// Keeps the helper's host mappings, loopback/LAN forwarding and local DNS in
     /// sync with the current configuration.
     private func applyPrivilegedNetworking(hostnames: [String]) async throws {
-        let forwardings = configuration.ports.forwardings
-        let lan = localNetworkLanEntries
+        // PROXY protocol forwarding needs a helper that advertises the
+        // capability; anything older keeps the direct loopback targets.
+        var capabilities = helperStatus?.capabilities
+        if capabilities == nil, helperInstalled, let status = try? await helper.status() {
+            capabilities = status.capabilities
+        }
+        let supportsProxyProtocol = capabilities?.contains(PrivilegedHelperCapabilities.proxyProtocol) == true
+        let forwardings = configuration.ports.forwardingEntries(proxyProtocol: supportsProxyProtocol)
+        let lan = localNetworkLanEntries(supportsProxyProtocol: supportsProxyProtocol)
         // Don't report forwarding as enabled when there is nothing to forward.
         let forwardingEnabled = !forwardings.isEmpty || !lan.isEmpty
         try await helper.setPortForwarding(PortForwardingConfiguration(
@@ -783,6 +788,10 @@ final class AppModel: ObservableObject {
                     }
                     if hasRunningServices {
                         // A freshly started helper has no listeners or DNS yet.
+                        // Regenerate first so a web server started by an older
+                        // app also gains the PROXY protocol listeners.
+                        try? generateConfiguration()
+                        try? await reloadWebServerIfRunning()
                         try? await applyPrivilegedNetworking(hostnames: configuration.sites.map(\.hostname) + Self.managementHostnames)
                     }
                     helperStatus = (try? await helper.status()) ?? refreshed.status
