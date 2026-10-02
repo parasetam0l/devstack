@@ -577,6 +577,23 @@ final class AppModel: ObservableObject {
         helperSetupCancelled = true
     }
 
+    /// Trusts the CA for this user only (login keychain), which needs no
+    /// administrator prompt. Returns nil on success or a message to show inline.
+    func trustForCurrentUserFromWizard() async -> String? {
+        guard !isBusy else { return "Another setup step is still running." }
+        isBusy = true
+        defer { isBusy = false }
+        let certificates = certificateManager
+        do {
+            try await Task.detached { try certificates.trustForCurrentUser() }.value
+            localCATrusted = certificates.isTrusted()
+            return localCATrusted ? nil : "macOS did not authorize this CA for HTTPS."
+        } catch {
+            localCATrusted = certificates.isTrusted()
+            return error.localizedDescription
+        }
+    }
+
     /// Installs the DevStack CA into the system trust store (one administrator
     /// prompt). Returns nil on success or a message to show inline.
     func installSystemCertificate() async -> String? {

@@ -192,8 +192,21 @@ struct SetupWizardView: View {
                     .font(.system(size: 11)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
             if !model.localCATrusted {
-                Text("Alternatively you can trust the CA for this user only from the SSL page, without an administrator prompt.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Button("Trust for This User Only") {
+                        Task {
+                            certificateError = await model.trustForCurrentUserFromWizard()
+                            if certificateError == nil, model.localCATrusted { step = .ports }
+                        }
+                    }
+                    .buttonStyle(DevStackGlassButtonStyle())
+                    .disabled(model.isBusy)
+                    Button("Skip for Now") { step = .ports }
+                        .buttonStyle(DevStackGlassButtonStyle())
+                        .disabled(model.isBusy)
+                }
+                Text("User-only trust needs no administrator password but applies just to this Mac account.")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
             }
         }
     }
