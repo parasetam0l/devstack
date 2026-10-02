@@ -70,11 +70,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         window.setContentSize(NSSize(width: min(size.width, 920), height: min(size.height, 620)))
                         window.center()
                     }
+                    widenSidebarIfNeeded(window)
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(50))
             }
         }
+    }
+
+    /// Older builds stored a ~144 pt sidebar in the split view autosave, which
+    /// overrides navigationSplitViewColumnWidth on restore. Widen it once per
+    /// launch so the sidebar labels are never truncated.
+    private func widenSidebarIfNeeded(_ window: NSWindow) {
+        for delay in [0.0, 0.4] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard let splitView = Self.firstSplitView(in: window.contentView),
+                      splitView.arrangedSubviews.count >= 2 else { return }
+                let sidebar = splitView.arrangedSubviews[0]
+                guard sidebar.frame.width < 190 else { return }
+                splitView.setPosition(210, ofDividerAt: 0)
+            }
+        }
+    }
+
+    private static func firstSplitView(in view: NSView?) -> NSSplitView? {
+        guard let view else { return nil }
+        if let splitView = view as? NSSplitView { return splitView }
+        for subview in view.subviews {
+            if let found = firstSplitView(in: subview) { return found }
+        }
+        return nil
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

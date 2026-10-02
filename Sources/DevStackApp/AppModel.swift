@@ -121,6 +121,7 @@ final class AppModel: ObservableObject {
     private let networkMonitor = NWPathMonitor()
     private var networkMonitorStarted = false
     private var appliedLocalNetworkAddress: String?
+    private var helperSetupCancelled = false
 
     let paths: DevStackPaths
     let isReviewMode: Bool
@@ -539,6 +540,7 @@ final class AppModel: ObservableObject {
     func setUpHelperForWizard() async {
         guard !isBusy else { return }
         isBusy = true
+        helperSetupCancelled = false
         defer { isBusy = false }
         do {
             // .notFound means launchd has no usable record for the daemon in
@@ -550,19 +552,29 @@ final class AppModel: ObservableObject {
             await refreshHelperStatus()
             if helperSetupState == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
             // Wait for the user to approve in System Settings, then for the
-            // daemon to answer. Bounded so the wizard never polls forever.
+            // daemon to answer. Bounded, and interruptible by "Continue
+            // Without Helper", so the wizard never blocks forever.
             for _ in 0..<60 {
-                if helperInstalled { return }
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if helperInstalled || helperSetupCancelled { break }
+                for _ in 0..<20 {
+                    if helperInstalled || helperSetupCancelled { break }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                if helperSetupCancelled { break }
                 await refreshHelperStatus()
             }
-            if !helperInstalled {
+            if !helperInstalled, !helperSetupCancelled {
                 helperSetupState = .unavailable("The helper is still waiting for approval. Approve DevStack in System Settings → General → Login Items & Extensions, then run this step again.")
             }
         } catch {
             helperInstalled = false
             helperSetupState = .unavailable("Setup failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Stops the wizard's helper wait so setup can continue without it.
+    func cancelHelperSetup() {
+        helperSetupCancelled = true
     }
 
     /// Installs the DevStack CA into the system trust store (one administrator

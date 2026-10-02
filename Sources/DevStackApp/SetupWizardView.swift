@@ -89,6 +89,14 @@ struct SetupWizardView: View {
                     .buttonStyle(DevStackGlassButtonStyle())
                     .disabled(model.isBusy || startingStack)
             }
+            if step == .helper, !model.helperInstalled, !helperIsImpossible {
+                Button("Continue Without Helper") {
+                    model.cancelHelperSetup()
+                    step = .certificate
+                }
+                .buttonStyle(DevStackGlassButtonStyle())
+                .disabled(startingStack)
+            }
             Button(primaryTitle) { Task { await primaryAction() } }
                 .buttonStyle(DevStackProminentButtonStyle())
                 .keyboardShortcut(.defaultAction)
@@ -126,7 +134,7 @@ struct SetupWizardView: View {
     private var welcomeStep: some View {
         VStack(alignment: .leading, spacing: 14) {
             bullet("lock.shield", "Install the privileged helper",
-                   "Needed for ports 80/443, /etc/hosts entries and the local DNS responder. macOS asks for approval once in Login Items & Extensions.")
+                   "Needed for ports 80/443, /etc/hosts entries and the local DNS responder. macOS asks you to approve it once in Login Items & Extensions — it no longer accepts an administrator password for background helpers.")
             bullet("checkmark.seal", "Create and trust the DevStack certificate authority",
                    "HTTPS stops warning on every DevStack site. macOS asks for your administrator password once.")
             bullet("network", "Choose your web ports",
@@ -147,6 +155,8 @@ struct SetupWizardView: View {
             )
             if !model.helperInstalled {
                 Text("Approve DevStack in System Settings → General → Login Items & Extensions → Allow in the Background. This window updates automatically once the helper answers.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text("macOS no longer installs background helpers with your password; this one-time switch is the only way, and it survives app updates.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if model.helperSetupState == .requiresApproval {
                     Button("Open Login Items…") { SMAppService.openSystemSettingsLoginItems() }
@@ -223,10 +233,10 @@ struct SetupWizardView: View {
             bullet(model.localCATrusted ? "checkmark.circle.fill" : "circle.dashed",
                    model.localCATrusted ? "Certificate trusted" : "Certificate skipped",
                    model.localCATrusted ? "HTTPS sites open without warnings." : "Trust the CA later from the SSL page.")
-            bullet("network", "Web ports \(model.configuration.ports.webHTTP) / \(model.configuration.ports.webHTTPS)",
-                   model.configuration.ports.webHTTP < 1024
+            bullet("network", "Web ports \(model.configuration.ports.webHTTPListen) / \(model.configuration.ports.webHTTPSListen)",
+                   model.helperInstalled && model.configuration.ports.webHTTP < 1024
                    ? "Site URLs have no port number."
-                   : "Site URLs include the port, for example http://localhost:\(model.configuration.ports.webHTTP).")
+                   : "Site URLs include the port, for example http://localhost:\(model.configuration.ports.webHTTPListen).")
             Divider()
             HStack(spacing: 8) {
                 Button("Start Stack") {
@@ -331,8 +341,10 @@ struct SetupWizardView: View {
                 httpPort = "80"
                 httpsPort = "443"
             } else {
-                httpPort = String(ports.webHTTP)
-                httpsPort = String(ports.webHTTPS)
+                // Without the helper, privileged ports cannot be forwarded;
+                // preselect the working fallback listeners.
+                httpPort = String(ports.webHTTP < 1024 ? ServicePorts.webHTTPFallback : ports.webHTTP)
+                httpsPort = String(ports.webHTTPS < 1024 ? ServicePorts.webHTTPSFallback : ports.webHTTPS)
             }
         }
     }

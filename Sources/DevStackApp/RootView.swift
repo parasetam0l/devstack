@@ -33,7 +33,7 @@ struct RootView: View {
             .padding(4)
             .glassEffect(.regular, in: .rect(cornerRadius: 12))
             .padding(6)
-            .navigationSplitViewColumnWidth(min: 150, ideal: 160, max: 180)
+            .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 250)
             .toolbar(removing: .sidebarToggle)
         } detail: {
             VStack(spacing: 0) {
