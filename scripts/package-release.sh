@@ -117,7 +117,31 @@ rm -rf "$dmg_root" "$rw_dmg" "$mount_point"
 /usr/bin/codesign --force "${signing_options[@]}" --sign "$identity" "$dmg"
 
 if [[ -n "${DEVSTACK_NOTARY_PROFILE:-}" ]]; then
-    xcrun notarytool submit "$dmg" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" --wait
+    # The --wait client can time out on a slow connection even though Apple
+    # accepted the submission; recover by polling the submission id instead of
+    # losing the finished image.
+    if ! submit_output="$(xcrun notarytool submit "$dmg" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" --wait 2>&1)"; then
+        printf '%s\n' "$submit_output" >&2
+        submission_id="$(printf '%s\n' "$submit_output" | /usr/bin/sed -n 's/^[[:space:]]*id: //p' | /usr/bin/head -n 1)"
+        [[ -n "$submission_id" ]] || { echo "Notarization failed without a submission id." >&2; exit 71; }
+        echo "Waiting for submission $submission_id after a client timeout..." >&2
+        submission_status=""
+        for _ in $(seq 1 80); do
+            submission_status="$(xcrun notarytool info "$submission_id" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" 2>/dev/null | /usr/bin/awk '/status:/ {print $2}' | /usr/bin/head -n 1)"
+            case "$submission_status" in
+                Accepted) break ;;
+                Invalid|Rejected)
+                    xcrun notarytool log "$submission_id" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" >&2 || true
+                    echo "Notarization rejected: $submission_id" >&2
+                    exit 71
+                    ;;
+            esac
+            sleep 15
+        done
+        [[ "$submission_status" == "Accepted" ]] || { echo "Notarization did not finish: $submission_id" >&2; exit 71; }
+    else
+        printf '%s\n' "$submit_output"
+    fi
     xcrun stapler staple "$application"
     xcrun stapler staple "$dmg"
     /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"

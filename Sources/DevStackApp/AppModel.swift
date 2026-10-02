@@ -3,6 +3,7 @@ import Combine
 import CryptoKit
 import DevStackCore
 import Foundation
+import Network
 import ServiceManagement
 import SwiftUI
 
@@ -113,6 +114,13 @@ final class AppModel: ObservableObject {
     // Set by the window content: SwiftUI's action for opening a new main window after
     // the user closed the previous one.
     var openMainWindow: (() -> Void)?
+
+    /// Re-applies LAN DNS and forwarding as soon as the network path changes
+    /// (Wi-Fi switch, cable unplugged) instead of waiting for the next app
+    /// activation; the helper also self-heals stale answers per query.
+    private let networkMonitor = NWPathMonitor()
+    private var networkMonitorStarted = false
+    private var appliedLocalNetworkAddress: String?
 
     let paths: DevStackPaths
     let isReviewMode: Bool
@@ -277,9 +285,30 @@ final class AppModel: ObservableObject {
             if !helperInstalled, !configuration.helperNoticeDismissed, !isReviewMode, !isPresentingSetupWizard {
                 helperNotice = .welcome
             }
+            startNetworkMonitor()
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func startNetworkMonitor() {
+        guard !isReviewMode, !networkMonitorStarted else { return }
+        networkMonitorStarted = true
+        networkMonitor.pathUpdateHandler = { [weak self] _ in
+            Task { @MainActor in await self?.networkPathDidChange() }
+        }
+        networkMonitor.start(queue: DispatchQueue(label: "app.devstack.desktop.network-monitor"))
+    }
+
+    /// The LAN address may have changed with the network; push the new address
+    /// to the helper so DNS answers and LAN forwarding stop using the previous
+    /// network before a client notices.
+    private func networkPathDidChange() async {
+        guard configuration.localNetworkAccess, helperInstalled, !isBusy else { return }
+        let address = localNetworkAddress
+        guard address != appliedLocalNetworkAddress else { return }
+        try? await applyPrivilegedNetworking(hostnames: configuration.sites.map(\.hostname) + Self.managementHostnames)
+        helperStatus = try? await helper.status()
     }
 
     /// Moves the contents of an earlier default-site root into the current one,
@@ -699,6 +728,7 @@ final class AppModel: ObservableObject {
             entries: forwardings,
             lanEntries: lan))
         let answerAddress = localNetworkAddress ?? ""
+        appliedLocalNetworkAddress = answerAddress.isEmpty ? nil : answerAddress
         try await helper.setDNSConfiguration(DNSConfiguration(
             enabled: configuration.localNetworkAccess && !answerAddress.isEmpty,
             hostnames: hostnames,
