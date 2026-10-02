@@ -165,7 +165,8 @@ gate (`scripts/gates/php74.sh`, `scripts/gates/mysql57.sh`). Read
 | `.build/runtime-cache` | Pinned source archives; also shipped as `CorrespondingSources`. | kept |
 | `.build/runtime-dependencies` | Rebuilt dependency prefixes for runtime builds. | kept (`--deep` removes) |
 | `.build/build-tools`, `build-tools-cache` | Pinned host toolchain and its archives. | kept (`--deep` removes) |
-| `.build/runtime-work`, `runtime-test-fixtures`, `build-tools-work` | Scratch build trees. | removed |
+| `.build/runtime-work` | PHP 7.4 source/build tree for the legacy feasibility gate. | kept (`--deep` removes) |
+| `.build/runtime-test-fixtures`, `build-tools-work` | Scratch build trees. | removed |
 | `.build/out` | SwiftPM/Xcode build state and products; release DMGs live in `out/Products/Release`. | caches kept (`--deep` prunes) |
 | `.build/logs` | Packaging history; `package-latest.log` points at the last run. | old logs removed |
 

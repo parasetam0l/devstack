@@ -54,8 +54,10 @@ else
         done < <(/bin/ls -1t "$release_root"/DevStack-*-arm64.dmg 2>/dev/null | /usr/bin/tail -n +2)
     fi
 
-    # Scratch trees, recreated by the next runtime build.
-    remove "$build_root/runtime-work" "$build_root/runtime-test-fixtures" \
+    # Scratch trees, recreated by the next runtime build. runtime-work is kept:
+    # the legacy PHP 7.4 feasibility gate needs its source tree at packaging
+    # time, and dropping it silently omits the runtime from the release.
+    remove "$build_root/runtime-test-fixtures" \
         "$build_root/build-tools-work" "$build_root/backups"
 
     # Stray intermediates from earlier tooling and UI review runs.
@@ -74,7 +76,7 @@ else
         # scripts/verify-sources.sh before packaging so the image can include
         # its CorrespondingSources payload again.
         remove "$build_root/runtime-dependencies" "$build_root/runtime-cache" \
-            "$build_root/build-tools" "$build_root/build-tools-cache"
+            "$build_root/build-tools" "$build_root/build-tools-cache" "$build_root/runtime-work"
         /bin/rm -rf "$build_root/out/Intermediates.noindex" "$build_root/out/ModuleCache.noindex" \
             "$build_root/out/CompilationCache.noindex" "$build_root/out/SDKExplicitPrecompiledModules" \
             "$build_root/out/SDKStatCaches.noindex" "$build_root/out/PCH" "$build_root/out/v5"
