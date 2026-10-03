@@ -660,6 +660,23 @@ enum DevStackCoreChecks {
         let stoppedState = await supervisor.state(for: .mailpit)
         try expect(stoppedState.phase == .stopped, "Service did not stop")
 
+        // The system LibreSSL in a runtime-shaped layout: the manager derives
+        // OPENSSL_CONF from the binary's location, as for the bundled OpenSSL.
+        let checkOpenSSL = temporary.appendingPathComponent("openssl-runtime", isDirectory: true)
+        try FileManager.default.createDirectory(at: checkOpenSSL.appendingPathComponent("bin"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: checkOpenSSL.appendingPathComponent("bin/openssl"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/openssl"))
+        try AtomicFileWriter.write("[ req ]\ndistinguished_name = req_distinguished_name\n[ req_distinguished_name ]\n", to: checkOpenSSL.appendingPathComponent("ssl/openssl.cnf"), permissions: 0o644)
+        let certificates = CertificateManager(paths: paths, openssl: checkOpenSSL.appendingPathComponent("bin/openssl"))
+        try certificates.ensureLeafCertificate(for: "certificate-check.test")
+        let firstLeaf = try Data(contentsOf: paths.certificate(for: "certificate-check.test"))
+        try certificates.ensureLeafCertificate(for: "certificate-check.test")
+        try expect(try Data(contentsOf: paths.certificate(for: "certificate-check.test")) == firstLeaf, "A valid leaf certificate was reissued")
+        try FileManager.default.removeItem(at: certificates.caCertificate)
+        try FileManager.default.removeItem(at: certificates.caPrivateKey)
+        try certificates.ensureLeafCertificate(for: "certificate-check.test")
+        let reissuedLeaf = paths.certificate(for: "certificate-check.test")
+        try expect(try Data(contentsOf: reissuedLeaf) != firstLeaf && certificates.isIssuedByCurrentCA(reissuedLeaf), "A leaf signed by a replaced CA was kept")
+
         let logDirectory = temporary.appendingPathComponent("rotation-logs", isDirectory: true)
         try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
         let busyLog = logDirectory.appendingPathComponent("site-busy-access.log")

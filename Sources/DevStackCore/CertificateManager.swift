@@ -55,9 +55,12 @@ public struct CertificateManager: Sendable {
         try ensureCA()
         let certificate = paths.certificate(for: hostname)
         let privateKey = paths.privateKey(for: hostname)
+        // A leaf from an earlier CA (for example after the CA files were
+        // removed and regenerated) is still in date but no longer trusted.
         if !force, FileManager.default.fileExists(atPath: certificate.path),
            FileManager.default.fileExists(atPath: privateKey.path),
-           certificateIsValid(certificate, forAtLeastDays: days) {
+           certificateIsValid(certificate, forAtLeastDays: days),
+           isIssuedByCurrentCA(certificate) {
             return
         }
 
@@ -117,6 +120,11 @@ public struct CertificateManager: Sendable {
         defer { try? FileManager.default.removeItem(at: output) }
         _ = try runner.runChecked(executable: openssl, arguments: ["x509", "-in", caCertificate.path, "-outform", "DER", "-out", output.path], environment: environment)
         return try Data(contentsOf: output)
+    }
+
+    public func isIssuedByCurrentCA(_ certificate: URL) -> Bool {
+        guard let result = try? runner.run(executable: openssl, arguments: ["verify", "-CAfile", caCertificate.path, certificate.path], environment: environment) else { return false }
+        return result.exitCode == 0
     }
 
     public func certificateIsValid(_ certificate: URL, forAtLeastDays days: Int) -> Bool {
