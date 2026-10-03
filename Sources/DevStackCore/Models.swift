@@ -410,6 +410,19 @@ public enum ServiceKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case mailpit
 
     public var id: String { rawValue }
+    public var displayName: String {
+        switch self {
+        case .apache: "Apache"
+        case .nginx: "Nginx"
+        case .php74: "PHP 7.4"
+        case .php84: "PHP 8.4"
+        case .php85: "PHP 8.5"
+        case .mysql57: "MySQL 5.7"
+        case .mysql84: "MySQL 8.4"
+        case .postgresql18: "PostgreSQL 18"
+        case .mailpit: "Mailpit"
+        }
+    }
     public var phpRuntimeID: String? {
         switch self { case .php74, .php84, .php85: rawValue; default: nil }
     }

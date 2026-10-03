@@ -182,22 +182,6 @@ private struct MenuBarView: View {
     }
 }
 
-extension ServiceKind {
-    var displayName: String {
-        switch self {
-        case .apache: "Apache"
-        case .nginx: "Nginx"
-        case .php74: "PHP 7.4"
-        case .php84: "PHP 8.4"
-        case .php85: "PHP 8.5"
-        case .mysql57: "MySQL 5.7"
-        case .mysql84: "MySQL 8.4"
-        case .postgresql18: "PostgreSQL 18"
-        case .mailpit: "Mailpit"
-        }
-    }
-}
-
 extension ServicePhase {
     var symbol: String {
         switch self {

@@ -117,7 +117,7 @@ private struct ServiceControl<Selector: View>: View {
                 .accessibilityLabel("\(state.phase == .running ? "Stop" : "Start") \(service.displayName)")
                 .frame(width: 55)
                 Menu {
-                    Button("Open Logs") { model.selectedLogService = service; model.selectedSection = .logs }
+                    Button("Open Logs") { model.showLogs(for: service) }
                     Button("Restart") { Task { await model.restartService(service) } }
                         .disabled(model.isBusy || state.phase != .running)
                     if service.phpRuntimeID != nil {

@@ -82,11 +82,12 @@ public actor ServiceSupervisor {
                 throw ServiceFailure(message: "The service port is already in use.", recoveryAction: "Stop the conflicting server or change its port before starting this service.")
             }
             try FileManager.default.createDirectory(at: specification.logFile.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: specification.logFile.path) {
-                FileManager.default.createFile(atPath: specification.logFile.path, contents: nil)
-            }
-            let logHandle = try FileHandle(forWritingTo: specification.logFile)
-            try logHandle.seekToEnd()
+            // O_APPEND: when the log is truncated by rotation, the service keeps
+            // writing at the new end instead of its old offset, which would
+            // leave a zero-filled gap.
+            let descriptor = open(specification.logFile.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
+            guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            let logHandle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
 
             let process = Process()
             process.executableURL = specification.executable

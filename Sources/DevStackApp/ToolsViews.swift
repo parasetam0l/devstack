@@ -236,14 +236,21 @@ struct LogsView: View {
         GeometryReader { geometry in
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                PageHeading(title: "Logs", subtitle: "Service output.")
+                PageHeading(title: "Logs", subtitle: "Service, PHP and site logs.")
                 Spacer()
                 Button { NSWorkspace.shared.activateFileViewerSelecting([model.paths.logs]) } label: { Image(systemName: "folder") }.buttonStyle(DevStackGlassButtonStyle()).help("Show logs folder").accessibilityLabel("Show logs folder")
                 Button(action: refresh) { Image(systemName: "arrow.clockwise") }.buttonStyle(DevStackGlassButtonStyle()).help("Refresh logs").accessibilityLabel("Refresh logs")
             }
             HStack(spacing: 8) {
-                Picker("Service", selection: $model.selectedLogService) {
-                    ForEach(ServiceKind.allCases) { service in Text(service.displayName).tag(service) }
+                Picker("Log", selection: $model.selectedLogFile) {
+                    ForEach([LogFiles.Group.services, .sites, .other], id: \.self) { group in
+                        let entries = state.entries.filter { $0.group == group }
+                        if !entries.isEmpty {
+                            Section(group.title) {
+                                ForEach(entries) { entry in Text(entry.title).tag(entry.fileName) }
+                            }
+                        }
+                    }
                 }.pickerStyle(.menu).tint(.primary).fixedSize()
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -261,7 +268,7 @@ struct LogsView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 7) {
                     Circle().fill(currentPhase.color).frame(width: 6, height: 6)
-                    Text("\(model.selectedLogService.rawValue).log").font(.system(size: 11, design: .monospaced))
+                    Text(model.selectedLogFile).font(.system(size: 11, design: .monospaced))
                     Spacer()
                     Text(state.live ? "LIVE" : "PAUSED").font(.system(size: 9, weight: .medium)).tracking(1)
                 }.foregroundStyle(.white.opacity(0.5)).padding(8).background(.white.opacity(0.025))
@@ -277,7 +284,7 @@ struct LogsView: View {
         }.padding(14).frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
         }.background(WorkspaceBackground()).controlSize(.small).font(.system(size: 12))
         .onAppear(perform: refresh)
-        .onChange(of: model.selectedLogService) { _, _ in refresh() }
+        .onChange(of: model.selectedLogFile) { _, _ in refresh() }
         .task(id: state.live) {
             guard state.live else { return }
             while !Task.isCancelled {
@@ -286,14 +293,40 @@ struct LogsView: View {
             }
         }
     }
-    private var currentPhase: ServicePhase { model.serviceStates.first { $0.service == model.selectedLogService }?.phase ?? .stopped }
+    /// The owning service for service logs, the web server for site logs.
+    private var currentPhase: ServicePhase {
+        guard let entry = state.entries.first(where: { $0.fileName == model.selectedLogFile }) else { return .stopped }
+        let service = entry.service ?? (entry.group == .sites ? model.configuration.selectedWebServer.service : nil)
+        return service.map { model.serviceState($0).phase } ?? .stopped
+    }
     private var filteredContents: String {
         state.filter.isEmpty ? state.contents : state.contents.components(separatedBy: .newlines).filter { $0.localizedCaseInsensitiveContains(state.filter) }.joined(separator: "\n")
     }
-    private func refresh() { state.contents = model.logContents(for: model.selectedLogService) }
+    private func refresh() {
+        let fileName = model.selectedLogFile
+        Task {
+            let snapshot = await model.logSnapshot(selected: fileName)
+            // A slower read for an earlier selection must not overwrite the current one.
+            guard fileName == model.selectedLogFile else { return }
+            state.entries = snapshot.entries
+            state.contents = snapshot.contents
+        }
+    }
 }
+
+private extension LogFiles.Group {
+    var title: String {
+        switch self {
+        case .services: "Services"
+        case .sites: "Sites"
+        case .other: "Other"
+        }
+    }
+}
+
 @MainActor private final class LogsViewState: ObservableObject {
-    @Published var contents = "No log output yet."
+    @Published var entries: [LogFiles.Entry] = []
+    @Published var contents = ""
     @Published var filter = ""
     @Published var live = true
 }

@@ -88,7 +88,8 @@ private struct TrustedRuntimeKeys: Codable {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var selectedSection: NavigationSection? = .dashboard
-    @Published var selectedLogService: ServiceKind = .apache
+    /// File name inside the logs directory shown by the Logs page.
+    @Published var selectedLogFile = LogFiles.primaryLog(for: .apache)
     @Published var configuration = AppConfiguration()
     @Published var serviceStates = ServiceKind.allCases.map { ServiceState(service: $0) }
     @Published var runtimeManifests: [RuntimeManifest] = []
@@ -122,6 +123,7 @@ final class AppModel: ObservableObject {
     private var networkMonitorStarted = false
     private var appliedLocalNetworkAddress: String?
     private var helperSetupCancelled = false
+    private var logMaintenance: Task<Void, Never>?
 
     let paths: DevStackPaths
     let isReviewMode: Bool
@@ -287,8 +289,22 @@ final class AppModel: ObservableObject {
                 helperNotice = .welcome
             }
             startNetworkMonitor()
+            startLogMaintenance()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Keeps each log under the rotation threshold while the app runs, whether
+    /// or not a window is open.
+    private func startLogMaintenance() {
+        guard !isReviewMode, logMaintenance == nil else { return }
+        let directory = paths.logs
+        logMaintenance = Task.detached(priority: .utility) {
+            while !Task.isCancelled {
+                LogFiles.rotateOversized(in: directory)
+                try? await Task.sleep(for: .seconds(15 * 60))
+            }
         }
     }
 
@@ -1075,10 +1091,30 @@ final class AppModel: ObservableObject {
         NSPasteboard.general.setString(command, forType: .string)
     }
 
-    func logContents(for service: ServiceKind) -> String {
-        let url = paths.logs.appendingPathComponent("\(service.rawValue).log")
-        guard let data = try? Data(contentsOf: url) else { return "No log output yet." }
-        return String(decoding: data.suffix(200_000), as: UTF8.self)
+    func showLogs(for service: ServiceKind) {
+        selectedLogFile = LogFiles.primaryLog(for: service)
+        selectedSection = .logs
+    }
+
+    struct LogSnapshot: Sendable {
+        var entries: [LogFiles.Entry]
+        var contents: String
+    }
+
+    /// The available logs and the tail of the selected one, read off the main
+    /// actor. The selection is always listed so the picker keeps a valid tag.
+    func logSnapshot(selected fileName: String) async -> LogSnapshot {
+        let directory = paths.logs
+        let sites = configuration.sites
+        return await Task.detached(priority: .userInitiated) {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+            var entries = LogFiles.entries(fileNames: names, sites: sites)
+            if !entries.contains(where: { $0.fileName == fileName }) {
+                entries += LogFiles.entries(fileNames: [fileName], sites: sites)
+            }
+            let contents = LogFiles.tail(of: directory.appendingPathComponent(fileName)) ?? ""
+            return LogSnapshot(entries: entries, contents: contents)
+        }.value
     }
 
     private func persistConfiguration() async {

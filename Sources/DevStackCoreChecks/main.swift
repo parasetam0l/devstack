@@ -659,6 +659,30 @@ enum DevStackCoreChecks {
         await reconciledSupervisor.stop(.mailpit)
         let stoppedState = await supervisor.state(for: .mailpit)
         try expect(stoppedState.phase == .stopped, "Service did not stop")
+
+        let logDirectory = temporary.appendingPathComponent("rotation-logs", isDirectory: true)
+        try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+        let busyLog = logDirectory.appendingPathComponent("site-busy-access.log")
+        let quietLog = logDirectory.appendingPathComponent("apache-error.log")
+        try Data(repeating: 0x41, count: 2_048).write(to: busyLog)
+        try Data("quiet\n".utf8).write(to: quietLog)
+        try Data("old archive".utf8).write(to: logDirectory.appendingPathComponent("site-busy-access.log.1"))
+        let appendWriter = open(busyLog.path, O_WRONLY | O_APPEND)
+        try expect(appendWriter >= 0, "Could not open the rotation fixture for appending")
+        defer { close(appendWriter) }
+        let rotatedLogs = LogFiles.rotateOversized(in: logDirectory, threshold: 1_024)
+        try expect(rotatedLogs.map(\.lastPathComponent) == ["site-busy-access.log"], "Only the oversized log should rotate")
+        try expect((try FileManager.default.attributesOfItem(atPath: busyLog.path + ".1")[.size] as? Int) == 2_048, "Rotation did not keep the previous contents")
+        _ = Data("after\n".utf8).withUnsafeBytes { write(appendWriter, $0.baseAddress, $0.count) }
+        try expect(try Data(contentsOf: busyLog) == Data("after\n".utf8), "A running writer left a gap after rotation")
+        try expect(try Data(contentsOf: quietLog) == Data("quiet\n".utf8), "A small log was rotated")
+        try Data((1...200).map { "line \($0)\n" }.joined().utf8).write(to: quietLog)
+        let logTail = LogFiles.tail(of: quietLog, maximumBytes: 64) ?? ""
+        try expect(logTail.hasPrefix("line ") && logTail.hasSuffix("line 200\n") && logTail.utf8.count <= 64, "Log tail did not start at a line boundary")
+        try expect(LogFiles.tail(of: logDirectory.appendingPathComponent("missing.log")) == nil, "A missing log produced a tail")
+        let logEntries = LogFiles.entries(fileNames: ["php-8.5-fpm.log", "site-localhost-error.log", "apache-error.log", "notes.txt", "site-gone-access.log"], sites: [defaultSite])
+        try expect(logEntries.map(\.title) == ["Apache — errors", "PHP 8.5 — FPM", "localhost — errors", "site-gone-access.log"], "Log files were not named and grouped")
+        try expect(logEntries.first?.service == .apache && LogFiles.primaryLog(for: .php85) == "php-8.5-fpm.log", "Log services were not resolved")
         print("DevStackCoreChecks: all checks passed")
     }
 }
