@@ -15,6 +15,8 @@ public enum RuntimePackVerificationError: LocalizedError, Equatable, Sendable {
     case invalidSignature
     case forbiddenDependency(String)
     case invalidCodeSignature(String)
+    case unexpectedFile(String)
+    case invalidRuntimeID(String)
 
     public var errorDescription: String? {
         switch self {
@@ -31,6 +33,8 @@ public enum RuntimePackVerificationError: LocalizedError, Equatable, Sendable {
         case .invalidSignature: "Runtime-pack manifest signature is invalid."
         case .forbiddenDependency(let path): "Runtime contains a forbidden dependency path: \(path)."
         case .invalidCodeSignature(let path): "Executable code signature is invalid: \(path)."
+        case .unexpectedFile(let path): "Runtime pack contains a file its signed manifest does not list: \(path)."
+        case .invalidRuntimeID(let id): "Runtime pack has an invalid runtime identifier: \(id)."
         }
     }
 }
@@ -64,6 +68,11 @@ public struct RuntimePackVerifier: Sendable {
         }
 
         if requireSignature { try verifyManifestSignature(manifest) }
+        // The identifier becomes a directory name under Application Support.
+        guard manifest.runtime.id.range(of: "^[a-z0-9][a-z0-9.+-]{0,63}$", options: .regularExpression) != nil,
+              !manifest.runtime.id.contains("..") else {
+            throw RuntimePackVerificationError.invalidRuntimeID(manifest.runtime.id)
+        }
         try validateDependencyPaths(manifest.runtime.dependencyPaths)
 
         for file in manifest.payload {
@@ -88,8 +97,33 @@ public struct RuntimePackVerifier: Sendable {
         }
 
         _ = try validateRelativePath(manifest.sbomPath)
-        guard FileManager.default.fileExists(atPath: root.appendingPathComponent(manifest.sbomPath).path) else {
+        guard manifest.payload.contains(where: { $0.path == manifest.sbomPath }) else {
             throw RuntimePackVerificationError.missingFile(manifest.sbomPath)
+        }
+        try verifyInventory(manifest: manifest, root: root)
+    }
+
+    /// The signature covers only the files the manifest lists, so the pack may
+    /// contain nothing else: an unlisted library or extension would be
+    /// installed without any integrity check.
+    private func verifyInventory(manifest: RuntimePackManifest, root: URL) throws {
+        let listed = Set(manifest.payload.map(\.path))
+        guard let enumerator = FileManager.default.enumerator(atPath: root.path) else {
+            throw RuntimePackVerificationError.missingFile(root.path)
+        }
+        while let relative = enumerator.nextObject() as? String {
+            switch enumerator.fileAttributes?[.type] as? FileAttributeType {
+            case .typeDirectory?:
+                continue
+            case .typeRegular?:
+                guard relative == "manifest.json" || listed.contains(relative) else {
+                    throw RuntimePackVerificationError.unexpectedFile(relative)
+                }
+            case .typeSymbolicLink?:
+                throw RuntimePackVerificationError.unexpectedSymbolicLink(relative)
+            default:
+                throw RuntimePackVerificationError.unexpectedFile(relative)
+            }
         }
     }
 

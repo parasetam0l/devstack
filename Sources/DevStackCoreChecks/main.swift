@@ -476,7 +476,10 @@ enum DevStackCoreChecks {
             sbomPath: "sbom.json"
         )
         let unsignedVerifier = RuntimePackVerifier(trustedPublicKeys: [:], requireSignature: false)
-        runtimeManifest.payload = [RuntimePackFile(path: "bin/php", sha256: try unsignedVerifier.sha256(payloadURL))]
+        runtimeManifest.payload = [
+            RuntimePackFile(path: "bin/php", sha256: try unsignedVerifier.sha256(payloadURL)),
+            RuntimePackFile(path: "sbom.json", sha256: try unsignedVerifier.sha256(payloadRoot.appendingPathComponent("sbom.json")))
+        ]
         let signature = try privateKey.signature(for: unsignedVerifier.canonicalManifestData(runtimeManifest))
         runtimeManifest.signature = RuntimePackSignature(keyID: "test", value: signature.base64EncodedString())
         let verifier = RuntimePackVerifier(trustedPublicKeys: ["test": privateKey.publicKey.rawRepresentation])
@@ -490,6 +493,37 @@ enum DevStackCoreChecks {
             _ = try verifier.validateRelativePath("../escape")
             throw CheckFailure(description: "Runtime path traversal was accepted")
         } catch RuntimePackVerificationError.unsafePath {
+            // Expected.
+        }
+
+        // Import round trip through the same archive format the packager writes.
+        try AtomicFileWriter.write(try JSONEncoder().encode(runtimeManifest), to: payloadRoot.appendingPathComponent("manifest.json"), permissions: 0o644)
+        _ = try ProcessRunner().runChecked(executable: URL(fileURLWithPath: "/usr/bin/xattr"), arguments: ["-w", "app.devstack.check", "1", payloadURL.path])
+        func packArchive(_ name: String) throws -> URL {
+            let archive = temporary.appendingPathComponent(name)
+            _ = try ProcessRunner().runChecked(executable: URL(fileURLWithPath: "/usr/bin/ditto"), arguments: ["-c", "-k", "--sequesterRsrc", payloadRoot.path, archive.path])
+            return archive
+        }
+        let importedRoot = temporary.appendingPathComponent("imported-runtimes", isDirectory: true)
+        let importer = RuntimePackImporter(verifier: verifier)
+        let imported = try importer.importArchive(try packArchive("valid.devstack-runtime"), into: importedRoot)
+        try expect(imported.id == "php-test" && FileManager.default.fileExists(atPath: importedRoot.appendingPathComponent("php-test/bin/php").path), "Signed runtime pack was not imported")
+        try Data("unlisted".utf8).write(to: payloadRoot.appendingPathComponent("bin/extra.so"))
+        do {
+            _ = try importer.importArchive(try packArchive("unlisted.devstack-runtime"), into: temporary.appendingPathComponent("rejected-runtimes"))
+            throw CheckFailure(description: "Runtime pack with an unlisted file was imported")
+        } catch RuntimePackVerificationError.unexpectedFile("bin/extra.so") {
+            // Expected.
+        }
+        try FileManager.default.removeItem(at: payloadRoot.appendingPathComponent("bin/extra.so"))
+        try FileManager.default.removeItem(at: payloadRoot.appendingPathComponent("manifest.json"))
+        var traversalManifest = runtimeManifest
+        traversalManifest.runtime.id = "../php-test"
+        traversalManifest.signature = RuntimePackSignature(keyID: "test", value: try privateKey.signature(for: unsignedVerifier.canonicalManifestData(traversalManifest)).base64EncodedString())
+        do {
+            try verifier.verify(manifest: traversalManifest, root: payloadRoot, verifyCodeSignatures: false)
+            throw CheckFailure(description: "Runtime identifier with a path separator was accepted")
+        } catch RuntimePackVerificationError.invalidRuntimeID {
             // Expected.
         }
 
@@ -519,7 +553,10 @@ enum DevStackCoreChecks {
                 source: SourceProvenance(url: URL(string: "https://example.test/runtime.tar.xz")!, sha256: String(repeating: "1", count: 64)),
                 supportState: .supported
             ),
-            payload: [RuntimePackFile(path: "bin/devstack-check", sha256: try unsignedVerifier.sha256(executableURL), executable: true)],
+            payload: [
+                RuntimePackFile(path: "bin/devstack-check", sha256: try unsignedVerifier.sha256(executableURL), executable: true),
+                RuntimePackFile(path: "sbom.json", sha256: try unsignedVerifier.sha256(executablePackRoot.appendingPathComponent("sbom.json")))
+            ],
             signingIdentity: "DevStack Test",
             sbomPath: "sbom.json"
         )

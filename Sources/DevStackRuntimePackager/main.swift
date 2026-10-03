@@ -58,13 +58,14 @@ enum DevStackRuntimePackager {
         var files: [RuntimePackFile] = []
         guard let enumerator = FileManager.default.enumerator(
             at: staging,
-            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
-            options: [.skipsHiddenFiles]
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]
         ) else { throw PackagerError.unsafePayload(staging.path) }
         while let file = enumerator.nextObject() as? URL {
             let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
             guard values.isSymbolicLink != true else { throw PackagerError.unsafePayload(file.path) }
             guard values.isRegularFile == true else { continue }
+            // Every file in the archive is listed, hidden ones included: the
+            // importer rejects anything the signed manifest does not cover.
             let relative = String(file.path.dropFirst(staging.path.count + 1))
             files.append(RuntimePackFile(path: relative, sha256: try unsignedVerifier.sha256(file), executable: try isMachO(file)))
         }
