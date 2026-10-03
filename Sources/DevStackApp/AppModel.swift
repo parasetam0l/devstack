@@ -450,7 +450,7 @@ final class AppModel: ObservableObject {
             if configuration.selectedPostgreSQL != .none { try await prepareAndStartPostgreSQL() }
             let phpRuntimes = requiredPHPRuntimes
             for runtimeID in phpRuntimes.sorted() { try await startPHP(runtimeID: runtimeID) }
-            try verifyLegacyDatabaseCompatibilityIfNeeded()
+            try await verifyLegacyDatabaseCompatibilityIfNeeded()
             try await validateWebConfigurations()
             await supervisor.stop(configuration.selectedWebServer == .apache ? .nginx : .apache)
             if configuration.selectedWebServer == .apache { try await startApache() }
@@ -801,11 +801,7 @@ final class AppModel: ObservableObject {
         }
         if serviceIsRunning(.nginx) {
             try await validateWebConfigurations()
-            let executable = runtimeDirectory("nginx-1.30").appendingPathComponent("sbin/nginx")
-            let arguments = ["-p", paths.generatedNginx.path + "/", "-c", paths.generatedNginx.appendingPathComponent("nginx.conf").path, "-s", "reload"]
-            let environment = runtimeEnvironment
-            let runner = runner
-            try await Task.detached { _ = try runner.runChecked(executable: executable, arguments: arguments, environment: environment) }.value
+            try await reloadNginx()
         }
     }
 
@@ -926,6 +922,7 @@ final class AppModel: ObservableObject {
     }
 
     func importRuntimePack(from archive: URL) async {
+        guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
         do {
@@ -984,6 +981,7 @@ final class AppModel: ObservableObject {
     }
 
     func exportDatabase(to destination: URL, postgreSQL: Bool = false) async {
+        guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
         do {
@@ -1004,6 +1002,7 @@ final class AppModel: ObservableObject {
     }
 
     func importDatabase(from source: URL, postgreSQL: Bool = false) async {
+        guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
         do {
@@ -1181,8 +1180,7 @@ final class AppModel: ObservableObject {
             checks.append((runtimeDirectory("apache-2.4").appendingPathComponent("bin/httpd"),
                 ["-t", "-f", paths.generatedApache.appendingPathComponent("httpd.conf").path]))
         } else {
-            checks.append((runtimeDirectory("nginx-1.30").appendingPathComponent("sbin/nginx"),
-                ["-t", "-p", paths.generatedNginx.path + "/", "-c", paths.generatedNginx.appendingPathComponent("nginx.conf").path]))
+            checks.append((runtimeDirectory("nginx-1.30").appendingPathComponent("sbin/nginx"), ["-t"] + nginxArguments))
         }
         for id in requiredPHPRuntimes {
             checks.append((runtimeDirectory(id).appendingPathComponent("sbin/php-fpm"),
@@ -1201,9 +1199,25 @@ final class AppModel: ObservableObject {
     private func reloadApache() async throws {
         let executable = runtimeDirectory("apache-2.4").appendingPathComponent("bin/httpd")
         let arguments = ["-k", "graceful", "-f", paths.generatedApache.appendingPathComponent("httpd.conf").path]
+        try await runDetached(executable, arguments)
+    }
+
+    private var nginxArguments: [String] {
+        ["-p", paths.generatedNginx.path + "/", "-c", paths.generatedNginx.appendingPathComponent("nginx.conf").path]
+    }
+
+    private func reloadNginx() async throws {
+        try await runDetached(runtimeDirectory("nginx-1.30").appendingPathComponent("sbin/nginx"), nginxArguments + ["-s", "reload"])
+    }
+
+    /// Runs a runtime command off the main actor so the window stays
+    /// responsive while it waits; throws on a non-zero exit.
+    private func runDetached(_ executable: URL, _ arguments: [String], timeout: TimeInterval = 60) async throws {
         let environment = runtimeEnvironment
         let runner = runner
-        try await Task.detached { _ = try runner.runChecked(executable: executable, arguments: arguments, environment: environment) }.value
+        try await Task.detached {
+            _ = try runner.runChecked(executable: executable, arguments: arguments, environment: environment, timeout: timeout)
+        }.value
     }
 
     private func prepareCertificatesAndPrivilegedState() async throws {
@@ -1229,17 +1243,12 @@ final class AppModel: ObservableObject {
         helperInstalled = true
     }
 
-    private func verifyLegacyDatabaseCompatibilityIfNeeded() throws {
+    private func verifyLegacyDatabaseCompatibilityIfNeeded() async throws {
         guard configuration.selectedDatabase == .mysql84,
               configuration.sites.contains(where: { $0.phpRuntimeID == "php-7.4" }) else { return }
         let php = runtimeDirectory("php-7.4").appendingPathComponent("bin/php")
         let code = #"mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT); $db = new mysqli('127.0.0.1', 'root', 'root', '', \#(configuration.ports.mysqlListen)); $db->query('SELECT 1');"#
-        _ = try runner.runChecked(
-            executable: php,
-            arguments: ["-c", paths.generatedPHP.appendingPathComponent("php-7.4.ini").path, "-r", code],
-            environment: runtimeEnvironment,
-            timeout: 30
-        )
+        try await runDetached(php, ["-c", paths.generatedPHP.appendingPathComponent("php-7.4.ini").path, "-r", code], timeout: 30)
     }
 
     private func startApache() async throws {
@@ -1256,7 +1265,8 @@ final class AppModel: ObservableObject {
     private func startPHP(runtimeID: String) async throws {
         let kind = ServiceKind(rawValue: runtimeID)!
         if await supervisor.state(for: kind).phase == .running { return }
-        try CertificateManager(paths: paths, openssl: runtimeDirectory("openssl-3.5").appendingPathComponent("bin/openssl")).refreshTrustBundle()
+        let certificates = certificateManager
+        try await Task.detached { try certificates.refreshTrustBundle() }.value
         let sites = configuration.sites.filter { $0.phpRuntimeID == runtimeID }
         let probe: ReadinessProbe = sites.first.map { .fileExists(paths.phpSocket(runtimeID: runtimeID, siteID: $0.id)) }
             ?? .fileExists(paths.sockets.appendingPathComponent(runtimeID == "php-8.5" ? "php-8.5-management.sock" : "\(runtimeID)-default.sock"))
@@ -1416,8 +1426,8 @@ final class AppModel: ObservableObject {
 
     private func startNginx() async throws {
         let executable = runtimeDirectory("nginx-1.30").appendingPathComponent("sbin/nginx")
-        let arguments = ["-p", paths.generatedNginx.path + "/", "-c", paths.generatedNginx.appendingPathComponent("nginx.conf").path]
-        _ = try runner.runChecked(executable: executable, arguments: ["-t"] + arguments, environment: runtimeEnvironment)
+        let arguments = nginxArguments
+        try await runDetached(executable, ["-t"] + arguments)
         try await supervisor.start(ServiceSpecification(kind: .nginx, executable: executable, arguments: arguments, environment: runtimeEnvironment,
             logFile: paths.logs.appendingPathComponent("nginx.log"), readinessProbe: .tcpLoopback(port: configuration.ports.webHTTPSListen)))
     }
@@ -1525,10 +1535,7 @@ final class AppModel: ObservableObject {
                 if serviceIsRunning(.apache) { try await validateWebConfigurations(); try await reloadApache() }
                 if serviceIsRunning(.nginx) {
                     try await validateWebConfigurations()
-                    let executable = runtimeDirectory("nginx-1.30").appendingPathComponent("sbin/nginx")
-                    let arguments = ["-p", paths.generatedNginx.path + "/", "-c", paths.generatedNginx.appendingPathComponent("nginx.conf").path, "-s", "reload"]
-                    let environment = runtimeEnvironment; let runner = runner
-                    try await Task.detached { _ = try runner.runChecked(executable: executable, arguments: arguments, environment: environment) }.value
+                    try await reloadNginx()
                 }
                 if hostname == "postgresql.localhost", serviceIsRunning(.postgresql18) { try await supervisor.reload(.postgresql18) }
             }

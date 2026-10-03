@@ -151,7 +151,9 @@ struct PrivilegedHelperClient: @unchecked Sendable {
             guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
                 gate.fail(error)
             }) as? PrivilegedHelperXPCProtocol else {
-                continuation.resume(throwing: CocoaError(.featureUnsupported))
+                // Through the gate: the timeout above also completes it, and a
+                // continuation must resume exactly once.
+                gate.fail(CocoaError(.featureUnsupported))
                 return
             }
             connection.resume()
