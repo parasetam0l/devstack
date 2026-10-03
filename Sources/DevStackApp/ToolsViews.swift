@@ -244,7 +244,7 @@ struct LogsView: View {
             HStack(spacing: 8) {
                 Picker("Service", selection: $model.selectedLogService) {
                     ForEach(ServiceKind.allCases) { service in Text(service.displayName).tag(service) }
-                }.pickerStyle(.menu).fixedSize()
+                }.pickerStyle(.menu).tint(.primary).fixedSize()
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField("Filter output", text: $state.filter).textFieldStyle(.plain)

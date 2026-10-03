@@ -99,6 +99,7 @@ private struct ServiceControl<Selector: View>: View {
             Image(systemName: service.icon).foregroundStyle(.secondary).frame(width: 16)
             Text(title).font(.system(size: 12, weight: .medium)).lineLimit(1).frame(width: 80, alignment: .leading)
             selector.pickerStyle(.menu).labelsHidden().controlSize(.small)
+                .tint(.primary)
                 .disabled(model.isBusy || state.phase == .running)
                 .help(state.phase == .running ? "Stop the service before changing its version." : "Change \(title.lowercased())")
                 .frame(width: 140, alignment: .leading)
@@ -193,6 +194,7 @@ struct PHPVersionPicker: View {
                 Text("PHP \(runtime.version)").tag(runtime.id)
             }
         }.pickerStyle(.menu)
+            .tint(.primary)
             .disabled(model.isBusy || defaultRuntimeIsRunning)
             .help(defaultRuntimeIsRunning ? "Stop PHP before changing the default version." : "Choose the default PHP runtime.")
     }

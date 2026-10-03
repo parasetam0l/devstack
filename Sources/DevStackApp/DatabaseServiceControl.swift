@@ -37,7 +37,7 @@ struct DatabaseServiceControl: View {
         return HStack(spacing: 7) {
             Image(systemName: "externaldrive").foregroundStyle(.secondary).frame(width: 16)
             Text(title).fontWeight(.medium).lineLimit(1).frame(width: 80, alignment: .leading)
-            selector().pickerStyle(.menu).labelsHidden().controlSize(.small)
+            selector().pickerStyle(.menu).labelsHidden().controlSize(.small).tint(.primary)
                 .disabled(model.isBusy || active)
                 .help(active ? "Stop the service before changing its version." : "Change the \(title.lowercased()) version.")
                 .frame(width: 140, alignment: .leading)

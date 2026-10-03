@@ -162,7 +162,7 @@ struct SiteEditor: View {
                     Text("PHP version").foregroundStyle(.secondary)
                     Picker("PHP version", selection: phpRuntimeBinding) {
                         ForEach(model.availablePHPRuntimes) { runtime in Text("PHP \(runtime.version)").tag(runtime.id) }
-                    }.labelsHidden().frame(maxWidth: 180, alignment: .leading)
+                    }.labelsHidden().tint(.primary).frame(maxWidth: 180, alignment: .leading)
                 }
                 GridRow {
                     Text("SSL").foregroundStyle(.secondary)
