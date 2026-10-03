@@ -22,6 +22,9 @@ public struct ConfigurationRenderer: Sendable {
     public let localNetworkAccess: Bool
     public let userName: String
     public let groupName: String
+    /// IANA zone for PHP's date.timezone; defaults to the Mac's zone so dates
+    /// in pages and logs match the clock the developer reads.
+    public let timeZone: String
 
     public init(
         paths: DevStackPaths,
@@ -30,7 +33,8 @@ public struct ConfigurationRenderer: Sendable {
         ports: ServicePorts = ServicePorts(),
         localNetworkAccess: Bool = false,
         userName: String = NSUserName(),
-        groupName: String = "staff"
+        groupName: String = "staff",
+        timeZone: String = TimeZone.current.identifier
     ) {
         self.paths = paths
         self.runtimeRoot = runtimeRoot
@@ -39,6 +43,7 @@ public struct ConfigurationRenderer: Sendable {
         self.localNetworkAccess = localNetworkAccess
         self.userName = userName
         self.groupName = groupName
+        self.timeZone = timeZone
     }
 
     private var listenDirectives: String {
@@ -186,7 +191,7 @@ public struct ConfigurationRenderer: Sendable {
         display_errors=On
         log_errors=On
         error_log=\(quote(paths.logs.appendingPathComponent("\(runtimeID)-php.log").path))
-        date.timezone=UTC
+        date.timezone=\(phpTimeZone)
         openssl.cafile=\(quote(paths.certificates.appendingPathComponent("trusted-roots.pem").path))
         curl.cainfo=\(quote(paths.certificates.appendingPathComponent("trusted-roots.pem").path))
         memory_limit=256M
@@ -208,6 +213,11 @@ public struct ConfigurationRenderer: Sendable {
 
         \(settings.joined(separator: "\n"))
         """
+    }
+
+    /// The configured zone when it is a plain IANA identifier, otherwise UTC.
+    private var phpTimeZone: String {
+        timeZone.range(of: "^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$", options: .regularExpression) != nil ? timeZone : "UTC"
     }
 
     public func mysqlConfiguration(engine: DatabaseEngine, baseDirectory: URL) -> String {
@@ -365,7 +375,9 @@ public struct ConfigurationRenderer: Sendable {
         var result = ""
         if let httpPort {
             let httpBehavior = site.tlsEnabled
-                ? "Redirect permanent / https://\(hostname)\(ports.webHTTPS == 443 ? "" : ":\(ports.webHTTPS)")/"
+                // Temporary: browsers cache a permanent redirect indefinitely,
+                // so turning TLS off for the site would keep sending them to HTTPS.
+                ? "Redirect temp / https://\(hostname)\(ports.webHTTPS == 443 ? "" : ":\(ports.webHTTPS)")/"
                 : "DocumentRoot \(root)\n\(directory)"
             result = """
             <VirtualHost *:\(httpPort)>
