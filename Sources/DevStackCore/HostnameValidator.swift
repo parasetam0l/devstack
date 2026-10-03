@@ -8,6 +8,7 @@ public enum HostnameValidationError: LocalizedError, Equatable, Sendable {
     case wildcard
     case nonASCII
     case duplicate
+    case reserved
 
     public var errorDescription: String? {
         switch self {
@@ -18,11 +19,24 @@ public enum HostnameValidationError: LocalizedError, Equatable, Sendable {
         case .wildcard: "Wildcard hostnames are not supported."
         case .nonASCII: "Hostnames must use ASCII characters."
         case .duplicate: "A site already uses this hostname."
+        case .reserved: "This hostname is reserved for DevStack's built-in tools."
         }
     }
 }
 
 public enum HostnameValidator {
+    /// Hostnames of the built-in tool vhosts. They always get host mappings,
+    /// certificates and DNS answers, so no site may claim them.
+    public static let managementHostnames = ["phpmyadmin.localhost", "mailpit.localhost", "adminer.localhost", "postgresql.localhost"]
+
+    /// Validates a site hostname: the general rules, plus the management
+    /// hostnames that belong to DevStack itself.
+    public static func validateSite(_ input: String, existing: some Sequence<String> = []) throws -> String {
+        let hostname = try validate(input, existing: existing)
+        guard !managementHostnames.contains(hostname) else { throw HostnameValidationError.reserved }
+        return hostname
+    }
+
     public static func normalize(_ input: String) -> String {
         var value = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         while value.hasSuffix(".") { value.removeLast() }

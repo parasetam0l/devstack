@@ -178,6 +178,20 @@ enum DevStackCoreChecks {
         let nginxDefault = nginx.range(of: "server_name localhost 127.0.0.1 _;")
         let nginxExample = nginx.range(of: "server_name example.test;")
         try expect(nginxDefault != nil && nginxExample != nil && nginxDefault!.lowerBound < nginxExample!.lowerBound, "Default localhost server is not first in nginx")
+        let hiddenPathRule = #"<LocationMatch "/\.(?!well-known/)">"#
+        // Every vhost serving a site directory carries the rule: two for localhost
+        // (HTTP and HTTPS) and one for the HTTPS-only example site.
+        try expect(withDefault.components(separatedBy: hiddenPathRule).count - 1 == 3, "Apache does not deny hidden paths in every site vhost")
+        let nginxHiddenDeny = nginx.range(of: #"location ~ /\.(?!well-known/) { deny all; }"#)
+        let nginxPHP = nginx.range(of: #"location ~ \.php$"#)
+        try expect(nginxHiddenDeny != nil && nginxPHP != nil && nginxHiddenDeny!.lowerBound < nginxPHP!.lowerBound, "nginx must deny hidden paths before handing .php files to PHP")
+        try expect((try? HostnameValidator.validateSite("app.test")) == "app.test", "A regular site hostname was rejected")
+        do {
+            _ = try HostnameValidator.validateSite("PhpMyAdmin.localhost.")
+            throw CheckFailure(description: "A site claimed a management hostname")
+        } catch HostnameValidationError.reserved {
+            // Expected.
+        }
         let lanRenderer = ConfigurationRenderer(paths: paths, runtimeRoot: paths.builtInRuntimes, localNetworkAccess: true)
         let lanApache = try lanRenderer.apacheConfiguration(sites: [site, defaultSite])
         try expect(lanApache.contains("Listen 0.0.0.0:\(ServicePorts.webHTTPFallback)") && lanApache.contains("Require ip 127.0.0.1 ::1 10.0.0.0/8"), "Local network Apache listeners or access rules were not rendered")

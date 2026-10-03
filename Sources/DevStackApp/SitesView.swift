@@ -219,7 +219,7 @@ struct SiteEditor: View {
     private var validationError: String? {
         guard !editor.site.hostname.isEmpty else { return nil }
         do {
-            _ = try HostnameValidator.validate(editor.site.hostname, existing: model.configuration.sites.filter { $0.id != editor.site.id }.map(\.hostname))
+            _ = try HostnameValidator.validateSite(editor.site.hostname, existing: model.configuration.sites.filter { $0.id != editor.site.id }.map(\.hostname))
             return nil
         } catch { return error.localizedDescription }
     }

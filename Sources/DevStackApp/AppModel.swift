@@ -338,7 +338,7 @@ final class AppModel: ObservableObject {
         if configuration.sites.contains(where: { $0.id == site.id && $0.hostname == "localhost" }) {
             site.hostname = "localhost"
         }
-        site.hostname = try HostnameValidator.validate(site.hostname, existing: configuration.sites.filter { $0.id != site.id }.map(\.hostname))
+        site.hostname = try HostnameValidator.validateSite(site.hostname, existing: configuration.sites.filter { $0.id != site.id }.map(\.hostname))
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: site.documentRoot, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: site.documentRoot])
@@ -708,7 +708,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    static let managementHostnames = ["phpmyadmin.localhost", "mailpit.localhost", "adminer.localhost", "postgresql.localhost"]
+    static let managementHostnames = HostnameValidator.managementHostnames
 
     /// Hostnames that need /etc/hosts entries (.localhost resolves without edits).
     var hostnamesNeedingHostsFile: [String] {

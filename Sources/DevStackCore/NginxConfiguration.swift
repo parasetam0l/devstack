@@ -36,13 +36,15 @@ extension ConfigurationRenderer {
                 access_log \(try nginxQuote(defaultSite.logs.access));
                 error_log \(try nginxQuote(defaultSite.logs.error));
                 location / { try_files $uri $uri/ /index.php?$query_string; }
+                # Regex locations match in order: deny hidden paths first so a
+                # PHP file inside .git or similar is never executed.
+                location ~ /\\.(?!well-known/) { deny all; }
                 location ~ \\.php$ {
                     try_files $uri =404;
                     include \(try nginxQuote(root.appendingPathComponent("conf/fastcgi_params").path));
                     fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
                     fastcgi_pass \(socket);
                 }
-                location ~ /\\. { deny all; }
             """
             servers.append("""
             server {
@@ -70,13 +72,15 @@ extension ConfigurationRenderer {
                 access_log \(try nginxQuote(site.logs.access));
                 error_log \(try nginxQuote(site.logs.error));
                 location / { try_files $uri $uri/ /index.php?$query_string; }
+                # Regex locations match in order: deny hidden paths first so a
+                # PHP file inside .git or similar is never executed.
+                location ~ /\\.(?!well-known/) { deny all; }
                 location ~ \\.php$ {
                     try_files $uri =404;
                     include \(try nginxQuote(root.appendingPathComponent("conf/fastcgi_params").path));
                     fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
                     fastcgi_pass \(socket);
                 }
-                location ~ /\\. { deny all; }
             """
             if site.tlsEnabled {
                 return """
@@ -119,13 +123,13 @@ extension ConfigurationRenderer {
                 root \(try nginxQuote(host == "adminer.localhost" ? paths.generatedAdminer.path : runtimeDirectory(runtimeID).path));
                 index index.php;
                 location / { try_files $uri $uri/ =404; }
+                location ~ /\\. { deny all; }
                 location ~ \\.php$ {
                     try_files $uri =404;
                     include \(try nginxQuote(root.appendingPathComponent("conf/fastcgi_params").path));
                     fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
                     fastcgi_pass \(try nginxQuote("unix:" + paths.sockets.appendingPathComponent("php-8.5-\(pool).sock").path));
                 }
-                location ~ /\\. { deny all; }
             }
             """)
         }

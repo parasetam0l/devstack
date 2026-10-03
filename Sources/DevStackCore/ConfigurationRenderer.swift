@@ -320,6 +320,10 @@ public struct ConfigurationRenderer: Sendable {
                     SetHandler "proxy:unix:\(socket)|fcgi://localhost/"
                 </FilesMatch>
             </Directory>
+            # Hidden paths (.env, .git, .htaccess) stay private, as with nginx.
+            <LocationMatch "/\\.(?!well-known/)">
+                Require all denied
+            </LocationMatch>
         """
 
         // The default site always serves content on both ports (no redirect)
