@@ -8,9 +8,13 @@ import Network
 /// other query is relayed unchanged to the system resolvers, so pointing a
 /// phone at this server does not change how the rest of the internet resolves.
 /// Only loopback and private-network clients are served.
+///
+/// All mutable state lives on `queue`: the public entry points hop onto it,
+/// and every listener and connection handler already runs there.
 public final class LocalDNSResponder: @unchecked Sendable {
     private let queue = DispatchQueue(label: "app.devstack.desktop.dns")
     private let port: NWEndpoint.Port
+    private let idleTimeout: TimeInterval
     private var udpListener: NWListener?
     private var tcpListener: NWListener?
     private var failure: String?
@@ -18,44 +22,59 @@ public final class LocalDNSResponder: @unchecked Sendable {
     private var configuration = DNSConfiguration(enabled: false)
     private var managedNames: Set<String> = []
     private var upstreams: [String] = []
+    private var flows: [ObjectIdentifier: ClientFlow] = [:]
 
-    public init(port: UInt16 = 53) {
+    /// `idleTimeout` closes client flows that stop sending queries. Phones send
+    /// most UDP queries from a fresh source port, so without it every query
+    /// would leave a flow behind for the life of the helper.
+    public init(port: UInt16 = 53, idleTimeout: TimeInterval = 10) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 53
+        self.idleTimeout = idleTimeout
     }
 
-    public var isEnabled: Bool { (udpListener != nil || tcpListener != nil) && failure == nil }
-    public var answerAddress: String? { isEnabled ? configuration.answerAddress : nil }
-    public var failureDescription: String? { failure }
-    public var listeningPort: UInt16? { udpListener?.port?.rawValue ?? tcpListener?.port?.rawValue }
+    public var isEnabled: Bool { queue.sync { enabledOnQueue } }
+    public var answerAddress: String? { queue.sync { enabledOnQueue ? configuration.answerAddress : nil } }
+    public var failureDescription: String? { queue.sync { failure } }
+    public var listeningPort: UInt16? { queue.sync { udpListener?.port?.rawValue ?? tcpListener?.port?.rawValue } }
+    /// Open UDP and TCP client flows.
+    public var activeFlowCount: Int { queue.sync { flows.count } }
+
+    private var enabledOnQueue: Bool { (udpListener != nil || tcpListener != nil) && failure == nil }
 
     /// Applies the configuration. Listeners are kept while the service stays
     /// enabled so changing hostnames never races a rebind of port 53.
     public func apply(_ configuration: DNSConfiguration, upstreams: [String]) throws {
-        self.configuration = configuration
-        self.managedNames = Set(configuration.hostnames.map { $0.lowercased() })
-        self.upstreams = upstreams
-        guard configuration.enabled else {
-            stop()
-            return
-        }
-        if udpListener != nil || tcpListener != nil {
-            failure = nil
-            return
-        }
-        do {
-            let udp = try makeListener(proto: .udp)
-            let tcp = try makeListener(proto: .tcp)
-            self.udpListener = udp
-            self.tcpListener = tcp
-            self.failure = nil
-        } catch {
-            stop()
-            self.failure = error.localizedDescription
-            throw error
+        try queue.sync {
+            self.configuration = configuration
+            self.managedNames = Set(configuration.hostnames.map { $0.lowercased() })
+            self.upstreams = upstreams
+            guard configuration.enabled else {
+                stopOnQueue()
+                return
+            }
+            if udpListener != nil || tcpListener != nil {
+                failure = nil
+                return
+            }
+            do {
+                let udp = try makeListener(proto: .udp)
+                let tcp = try makeListener(proto: .tcp)
+                self.udpListener = udp
+                self.tcpListener = tcp
+                self.failure = nil
+            } catch {
+                stopOnQueue()
+                self.failure = error.localizedDescription
+                throw error
+            }
         }
     }
 
     public func stop() {
+        queue.sync { stopOnQueue() }
+    }
+
+    private func stopOnQueue() {
         // Retire the listeners before cancelling so their asynchronous
         // .cancelled updates are not mistaken for unexpected failures when a
         // new configuration starts listeners again right away.
@@ -66,6 +85,42 @@ public final class LocalDNSResponder: @unchecked Sendable {
         udpListener = nil
         tcpListener = nil
         failure = nil
+        for flow in flows.values { flow.connection.cancel() }
+    }
+
+    // MARK: - Client flows
+
+    /// Only touched on `queue`, so no locking is required.
+    private final class ClientFlow: @unchecked Sendable {
+        let connection: NWConnection
+        var generation = 0
+
+        init(connection: NWConnection) {
+            self.connection = connection
+        }
+    }
+
+    private func track(_ connection: NWConnection) {
+        let key = ObjectIdentifier(connection)
+        flows[key] = ClientFlow(connection: connection)
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed, .cancelled: self?.flows.removeValue(forKey: key)
+            default: break
+            }
+        }
+        touch(connection)
+    }
+
+    /// Restarts the idle timer of a flow; a flow that stays quiet is closed.
+    private func touch(_ connection: NWConnection) {
+        guard let flow = flows[ObjectIdentifier(connection)] else { return }
+        flow.generation += 1
+        let generation = flow.generation
+        queue.asyncAfter(deadline: .now() + idleTimeout) { [weak flow] in
+            guard let flow, flow.generation == generation else { return }
+            flow.connection.cancel()
+        }
     }
 
     private enum Proto { case udp, tcp }
@@ -108,6 +163,7 @@ public final class LocalDNSResponder: @unchecked Sendable {
             connection.cancel()
             return
         }
+        track(connection)
         connection.start(queue: queue)
         receiveUDP(on: connection)
     }
@@ -125,6 +181,7 @@ public final class LocalDNSResponder: @unchecked Sendable {
                 self.receiveUDP(on: connection)
                 return
             }
+            self.touch(connection)
             self.respondUDP(to: data, on: connection)
         }
     }
@@ -159,6 +216,7 @@ public final class LocalDNSResponder: @unchecked Sendable {
             connection.cancel()
             return
         }
+        track(connection)
         connection.start(queue: queue)
         receiveTCPLength(on: connection)
     }
@@ -177,6 +235,7 @@ public final class LocalDNSResponder: @unchecked Sendable {
         connection.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] data, _, _, error in
             guard let self else { connection.cancel(); return }
             guard error == nil, let data, data.count == length else { connection.cancel(); return }
+            self.touch(connection)
             self.respondTCP(to: data, on: connection)
         }
     }

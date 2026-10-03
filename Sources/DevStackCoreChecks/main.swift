@@ -321,7 +321,7 @@ enum DevStackCoreChecks {
                 DispatchQueue.global().asyncAfter(deadline: .now() + 3) { gate.fail(URLError(.timedOut)) }
             }
         }
-        let responder = LocalDNSResponder(port: 15453)
+        let responder = LocalDNSResponder(port: 15453, idleTimeout: 0.5)
         let liveAddress = LocalNetwork.primaryIPv4Address() ?? "192.168.1.50"
         try responder.apply(DNSConfiguration(enabled: true, hostnames: ["site.test"], answerAddress: liveAddress), upstreams: [])
         defer { responder.stop() }
@@ -335,6 +335,9 @@ enum DevStackCoreChecks {
         try expect(liveNegative[3] & 0x0F == 3, "Unmanaged .test name did not answer NXDOMAIN")
         let liveRefusal = try await udpRoundTrip(dnsQuery("example.com", DNSMessage.typeA, 0x3333), port: 15453)
         try expect(liveRefusal[3] & 0x0F == 2, "DNS responder did not fail closed without upstreams")
+        try expect(responder.activeFlowCount > 0, "DNS responder did not track its client flows")
+        try await Task.sleep(for: .milliseconds(1_200))
+        try expect(responder.activeFlowCount == 0, "DNS responder kept idle client flows open")
 
         let forwarder = LoopbackForwarder()
         let forwardedPort = try ephemeralLoopbackPort()
