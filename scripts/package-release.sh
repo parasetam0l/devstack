@@ -5,14 +5,32 @@ repository_root="$(cd "$(dirname "$0")/.." && pwd)"
 runtime_root="${DEVSTACK_RUNTIME_OUTPUT:-$repository_root/.build/Runtimes}"
 release_root="${DEVSTACK_RELEASE_ROOT:-$repository_root/.build/release}"
 build_stamp="$(date +%Y%m%d-%H%M%S)-$$"
-staging_root="$release_root/staging/$build_stamp"
-application="$staging_root/DevStack.app"
 identity="${DEVSTACK_SIGNING_IDENTITY:--}"
 release_version="$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$repository_root/Packaging/Info.plist")"
 release_name="DevStack-$release_version-arm64.dmg"
+# Ad-hoc output lives apart from Developer ID releases, so a development run
+# never rotates a notarized app or image of the same version away.
+if [[ "$identity" == "-" ]]; then
+    release_root="$release_root/adhoc"
+    release_name="DevStack-$release_version-arm64-adhoc.dmg"
+fi
+staging_root="$release_root/staging/$build_stamp"
+application="$staging_root/DevStack.app"
 
 [[ "$(uname -m)" == "arm64" ]] || { echo "Release packaging requires Apple Silicon." >&2; exit 69; }
 [[ -d "$runtime_root" ]] || { echo "Runtime payload is missing: $runtime_root" >&2; exit 66; }
+if [[ "$identity" == "-" && -n "${DEVSTACK_NOTARY_PROFILE:-}" ]]; then
+    echo "Notarization needs a Developer ID identity; set DEVSTACK_SIGNING_IDENTITY." >&2
+    exit 64
+fi
+
+# The layout image is attached read-write while the DMG is assembled; never
+# leave it mounted when a later step fails.
+layout_mount=""
+detach_layout_image() {
+    if [[ -n "$layout_mount" ]]; then /usr/bin/hdiutil detach "$layout_mount" -force >/dev/null 2>&1 || true; fi
+}
+trap detach_layout_image EXIT
 
 runtime_ids=(apache-2.4 nginx-1.30 php-8.4 php-8.5 mysql-8.4 postgresql-18 openssl-3.5 mailpit-1.31.1 phpmyadmin-5.2.3 adminer-6.1.1 composer-2.10.3 imagemagick-7.1)
 # Optional legacy payloads enter the release only after their feasibility gates pass.
@@ -52,7 +70,6 @@ for resource_bundle in "$products"/*.bundle; do
 done
 
 if [[ -d "$repository_root/ThirdPartyNotices" ]]; then cp -R "$repository_root/ThirdPartyNotices" "$application/Contents/Resources/ThirdPartyNotices"; fi
-"$repository_root/scripts/generate-sbom.py" "$application/Contents/Resources/Runtimes" "$application/Contents/Resources/SBOM/runtime-sbom.cdx.json"
 source_cache="${DEVSTACK_SOURCE_CACHE:-$repository_root/.build/runtime-cache}"
 if [[ -d "$source_cache" ]]; then cp -R "$source_cache" "$application/Contents/Resources/CorrespondingSources"; fi
 mkdir -p "$application/Contents/Resources/CorrespondingSources/DevStackPatches"
@@ -64,11 +81,18 @@ if [[ "$identity" == "-" ]]; then
     signing_options=(--timestamp=none)
     echo "No Developer ID identity configured: producing an ad-hoc development build." >&2
 fi
+# Listed into a file first: a failing lister inside process substitution would
+# go unnoticed by set -e and leave the payload unsigned.
+mach_o_list="$staging_root/mach-o-files"
+/usr/bin/python3 "$repository_root/scripts/mach-o-files.py" "$application/Contents/Resources/Runtimes" > "$mach_o_list"
 while IFS= read -r -d '' binary; do
     if /usr/bin/file "$binary" | /usr/bin/grep -q 'Mach-O'; then
         /usr/bin/codesign --force "${signing_options[@]}" --sign "$identity" "$binary"
     fi
-done < <(/usr/bin/python3 "$repository_root/scripts/mach-o-files.py" "$application/Contents/Resources/Runtimes")
+done < "$mach_o_list"
+rm -f "$mach_o_list"
+# Signing rewrites every Mach-O, so the SBOM hashes the signed payload.
+"$repository_root/scripts/generate-sbom.py" "$application/Contents/Resources/Runtimes" "$application/Contents/Resources/SBOM/runtime-sbom.cdx.json"
 
 /usr/bin/codesign --force "${signing_options[@]}" --entitlements "$repository_root/Packaging/Helper.entitlements" --sign "$identity" "$application/Contents/Library/LaunchServices/DevStackPrivilegedHelper"
 /usr/bin/codesign --force "${signing_options[@]}" --entitlements "$repository_root/Packaging/DevStack.entitlements" --sign "$identity" "$application"
@@ -93,6 +117,48 @@ EOF
     echo "Signed: $identity (Team $app_team). App and helper teams match." >&2
 fi
 
+# Submits an artifact and waits for Apple's verdict. Anything but Accepted
+# stops the release. The --wait client can time out on a slow connection even
+# though the submission finishes, so the submission id is polled instead of
+# losing the work.
+notarize() {
+    local artifact="$1" submit_output submission_id submission_status=""
+    if submit_output="$(xcrun notarytool submit "$artifact" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" --wait 2>&1)"; then
+        printf '%s\n' "$submit_output"
+        submission_status="$(printf '%s\n' "$submit_output" | /usr/bin/sed -n 's/^[[:space:]]*status: //p' | /usr/bin/tail -n 1)"
+    else
+        printf '%s\n' "$submit_output" >&2
+        echo "Waiting for the submission after a client timeout..." >&2
+    fi
+    submission_id="$(printf '%s\n' "$submit_output" | /usr/bin/sed -n 's/^[[:space:]]*id: //p' | /usr/bin/head -n 1)"
+    [[ -n "$submission_id" ]] || { echo "Notarization failed without a submission id." >&2; exit 71; }
+    for _ in $(seq 1 80); do
+        case "$submission_status" in
+            Accepted) return 0 ;;
+            Invalid|Rejected)
+                xcrun notarytool log "$submission_id" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" >&2 || true
+                echo "Notarization rejected: $submission_id" >&2
+                exit 71
+                ;;
+        esac
+        sleep 15
+        submission_status="$(xcrun notarytool info "$submission_id" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" 2>/dev/null | /usr/bin/awk '/status:/ {print $2}' | /usr/bin/head -n 1)"
+    done
+    echo "Notarization did not finish: $submission_id" >&2
+    exit 71
+}
+
+# Notarize and staple the app before it goes into the image, so the copy users
+# drag to Applications carries its own ticket and passes Gatekeeper offline.
+if [[ -n "${DEVSTACK_NOTARY_PROFILE:-}" ]]; then
+    app_archive="$staging_root/DevStack-notarization.zip"
+    /usr/bin/ditto -c -k --keepParent "$application" "$app_archive"
+    notarize "$app_archive"
+    rm -f "$app_archive"
+    xcrun stapler staple "$application"
+    /usr/sbin/spctl --assess --type execute --verbose=2 "$application"
+fi
+
 dmg="$staging_root/$release_name"
 dmg_root="$staging_root/dmg-root"
 rw_dmg="$staging_root/DevStack-layout.dmg"
@@ -108,41 +174,18 @@ ln -s /Applications "$dmg_root/Applications"
 # never depends on Finder automation.
 /usr/bin/hdiutil create -srcfolder "$dmg_root" -volname DevStack -fs HFS+ -format UDRW -ov "$rw_dmg" >/dev/null
 /usr/bin/hdiutil attach "$rw_dmg" -nobrowse -readwrite -mountpoint "$mount_point" >/dev/null
+layout_mount="$mount_point"
 /usr/bin/python3 "$repository_root/scripts/write-dmg-dsstore.py" \
     "$mount_point" "$repository_root/Packaging/dmg-background.tiff" \
     "240,180,660,420" 128 13 "DevStack.app:165:200" "Applications:495:200"
 /usr/bin/hdiutil detach "$mount_point" >/dev/null
+layout_mount=""
 /usr/bin/hdiutil convert "$rw_dmg" -format UDZO -o "$dmg" >/dev/null
 rm -rf "$dmg_root" "$rw_dmg" "$mount_point"
 /usr/bin/codesign --force "${signing_options[@]}" --sign "$identity" "$dmg"
 
 if [[ -n "${DEVSTACK_NOTARY_PROFILE:-}" ]]; then
-    # The --wait client can time out on a slow connection even though Apple
-    # accepted the submission; recover by polling the submission id instead of
-    # losing the finished image.
-    if ! submit_output="$(xcrun notarytool submit "$dmg" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" --wait 2>&1)"; then
-        printf '%s\n' "$submit_output" >&2
-        submission_id="$(printf '%s\n' "$submit_output" | /usr/bin/sed -n 's/^[[:space:]]*id: //p' | /usr/bin/head -n 1)"
-        [[ -n "$submission_id" ]] || { echo "Notarization failed without a submission id." >&2; exit 71; }
-        echo "Waiting for submission $submission_id after a client timeout..." >&2
-        submission_status=""
-        for _ in $(seq 1 80); do
-            submission_status="$(xcrun notarytool info "$submission_id" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" 2>/dev/null | /usr/bin/awk '/status:/ {print $2}' | /usr/bin/head -n 1)"
-            case "$submission_status" in
-                Accepted) break ;;
-                Invalid|Rejected)
-                    xcrun notarytool log "$submission_id" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" >&2 || true
-                    echo "Notarization rejected: $submission_id" >&2
-                    exit 71
-                    ;;
-            esac
-            sleep 15
-        done
-        [[ "$submission_status" == "Accepted" ]] || { echo "Notarization did not finish: $submission_id" >&2; exit 71; }
-    else
-        printf '%s\n' "$submit_output"
-    fi
-    xcrun stapler staple "$application"
+    notarize "$dmg"
     xcrun stapler staple "$dmg"
     /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 else
