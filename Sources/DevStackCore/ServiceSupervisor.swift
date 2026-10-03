@@ -171,8 +171,21 @@ public actor ServiceSupervisor {
         transition(service, to: .stopped)
     }
 
+    /// Front to back: the web servers stop taking requests before the PHP
+    /// pools, mail and databases behind them go away.
     public func stopAll() async {
-        for service in ServiceKind.allCases.reversed() { await stop(service) }
+        for service in ServiceKind.allCases.sorted(by: { Self.shutdownTier($0) < Self.shutdownTier($1) }) {
+            await stop(service)
+        }
+    }
+
+    private static func shutdownTier(_ service: ServiceKind) -> Int {
+        switch service {
+        case .apache, .nginx: 0
+        case .php74, .php84, .php85: 1
+        case .mailpit: 2
+        case .mysql57, .mysql84, .postgresql18: 3
+        }
     }
 
     public func reload(_ service: ServiceKind) throws {

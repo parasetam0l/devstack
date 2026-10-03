@@ -626,6 +626,7 @@ enum DevStackCoreChecks {
             appVersion: "0.1.0"
         )
         try expect(missingHelperReport.results.contains(where: { $0.id == "privileged-helper" && $0.severity == .warning }), "Doctor omitted missing helper")
+        try expect(missingHelperReport.results.contains(where: { $0.id == "ca-trust" && $0.severity == .warning }), "Doctor hid CA trust when the helper is missing")
 
         var optionalRuntime = executableManifest.runtime
         optionalRuntime.id = "mysql-5.7"

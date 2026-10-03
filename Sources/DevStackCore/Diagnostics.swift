@@ -68,6 +68,7 @@ public struct DevStackDoctor: Sendable {
         results.append(directoryResult(context.paths.applicationSupport, id: "application-support"))
         results.append(directoryResult(context.paths.logs, id: "logs"))
         results.append(helperResult(context))
+        results.append(caTrustResult(context))
         results.append(contentsOf: helperStatusResults(context.helperStatus, context: context))
         results.append(contentsOf: serviceReadinessResults(context.serviceStates))
         progress?("Checking ports and local domain mappings…")
@@ -135,13 +136,6 @@ public struct DevStackDoctor: Sendable {
                 remediation: status.portForwardingEnabled ? nil : (forwardingNeedsHelper ? "Start DevStack to enable its loopback-only forwarders." : nil)
             ),
             .init(
-                id: "ca-trust",
-                title: "Local CA trust",
-                severity: context.certificateTrusted ? .info : .warning,
-                evidence: context.certificateTrusted ? "The public DevStack CA is trusted for this user." : "The DevStack CA is not trusted for this user.",
-                remediation: context.certificateTrusted ? nil : "Trust the public local CA from the SSL tab; user trust needs no administrator password."
-            ),
-            .init(
                 id: "local-dns",
                 title: "Local DNS server",
                 severity: status.dnsFailure != nil ? .error : (status.dnsEnabled ? .info : (context.localNetworkAccess ? .warning : .info)),
@@ -153,6 +147,18 @@ public struct DevStackDoctor: Sendable {
                     : "Enable Local network access in Settings to serve DevStack hostnames to phones."))
             )
         ]
+    }
+
+    /// CA trust is independent of the helper: HTTPS on .localhost works
+    /// without it, so the result is reported either way.
+    private func caTrustResult(_ context: DiagnosticContext) -> DiagnosticResult {
+        .init(
+            id: "ca-trust",
+            title: "Local CA trust",
+            severity: context.certificateTrusted ? .info : .warning,
+            evidence: context.certificateTrusted ? "The public DevStack CA is trusted for this user." : "The DevStack CA is not trusted for this user.",
+            remediation: context.certificateTrusted ? nil : "Trust the public local CA from the SSL tab; user trust needs no administrator password."
+        )
     }
 
     private func serviceReadinessResults(_ states: [ServiceState]) -> [DiagnosticResult] {
