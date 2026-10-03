@@ -31,9 +31,9 @@ xcrun notarytool store-credentials DevStack \
 
 ## Compile
 
-```sh
-cd /Users/serkan/Desktop/localhost
+Run every command from the repository root.
 
+```sh
 swift build --jobs 2                  # debug
 swift build -c release --jobs 2       # release
 swift build --show-bin-path           # directory holding the built executables
@@ -90,23 +90,32 @@ tail -f .build/logs/package-latest.log
 
 The version comes from `Packaging/Info.plist`
 (`CFBundleShortVersionString` and `CFBundleVersion`); the release name is
-`DevStack-<version>-arm64.dmg`.
+`DevStack-<version>-arm64.dmg`. Without a signing identity the script makes an
+ad-hoc development image, `DevStack-<version>-arm64-adhoc.dmg`, under
+`.build/release/adhoc`, so it never replaces a notarized release.
 
 ### What the script does
 
 1. Validates Apple Silicon and that `.build/Runtimes` exists, then builds the
    release binaries and runs `DevStackCoreChecks`.
-2. Stages `DevStack.app`: Info.plist, icon, privileged helper, selected
-   runtimes, third-party notices, SBOM and corresponding sources.
+2. Stages `DevStack.app`: Info.plist, icon, privileged helper and the selected
+   runtimes.
 3. Audits the payload (`scripts/audit-runtime.sh`): ARM64 only, signed Mach-O,
    no package-manager paths, no build-machine paths, no forbidden RPATHs.
-4. Signs every bundled Mach-O, the helper and the app with the hardened runtime
-   and a secure timestamp; verifies the app and helper Team IDs match.
-5. Builds the branded DMG layout (background plus a `.DS_Store` written directly,
+4. Checks licence compliance (`scripts/collect-licenses.py check`): every
+   shipped component needs its notices and a verified source archive. A
+   Developer ID release stops here when anything is missing; an ad-hoc build
+   warns. The notices and only the shipped sources are copied into the app.
+5. Signs every bundled Mach-O, then writes the SBOM so it hashes the signed
+   files, then signs the helper and the app with the hardened runtime and a
+   secure timestamp; verifies the app and helper Team IDs match.
+6. With a notary profile: notarizes and staples the app and assesses it with
+   Gatekeeper, so the copy inside the image carries its own ticket.
+7. Builds the branded DMG layout (background plus a `.DS_Store` written directly,
    no Finder automation) and signs the image.
-6. Submits to the Apple notary service, waits, staples the app and the DMG, and
-   runs the Gatekeeper assessment.
-7. Moves the previous same-named artifacts into
+8. With a notary profile: notarizes and staples the DMG and assesses it. Every
+   submission must come back Accepted.
+9. Moves the previous same-named artifacts into
    `.build/out/Products/Release/previous/<stamp>/`.
 
 ### Environment variables
@@ -116,10 +125,10 @@ The version comes from `Packaging/Info.plist`
 | `DEVSTACK_SIGNING_IDENTITY` | `-` (ad-hoc) | Developer ID identity used for nested code, app and DMG. |
 | `DEVSTACK_NOTARY_PROFILE` | unset | `notarytool` keychain profile. Unset signs but does not notarize. |
 | `DEVSTACK_INCLUDE_LEGACY` | `0` | Include PHP 7.4 and MySQL 5.7 when their gates pass. |
-| `DEVSTACK_BUILD_JOBS` | `2` | Swift build jobs. |
+| `DEVSTACK_BUILD_JOBS` | `2` | Swift build jobs; also limits the dependency and build-tool compiles (all cores when unset there). |
 | `DEVSTACK_RUNTIME_OUTPUT` | `.build/Runtimes` | Runtime payload directory. |
 | `DEVSTACK_RELEASE_ROOT` | `.build/release` | Output directory for the DMG and app. |
-| `DEVSTACK_SOURCE_CACHE` | `.build/runtime-cache` | Source archives copied into `CorrespondingSources`. |
+| `DEVSTACK_SOURCE_CACHE` | `.build/runtime-cache` | Verified source archives; the shipped ones are copied into `CorrespondingSources`. |
 
 ### Outputs and verification
 
@@ -151,6 +160,15 @@ scripts/build-dependencies.sh all
 scripts/build-runtimes.sh all
 ```
 
+`build-runtimes.sh` finishes by rebuilding `ThirdPartyNotices` from the verified
+source archives. To refresh only the notices, for example after a cleanup,
+run `scripts/verify-sources.sh` and then
+`scripts/collect-licenses.py notices ThirdPartyNotices`.
+
+The build tools live entirely under `.build/build-tools`. Each install records
+its prefix, so moving the checkout makes `fetch-build-tools.sh` reinstall them
+instead of keeping tools that point at the old location.
+
 `runtime-lock.json` is the source of truth: every artifact is HTTPS-only and
 SHA-256 checked, and every runtime is audited before packaging. PHP 7.4 and
 MySQL 5.7 enter a release only with `DEVSTACK_INCLUDE_LEGACY=1` and a passing
@@ -167,7 +185,7 @@ gate (`scripts/gates/php74.sh`, `scripts/gates/mysql57.sh`). Read
 | `.build/build-tools`, `build-tools-cache` | Pinned host toolchain and its archives. | kept (`--deep` removes) |
 | `.build/runtime-work` | PHP 7.4 source/build tree for the legacy feasibility gate. | kept (`--deep` removes) |
 | `.build/runtime-test-fixtures`, `build-tools-work` | Scratch build trees. | removed |
-| `.build/out` | SwiftPM/Xcode build state and products; release DMGs live in `out/Products/Release`. | caches kept (`--deep` prunes) |
+| `.build/out` | SwiftPM/Xcode build state and products; release DMGs live in `out/Products/Release`, ad-hoc images in `out/Products/Release/adhoc`. | newest release DMG kept; ad-hoc images removed (`--deep` also prunes caches) |
 | `.build/logs` | Packaging history; `package-latest.log` points at the last run. | old logs removed |
 
 `scripts/clean-build.sh` prunes generated state without touching sources or
@@ -190,6 +208,8 @@ On the current development machine the default mode reduced `.build` from
 - Notarization rejected: check `xcrun notarytool history --keychain-profile DevStack`
   and the submission log; common causes are a missing secure timestamp,
   unsigned nested binaries, or a stale profile.
+- Exit 72, licence compliance: run `scripts/verify-sources.sh`, then
+  `scripts/collect-licenses.py notices ThirdPartyNotices`, and package again.
 - Helper reports unauthorized requests: the app and helper must share one Team
   ID. `package-release.sh` fails early on a mismatch; an ad-hoc preview build
   cannot use the helper by design.
