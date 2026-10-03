@@ -16,9 +16,16 @@ enum DevStackPrivilegedHelperMain {
 
 private final class HelperListenerDelegate: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
     private let service = PrivilegedHelperService()
+    /// Built once from the helper's own signature. A helper without a Team ID
+    /// (ad-hoc or unsigned) accepts no clients.
+    private let clientRequirement = CodeSignatureValidator.clientRequirement()
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        guard CodeSignatureValidator.isAuthorizedApp(processIdentifier: connection.processIdentifier) else { return false }
+        guard let clientRequirement else { return false }
+        // XPC checks the requirement against the peer's audit token on every
+        // message. A process-ID lookup could be satisfied by a different
+        // process that reuses the ID after the check.
+        connection.setCodeSigningRequirement(clientRequirement)
         connection.exportedInterface = NSXPCInterface(with: PrivilegedHelperXPCProtocol.self)
         connection.exportedObject = service
         connection.resume()
@@ -27,11 +34,8 @@ private final class HelperListenerDelegate: NSObject, NSXPCListenerDelegate, @un
 }
 
 private enum CodeSignatureValidator {
-    static func isAuthorizedApp(processIdentifier: pid_t) -> Bool {
-        var guest: SecCode?
-        let attributes = [kSecGuestAttributePid as String: NSNumber(value: processIdentifier)] as CFDictionary
-        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &guest) == errSecSuccess, let guest else { return false }
-        var requirement: SecRequirement?
+    /// The DevStack app signed by the helper's own team.
+    static func clientRequirement() -> String? {
         var helperCode: SecCode?
         var helperStaticCode: SecStaticCode?
         var helperInformation: CFDictionary?
@@ -40,10 +44,12 @@ private enum CodeSignatureValidator {
               SecCodeCopySigningInformation(helperStaticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &helperInformation) == errSecSuccess,
               let information = helperInformation as? [String: Any],
               let team = information[kSecCodeInfoTeamIdentifier as String] as? String,
-              team.range(of: "^[A-Z0-9]{10}$", options: .regularExpression) != nil else { return false }
-        let expression = "identifier \"\(PrivilegedHelperConstants.applicationBundleIdentifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\"" as CFString
-        guard SecRequirementCreateWithString(expression, [], &requirement) == errSecSuccess, let requirement else { return false }
-        return SecCodeCheckValidity(guest, [], requirement) == errSecSuccess
+              team.range(of: "^[A-Z0-9]{10}$", options: .regularExpression) != nil else { return nil }
+        let expression = "identifier \"\(PrivilegedHelperConstants.applicationBundleIdentifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
+        // Reject a malformed requirement here rather than on the first message.
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString(expression as CFString, [], &requirement) == errSecSuccess, requirement != nil else { return nil }
+        return expression
     }
 }
 
