@@ -69,9 +69,18 @@ for resource_bundle in "$products"/*.bundle; do
     [[ -d "$resource_bundle" ]] && cp -R "$resource_bundle" "$application/Contents/Resources/"
 done
 
+# Every shipped component needs its notices, and the copyleft ones (MySQL,
+# phpMyAdmin, gettext and others) need their exact sources. Developer ID
+# releases stop when either is missing; ad-hoc development builds only warn.
+if ! /usr/bin/python3 "$repository_root/scripts/collect-licenses.py" check "$repository_root/ThirdPartyNotices" "${runtime_ids[@]}"; then
+    if [[ "$identity" != "-" ]]; then
+        echo "Run scripts/verify-sources.sh, then scripts/collect-licenses.py notices ThirdPartyNotices." >&2
+        exit 72
+    fi
+    echo "warning: this ad-hoc build ships incomplete licence notices or sources." >&2
+fi
 if [[ -d "$repository_root/ThirdPartyNotices" ]]; then cp -R "$repository_root/ThirdPartyNotices" "$application/Contents/Resources/ThirdPartyNotices"; fi
-source_cache="${DEVSTACK_SOURCE_CACHE:-$repository_root/.build/runtime-cache}"
-if [[ -d "$source_cache" ]]; then cp -R "$source_cache" "$application/Contents/Resources/CorrespondingSources"; fi
+/usr/bin/python3 "$repository_root/scripts/collect-licenses.py" sources "$application/Contents/Resources/CorrespondingSources" "${runtime_ids[@]}"
 mkdir -p "$application/Contents/Resources/CorrespondingSources/DevStackPatches"
 cp "$repository_root/scripts/prepare-imagemagick.py" "$repository_root/scripts/configure-phpmyadmin.py" "$application/Contents/Resources/CorrespondingSources/DevStackPatches/"
 cp "$repository_root/LICENSE" "$application/Contents/Resources/LICENSE"
