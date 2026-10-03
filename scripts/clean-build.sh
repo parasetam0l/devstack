@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-# Prunes generated state under .build. Sources, runtimes and release images are
-# never touched by the default mode, so cleaning is safe at any time: the next
-# build recreates whatever it needs.
+# Prunes generated state under .build. The default mode keeps sources, runtimes
+# and the newest release image, so cleaning is safe at any time: the next build
+# recreates whatever it needs.
 #
 #   scripts/clean-build.sh          release history, staging, scratch trees, stale logs
 #   scripts/clean-build.sh --deep   also drop runtime rebuild caches and SwiftPM caches
@@ -46,8 +46,9 @@ if [[ "$mode" == "all" ]]; then
 else
     release_root="$build_root/out/Products/Release"
 
-    # Release history and staging. The newest DMG stays in place.
-    remove "$release_root/previous" "$release_root/staging" "$release_root/DevStack.app"
+    # Release history and staging. The newest DMG stays in place; ad-hoc
+    # development images are disposable.
+    remove "$release_root/previous" "$release_root/staging" "$release_root/DevStack.app" "$release_root/adhoc"
     if [[ -d "$release_root" ]]; then
         while IFS= read -r old_image; do
             [[ -n "$old_image" ]] && remove "$old_image"
