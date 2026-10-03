@@ -335,6 +335,31 @@ enum DevStackCoreChecks {
         try expect(liveNegative[3] & 0x0F == 3, "Unmanaged .test name did not answer NXDOMAIN")
         let liveRefusal = try await udpRoundTrip(dnsQuery("example.com", DNSMessage.typeA, 0x3333), port: 15453)
         try expect(liveRefusal[3] & 0x0F == 2, "DNS responder did not fail closed without upstreams")
+
+        let forwarder = LoopbackForwarder()
+        let forwardedPort = try ephemeralLoopbackPort()
+        let refusingUpstream = try ephemeralLoopbackPort()
+        try forwarder.apply(PortForwardingConfiguration(enabled: true, entries: [PortForwardingEntry(publicPort: forwardedPort, upstreamPort: refusingUpstream)]))
+        let refusedClient = try connectLoopback(port: forwardedPort)
+        let refusedStart = Date()
+        let refusedRead = readLoopback(refusedClient, until: Data("never".utf8), timeout: 3)
+        close(refusedClient)
+        try expect(refusedRead.closed && Date().timeIntervalSince(refusedStart) < 2, "Forwarder kept a client open while its upstream refused connections")
+        let upstreamPort = try ephemeralLoopbackPort()
+        let upstreamListener = try listenLoopback(port: upstreamPort)
+        defer { close(upstreamListener) }
+        try forwarder.apply(PortForwardingConfiguration(enabled: true, entries: [PortForwardingEntry(publicPort: forwardedPort, upstreamPort: upstreamPort, proxyProtocol: true)]))
+        let proxiedClient = try connectLoopback(port: forwardedPort)
+        defer { close(proxiedClient) }
+        _ = Data("ping".utf8).withUnsafeBytes { send(proxiedClient, $0.baseAddress, $0.count, 0) }
+        let upstreamConnection = try acceptLoopback(upstreamListener, timeout: 3)
+        defer { close(upstreamConnection) }
+        let proxied = readLoopback(upstreamConnection, until: Data("ping".utf8), timeout: 3)
+        let proxiedText = String(decoding: proxied.data, as: UTF8.self)
+        try expect(proxiedText.hasPrefix("PROXY TCP4 127.0.0.1 127.0.0.1 ") && proxiedText.hasSuffix("\r\nping"), "Forwarder did not send the PROXY header ahead of the client bytes")
+        try forwarder.apply(PortForwardingConfiguration(enabled: false))
+        try expect(!forwarder.isEnabled, "Forwarder stayed enabled after being disabled")
+
         var unsafeSite = site
         unsafeSite.documentRoot = "/tmp/example\nRequire all granted"
         do {
@@ -601,4 +626,91 @@ private final class UDPReplyGate: @unchecked Sendable {
         lock.unlock()
         continuation.resume(with: result())
     }
+}
+
+// MARK: - Loopback socket helpers
+
+private func loopbackAddress(port: UInt16) -> sockaddr_in {
+    var address = sockaddr_in()
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = port.bigEndian
+    address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+    return address
+}
+
+private func posixFailure(_ operation: String) -> CheckFailure {
+    CheckFailure(description: "\(operation) failed: \(String(cString: strerror(errno)))")
+}
+
+/// A loopback port that was free a moment ago.
+private func ephemeralLoopbackPort() throws -> UInt16 {
+    let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+    guard descriptor >= 0 else { throw posixFailure("socket") }
+    defer { close(descriptor) }
+    var address = loopbackAddress(port: 0)
+    let bound = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    guard bound == 0 else { throw posixFailure("bind") }
+    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let named = withUnsafeMutablePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(descriptor, $0, &length) }
+    }
+    guard named == 0 else { throw posixFailure("getsockname") }
+    return UInt16(bigEndian: address.sin_port)
+}
+
+private func listenLoopback(port: UInt16) throws -> Int32 {
+    let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+    guard descriptor >= 0 else { throw posixFailure("socket") }
+    var reuse: Int32 = 1
+    setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+    var address = loopbackAddress(port: port)
+    let bound = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    guard bound == 0, listen(descriptor, 4) == 0 else {
+        close(descriptor)
+        throw posixFailure("listen")
+    }
+    return descriptor
+}
+
+private func connectLoopback(port: UInt16) throws -> Int32 {
+    let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+    guard descriptor >= 0 else { throw posixFailure("socket") }
+    var address = loopbackAddress(port: port)
+    let connected = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    guard connected == 0 else {
+        close(descriptor)
+        throw posixFailure("connect")
+    }
+    return descriptor
+}
+
+private func acceptLoopback(_ listener: Int32, timeout: TimeInterval) throws -> Int32 {
+    var request = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
+    guard poll(&request, 1, Int32(timeout * 1_000)) == 1 else { throw CheckFailure(description: "No connection arrived within \(timeout) seconds") }
+    let descriptor = accept(listener, nil, nil)
+    guard descriptor >= 0 else { throw posixFailure("accept") }
+    return descriptor
+}
+
+/// Reads until `marker` has arrived, the peer closes, or the timeout passes.
+private func readLoopback(_ descriptor: Int32, until marker: Data, timeout: TimeInterval) -> (data: Data, closed: Bool) {
+    var received = Data()
+    let deadline = Date().addingTimeInterval(timeout)
+    var buffer = [UInt8](repeating: 0, count: 4_096)
+    while Date() < deadline, received.range(of: marker) == nil {
+        var request = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+        let remaining = Int32(max(1, deadline.timeIntervalSinceNow * 1_000))
+        guard poll(&request, 1, remaining) == 1 else { break }
+        let count = recv(descriptor, &buffer, buffer.count, 0)
+        if count <= 0 { return (received, true) }
+        received.append(contentsOf: buffer[0..<count])
+    }
+    return (received, false)
 }
