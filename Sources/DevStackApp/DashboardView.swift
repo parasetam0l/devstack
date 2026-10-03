@@ -26,7 +26,7 @@ struct DashboardView: View {
                     Divider()
                     DatabaseServiceControl(embedded: true)
                     Divider()
-                    ServiceControl(title: "Mail", service: .mailpit, detail: "SMTP \(model.configuration.ports.mailpitSMTP) · Inbox \(model.configuration.ports.mailpitInbox)") { Text("Mailpit").font(.system(size: 12, weight: .medium)) }
+                    ServiceControl(title: "Mail", service: .mailpit, detail: "SMTP \(model.configuration.ports.mailpitSMTP) · Inbox \(model.configuration.ports.mailpitInbox)") { Text("Mailpit").font(.system(size: 12, weight: .medium)).padding(.leading, 10) }
                     Divider()
                     LocalDNSServiceControl()
                 }
@@ -147,7 +147,7 @@ private struct LocalDNSServiceControl: View {
             Text("Local DNS").font(.system(size: 12, weight: .medium)).lineLimit(1).frame(width: 80, alignment: .leading)
             Text(model.localNetworkAddress ?? "No network")
                 .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                .lineLimit(1).frame(width: 140, alignment: .leading)
+                .lineLimit(1).padding(.leading, 10).frame(width: 140, alignment: .leading)
             Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                 .layoutPriority(-1)
             Spacer(minLength: 4)
