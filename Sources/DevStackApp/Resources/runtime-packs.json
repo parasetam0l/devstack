@@ -74,6 +74,22 @@
       "contents": [
         "openssl-3.5"
       ],
+      "id": "mysql-8.4",
+      "minimumMacOS": "15.0",
+      "name": "mysql-8.4-8.4.11-r1",
+      "packRevision": 1,
+      "requires": [
+        "openssl-3.5"
+      ],
+      "sha256": "168746c0ff7c3e0e97c410673f819f5c61ff826b2d619e0a716800d500e3fb12",
+      "size": 75604992,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/mysql-8.4-8.4.11-r1/mysql-8.4-8.4.11-r1.devstack-runtime",
+      "version": "8.4.11"
+    },
+    {
+      "contents": [
+        "openssl-3.5"
+      ],
       "id": "nginx-1.30",
       "minimumMacOS": "15.0",
       "name": "nginx-1.30-1.30.5-r1",
