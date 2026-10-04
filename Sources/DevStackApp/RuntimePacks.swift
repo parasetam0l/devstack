@@ -314,7 +314,8 @@ struct RuntimePackProgressPanel: View {
         SurfacePanel {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Installing \(progress.packName) (\(progress.index) of \(progress.count))").font(.system(size: 12, weight: .semibold))
-                ProgressView(value: progress.fraction)
+                // The app's neutral accent, not the window tint.
+                ProgressView(value: progress.fraction).tint(.primary)
                 Text("\(ByteCountFormatter.string(fromByteCount: progress.completedBytes, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: progress.totalBytes, countStyle: .file)), verified before installing")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
