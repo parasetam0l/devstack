@@ -576,6 +576,7 @@ struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @StateObject private var state = SettingsViewState()
     @ObservedObject private var updater = AppUpdater.shared
+    @AppStorage(MenuBarMode.defaultsKey) private var hideDockIcon = false
 
     var body: some View {
         PanelPage {
@@ -591,6 +592,10 @@ struct SettingsView: View {
                 SettingRow(label: "Open DevStack at login") {
                     Toggle("Open DevStack at login", isOn: Binding(get: { model.configuration.startAtLogin },
                                                                     set: { enabled in Task { await model.setStartAtLogin(enabled) } }))
+                        .toggleStyle(.switch).controlSize(.mini).labelsHidden()
+                }
+                SettingRow(label: "Hide app icon from Dock", detail: "When the window is minimized or closed, DevStack stays in the menu bar only. Open it again from there.") {
+                    Toggle("Hide app icon from Dock", isOn: $hideDockIcon)
                         .toggleStyle(.switch).controlSize(.mini).labelsHidden()
                 }
             }

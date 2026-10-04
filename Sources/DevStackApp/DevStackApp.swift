@@ -79,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for _ in 0..<40 {
                 if let window = MainWindowLocator.current {
                     widenSidebarIfNeeded(window)
+                    MenuBarMode.shared.attach(to: window)
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(50))
@@ -108,6 +109,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let found = firstSplitView(in: subview) { return found }
         }
         return nil
+    }
+
+    /// Opening DevStack again (Finder, Spotlight, the Dock) brings back its
+    /// window, also when it was hidden to the menu bar.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        guard !hasVisibleWindows, let model else { return true }
+        model.showMainWindow()
+        return false
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -159,9 +168,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 enum MainWindowLocator {
     static var current: NSWindow? {
-        NSApp.windows.first { window in
-            !(window is NSPanel) && (window.contentView?.bounds.width ?? 0) >= 820
-        }
+        // SwiftUI names the scene's windows after its id ("main-AppWindow-1").
+        NSApp.windows.first { $0.identifier?.rawValue.hasPrefix("main") == true }
+            ?? NSApp.windows.first { !($0 is NSPanel) && ($0.contentView?.bounds.width ?? 0) >= 760 }
     }
 }
 

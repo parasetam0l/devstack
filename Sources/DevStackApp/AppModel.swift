@@ -172,7 +172,7 @@ final class AppModel: ObservableObject {
     // Menu bar "Open DevStack": bring the window back, or ask SwiftUI to create a new
     // one when the user closed the only window.
     func showMainWindow() {
-        NSApp.activate(ignoringOtherApps: true)
+        MenuBarMode.shared.leave()
         if let window = MainWindowLocator.current {
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
