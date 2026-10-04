@@ -1,0 +1,167 @@
+# Builds DevStack signed with Developer ID, notarizes it, and creates a draft
+# GitHub release with the DMG. It runs only when started by hand:
+# Actions → Release → Run workflow. Publishing the draft starts Appcast,
+# which offers the update to installed copies.
+#
+# The DMG holds the app alone; runtimes come from the packs pinned in
+# Sources/DevStackApp/Resources/runtime-packs.json.
+# One-time setup (certificate, secrets, update key): docs/RELEASING.md.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version, e.g. 0.4.0 (tagged v0.4.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      DEVSTACK_BUILD_JOBS: "3"
+    steps:
+      - name: Check the version
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::The version must look like 1.2 or 1.2.3, not '$VERSION'."
+            exit 1
+          fi
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release v$VERSION already exists."
+            exit 1
+          fi
+
+      - name: Check the secrets
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          missing=()
+          for name in DEVELOPER_ID_P12_BASE64 DEVELOPER_ID_P12_PASSWORD NOTARY_APPLE_ID NOTARY_PASSWORD; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::Missing repository secrets: ${missing[*]} (see docs/RELEASING.md)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the release notes list the commits since the last release
+
+      - name: Check the runtime packs and the update key
+        run: |
+          packs="$(python3 -c 'import json; print(len(json.load(open("Sources/DevStackApp/Resources/runtime-packs.json"))["packs"]))')"
+          if [[ "$packs" == 0 ]]; then
+            echo "::error::No runtime packs are pinned. Publish them in devstack-runtimes and pin them with scripts/pin-runtime.sh first."
+            exit 1
+          fi
+          # Every pinned pack must still download and match its hash.
+          scripts/pin-runtime.sh --check
+          # Updates are verified with this key; without it none can install.
+          key="$(plutil -extract SUPublicEDKey raw -o - Packaging/Info.plist)"
+          [[ "$(printf '%s' "$key" | base64 --decode 2>/dev/null | wc -c | tr -d ' ')" == 32 ]] \
+            || { echo "::error::SUPublicEDKey in Packaging/Info.plist is not a Sparkle public key (docs/RELEASING.md)."; exit 1; }
+
+      - name: Import the certificate
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$DEVELOPER_ID_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
+          security import "$RUNNER_TEMP/developer-id.p12" -k "$keychain" -P "$DEVELOPER_ID_P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/developer-id.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -n 1)"
+          [[ -n "$identity" ]] || { echo "::error::No Developer ID Application identity in the certificate."; exit 1; }
+          {
+            echo "KEYCHAIN=$keychain"
+            echo "IDENTITY=$identity"
+          } >> "$GITHUB_ENV"
+
+      - name: Build, sign and notarize
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          # A new, higher build number every time: Sparkle compares it.
+          plutil -replace CFBundleShortVersionString -string "$VERSION" Packaging/Info.plist
+          plutil -replace CFBundleVersion -string "$(date +%s)" Packaging/Info.plist
+          DEVSTACK_SIGNING_IDENTITY="$IDENTITY" DEVSTACK_RELEASE_ROOT="$RUNNER_TEMP/release" scripts/package-release.sh
+          dmg="$RUNNER_TEMP/release/DevStack-$VERSION-arm64.dmg"
+          [[ -f "$dmg" ]] || { echo "::error::The DMG was not produced."; exit 1; }
+          echo "DMG=$dmg" >> "$GITHUB_ENV"
+
+      - name: Check the signatures
+        run: |
+          app="$RUNNER_TEMP/release/DevStack.app"
+          sparkle="$app/Contents/Frameworks/Sparkle.framework/Versions/B"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          for bundle in "$app" "$app/Contents/Library/LaunchServices/DevStackPrivilegedHelper" \
+                        "$sparkle/Autoupdate" "$sparkle/Updater.app" \
+                        "$sparkle/XPCServices/Installer.xpc" "$sparkle/XPCServices/Downloader.xpc"; do
+            codesign -dvv "$bundle" 2>&1 | grep -q "Authority=Developer ID Application" \
+              || { echo "::error::$bundle is not signed with Developer ID"; exit 1; }
+          done
+          [[ ! -d "$app/Contents/Resources/Runtimes" ]] || { echo "::error::The app still bundles runtimes."; exit 1; }
+
+      - name: Create the draft release
+        run: |
+          # GitHub's generated notes list merged pull requests, and this
+          # repository is committed to directly: list the commits instead.
+          previous="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+            --limit 1 --json tagName --jq '.[0].tagName // empty')"
+          minimum="$(plutil -extract LSMinimumSystemVersion raw -o - "$RUNNER_TEMP/release/DevStack.app/Contents/Info.plist")"
+          {
+            cat <<EOF
+          ## Install
+
+          Open DevStack-$VERSION-arm64.dmg and drag DevStack to Applications. On first launch the setup wizard downloads the runtimes you choose, approves the helper in System Settings → General → Login Items & Extensions, and trusts DevStack's local certificate authority.
+
+          **Updating:** DevStack offers new versions by itself (or Settings → Updates → Check Now). Running services keep running across the update.
+
+          Requires macOS $minimum or later on Apple silicon.
+
+          ## Changes
+
+          EOF
+            if [[ -n "$previous" ]]; then
+              git log --no-merges --reverse --format='- %s' "$previous..HEAD"
+              printf '\n**Full changelog:** https://github.com/%s/compare/%s...v%s\n' "$GITHUB_REPOSITORY" "$previous" "$VERSION"
+            else
+              echo "First release."
+            fi
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "v$VERSION" "$DMG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "DevStack $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --draft
+          echo "Draft release created: edit the notes and publish it under Releases." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          [[ -n "${KEYCHAIN:-}" ]] && security delete-keychain "$KEYCHAIN" || true
