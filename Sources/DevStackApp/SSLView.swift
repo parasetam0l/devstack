@@ -9,60 +9,58 @@ struct SSLView: View {
     @StateObject private var state = SSLViewState()
 
     var body: some View {
-        Form {
-            Section {
-                HStack(spacing: 12) {
-                    ServiceRowTitle(title: "DevStack Local CA", symbol: "checkmark.shield",
-                                    detail: model.caSummary.map(expiration) ?? "Created when the stack first starts")
-                    Spacer(minLength: 12)
-                    StatusLabel(title: model.localCATrusted ? "Trusted" : "Not trusted", color: model.localCATrusted ? .green : .orange)
-                    if !model.localCATrusted {
-                        Button("Trust…") { Task { await model.trustHTTPS(); await model.refreshCertificates() } }
-                            .disabled(model.isBusy)
-                    }
-                    if let ca = model.caSummary {
-                        Menu {
-                            Button("Details…") { state.detailCertificate = ca }
-                            Button("Export…") { exportCertificate(ca) }
-                            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([ca.certificate]) }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
+        PanelPage {
+            Panel("Certificate Authority", note: model.localCATrusted
+                  ? "Browsers on this Mac trust every certificate DevStack issues."
+                  : "Trust the DevStack CA so browsers on this Mac accept your sites' HTTPS without warnings.") {
+                PanelRow {
+                    StatusDot(color: model.localCATrusted ? .green : .orange)
+                    Image(systemName: "checkmark.shield").foregroundStyle(.secondary).frame(width: 18).accessibilityHidden(true)
+                    Text("DevStack Local CA").fontWeight(.medium).frame(width: ServiceRowLayout.title, alignment: .leading)
+                    Text(model.caSummary.map(expiration) ?? "Created when the stack first starts")
+                        .foregroundStyle(.secondary).lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(model.localCATrusted ? "Trusted" : "Not trusted")
+                        .font(.callout).foregroundStyle(model.localCATrusted ? Color.secondary : .orange)
+                        .frame(width: ServiceRowLayout.state, alignment: .leading)
+                    HStack(spacing: 6) {
+                        if !model.localCATrusted {
+                            Button("Trust…") { Task { await model.trustHTTPS(); await model.refreshCertificates() } }
+                                .controlSize(.small)
+                                .disabled(model.isBusy)
                         }
-                        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                        .accessibilityLabel("Certificate authority actions")
+                        if let ca = model.caSummary {
+                            Menu {
+                                Button("Details…") { state.detailCertificate = ca }
+                                Button("Export…") { exportCertificate(ca) }
+                                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([ca.certificate]) }
+                            } label: {
+                                Image(systemName: "ellipsis")
+                            }
+                            .menuStyle(.button).buttonStyle(.borderless).menuIndicator(.hidden).fixedSize()
+                            .accessibilityLabel("Certificate authority actions")
+                        }
                     }
-                }
-                .padding(.vertical, 2)
-            } header: {
-                Text("Certificate authority")
-            } footer: {
-                SectionFooter {
-                    Text(model.localCATrusted
-                         ? "Browsers on this Mac trust every certificate DevStack issues."
-                         : "Trust the DevStack CA so browsers on this Mac accept your sites' HTTPS without warnings.")
+                    .frame(width: ServiceRowLayout.controls, alignment: .trailing)
                 }
             }
 
-            Section("Certificates") {
+            Panel("Certificates") {
                 if model.certificateSummaries.isEmpty {
-                    NoticeRow(symbol: "lock.doc", title: "No certificates yet",
-                              message: "Starting the stack creates certificates for your HTTPS sites. You can also issue one yourself.", tint: .secondary) {
-                        Button("Issue…") { beginIssuing() }.disabled(model.isBusy)
+                    PanelRow {
+                        Text("No certificates yet. Starting the stack creates them for your HTTPS sites.").foregroundStyle(.secondary)
+                        Spacer()
                     }
                 } else {
                     ForEach(model.certificateSummaries) { certificate in certificateRow(certificate) }
                 }
-            }
-        }
-        .formStyle(.grouped)
-        .toolbar {
-            ToolbarItem {
+            } accessory: {
                 Button { Task { await model.refreshCertificates() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                    .buttonStyle(.borderless)
                     .disabled(model.isBusy)
                     .help("Read the certificates again")
-            }
-            ToolbarItem {
-                Button(action: beginIssuing) { Label("Issue Certificate", systemImage: "plus") }
+                Button(action: beginIssuing) { Label("Issue Certificate…", systemImage: "plus") }
+                    .buttonStyle(.borderless)
                     .disabled(model.isBusy)
                     .help("Issue a certificate for a hostname")
             }
@@ -79,32 +77,44 @@ struct SSLView: View {
     }
 
     private func certificateRow(_ certificate: CertificateSummary) -> some View {
-        HStack(spacing: 12) {
-            ServiceRowTitle(title: certificate.hostname, symbol: "lock.doc", detail: expiration(certificate))
-            Spacer(minLength: 12)
-            StatusLabel(title: status(certificate), color: certificate.error != nil || certificate.isExpired ? .orange : .green)
-            Button("Renew") { Task { await model.issueCertificate(for: certificate.hostname) } }
-                .disabled(model.isBusy)
-                .accessibilityLabel("Renew \(certificate.hostname)")
-            Menu {
-                Button("Details…") { state.detailCertificate = certificate }
-                Button("Export…") { exportCertificate(certificate) }
-                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([certificate.certificate]) }
-                if !model.managedTLSHostnames.contains(certificate.hostname) {
-                    Divider()
-                    Button("Delete…", role: .destructive) { state.pendingDelete = certificate; state.confirmingDelete = true }
+        let healthy = certificate.error == nil && !certificate.isExpired
+        return PanelRow {
+            StatusDot(color: healthy ? .green : .orange)
+            Image(systemName: "lock.doc").foregroundStyle(.secondary).frame(width: 18).accessibilityHidden(true)
+            Text(certificate.hostname).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(certificate.hostname)
+            Text(expiration(certificate)).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+            Text(status(certificate))
+                .font(.callout).foregroundStyle(healthy ? Color.secondary : .orange)
+                .frame(width: ServiceRowLayout.state, alignment: .leading)
+            HStack(spacing: 6) {
+                IconButton(title: "Renew \(certificate.hostname)", symbol: "arrow.clockwise") {
+                    Task { await model.issueCertificate(for: certificate.hostname) }
                 }
-            } label: {
-                Image(systemName: "ellipsis.circle")
+                .disabled(model.isBusy)
+                IconButton(title: "Certificate details", symbol: "info.circle") { state.detailCertificate = certificate }
+                Menu {
+                    Button("Details…") { state.detailCertificate = certificate }
+                    Button("Export…") { exportCertificate(certificate) }
+                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([certificate.certificate]) }
+                    if !model.managedTLSHostnames.contains(certificate.hostname) {
+                        Divider()
+                        Button("Delete…", role: .destructive) { state.pendingDelete = certificate; state.confirmingDelete = true }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                }
+                .menuStyle(.button).buttonStyle(.borderless).menuIndicator(.hidden).fixedSize()
+                .disabled(model.isBusy)
+                .accessibilityLabel("Actions for \(certificate.hostname)")
             }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .disabled(model.isBusy)
-            .accessibilityLabel("Actions for \(certificate.hostname)")
+            .frame(width: ServiceRowLayout.controls, alignment: .trailing)
         }
-        .padding(.vertical, 2)
         .contextMenu {
             Button("Details…") { state.detailCertificate = certificate }
             Button("Export…") { exportCertificate(certificate) }
+            Button("Renew") { Task { await model.issueCertificate(for: certificate.hostname) } }.disabled(model.isBusy)
         }
     }
 

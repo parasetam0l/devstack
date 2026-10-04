@@ -22,6 +22,7 @@ struct RootView: View {
         } detail: {
             selectedPage
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clearToolbarBacking()
                 .navigationTitle((model.selectedSection ?? .dashboard).rawValue)
                 .navigationSubtitle(statusSummary)
                 .toolbar {
@@ -134,6 +135,19 @@ struct RootView: View {
 
     private var helperNoticeIsPresented: Binding<Bool> {
         Binding(get: { model.helperNotice != nil }, set: { if !$0 { model.helperNotice = nil } })
+    }
+}
+
+private extension View {
+    /// The toolbar floats over the window on every page. Without this, pages
+    /// whose top is not a scroll view (Logs, empty states) get an opaque bar.
+    /// macOS 15 keeps its standard bar, which scrolled content needs there.
+    @ViewBuilder func clearToolbarBacking() -> some View {
+        if #available(macOS 26, *) {
+            toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+        } else {
+            self
+        }
     }
 }
 

@@ -103,19 +103,6 @@ extension StatusLabel {
     }
 }
 
-extension ServicePhase {
-    var title: String { rawValue.capitalized }
-
-    var statusColor: Color {
-        switch self {
-        case .running: .green
-        case .failed: .red
-        case .starting, .stopping: .orange
-        case .stopped: Color(nsColor: .tertiaryLabelColor)
-        }
-    }
-}
-
 /// A value to read and copy, such as a host, a port or a path.
 struct CopyableValueRow: View {
     let label: String

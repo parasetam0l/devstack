@@ -8,10 +8,7 @@ import UniformTypeIdentifiers
 
 struct PHPView: View {
     @EnvironmentObject private var model: AppModel
-
-    private var runtimeID: String { model.configuration.defaultPHPRuntimeID }
-    private var service: ServiceKind { ServiceKind(rawValue: runtimeID) ?? .php85 }
-    private var running: Bool { model.serviceIsRunning(service) }
+    @State private var inspected: String?
 
     private static let extensions: [(id: String, name: String, detail: String)] = [
         ("xdebug", "Xdebug", "Step debugging on 127.0.0.1:9003"),
@@ -21,64 +18,78 @@ struct PHPView: View {
         ("pdo_pgsql", "PDO PostgreSQL", "PostgreSQL driver for PDO")
     ]
 
-    var body: some View {
-        Form {
-            Section {
-                Picker("Default version", selection: Binding(get: { runtimeID }, set: { id in Task { await model.selectPHP(id) } })) {
-                    ForEach(model.phpRuntimes) { runtime in
-                        Text(model.runtimeOptionTitle("PHP \(runtime.version)", id: runtime.id)).tag(runtime.id)
-                            .disabled(!model.runtimeIsAvailable(runtime.id))
-                    }
-                }
-                .disabled(model.isBusy || running)
-                .help(running ? "Stop PHP before changing the default version." : "Used by new sites and the Terminal")
-                LabeledContent("Status") {
-                    if model.runtimeIsAvailable(runtimeID) {
-                        StatusLabel(model.serviceState(service).phase)
-                    } else {
-                        Button("Install…") { model.selectedSection = .runtimes }
-                    }
-                }
-            } footer: { SectionFooter {
-                Text(running ? "Stop PHP to change the default version." : "New sites and the Terminal use the default version.")
-            } }
+    /// The version whose configuration the page shows.
+    private var runtimeID: String { inspected ?? model.configuration.defaultPHPRuntimeID }
+    private var defaultRunning: Bool { model.serviceIsRunning(ServiceKind(rawValue: model.configuration.defaultPHPRuntimeID) ?? .php85) }
 
+    var body: some View {
+        PanelPage {
             if runtimeID == "php-7.4" {
-                Section {
-                    NoticeRow(symbol: "exclamationmark.triangle.fill", title: "Legacy runtime",
-                              message: "PHP 7.4 no longer receives security fixes. Use it only for older projects that need it.")
+                Banner(symbol: "exclamationmark.triangle.fill", title: "PHP 7.4 is end-of-life",
+                       detail: "It no longer receives security fixes. Use it only for older projects that need it.")
+            }
+
+            Panel("Versions", note: "New sites and the Terminal use the default version. Stop it to choose another.") {
+                ForEach(model.phpRuntimes) { runtime in
+                    let isDefault = runtime.id == model.configuration.defaultPHPRuntimeID
+                    let sites = model.configuration.sites.filter { $0.phpRuntimeID == runtime.id }.count
+                    ServiceRow(title: "PHP \(runtime.version)", symbol: "chevron.left.forwardslash.chevron.right",
+                               address: (["php-fpm"] + (isDefault ? ["default"] : []) + ["\(sites) site\(sites == 1 ? "" : "s")"]).joined(separator: " · "),
+                               service: ServiceKind(rawValue: runtime.id)) {
+                        EmptyView()
+                    } menuItems: {
+                        Divider()
+                        Button("Make Default") { Task { await model.selectPHP(runtime.id) } }
+                            .disabled(isDefault || defaultRunning || model.isBusy || !model.runtimeIsAvailable(runtime.id))
+                        Button("Configure") { inspected = runtime.id }
+                    }
                 }
             }
 
-            Section {
+            Panel("Configuration", note: "Turning an extension on or off restarts that PHP version.") {
+                ValueRow(label: "php.ini", value: model.paths.generatedPHP.appendingPathComponent("\(runtimeID).ini").path, revealsFile: true)
+                ValueRow(label: "Binary", value: model.runtimeDirectory(runtimeID).appendingPathComponent("bin/php").path)
                 ForEach(Self.extensions, id: \.id) { item in
                     let available = model.extensionIsAvailable(item.id, runtimeID: runtimeID)
-                    Toggle(isOn: extensionBinding(item.id)) {
-                        Text(item.name)
-                        Text(available ? item.detail : "Not available for this version")
-                    }
-                    .disabled(!model.runtimeIsAvailable(runtimeID) || !available || model.isBusy)
-                }
-            } header: {
-                Text("Extensions")
-            } footer: { SectionFooter {
-                Text("Turning an extension on or off restarts PHP.")
-            } }
-
-            Section("Build details") {
-                DisclosureGroup("Sources, licenses and build information") {
-                    ForEach(model.runtimeManifests.filter { $0.id == runtimeID || ($0.kind == .phpExtension && $0.dependencyPaths.contains(runtimeID)) }) { manifest in
-                        RuntimeDetailsRow(manifest: manifest)
+                    PanelRow {
+                        Text(item.name).lineLimit(1).frame(width: 120, alignment: .leading)
+                        Text(available ? item.detail : "Not available for this version").foregroundStyle(.secondary).lineLimit(1)
+                        Spacer(minLength: 8)
+                        Toggle(item.name, isOn: extensionBinding(item.id))
+                            .toggleStyle(.switch)
+                            .controlSize(.mini)
+                            .labelsHidden()
+                            .disabled(!model.runtimeIsAvailable(runtimeID) || !available || model.isBusy)
                     }
                 }
+                PanelRow {
+                    DisclosureGroup("Sources, licenses and build information") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(model.runtimeManifests.filter { $0.id == runtimeID || ($0.kind == .phpExtension && $0.dependencyPaths.contains(runtimeID)) }) { manifest in
+                                RuntimeDetailsRow(manifest: manifest)
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+            } accessory: {
+                Picker("Version", selection: Binding(get: { runtimeID }, set: { inspected = $0 })) {
+                    ForEach(model.phpRuntimes) { runtime in
+                        Text(runtime.version.split(separator: ".").prefix(2).joined(separator: ".")).tag(runtime.id)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help("The PHP version to configure")
             }
         }
-        .formStyle(.grouped)
     }
 
     private func extensionBinding(_ name: String) -> Binding<Bool> {
-        Binding(get: { model.extensionIsAvailable(name, runtimeID: runtimeID) && model.configuration.enabledExtensions[runtimeID]?.contains(name) == true },
-                set: { enabled in Task { await model.setExtension(name, enabled: enabled, runtimeID: runtimeID) } })
+        let runtimeID = runtimeID
+        return Binding(get: { model.extensionIsAvailable(name, runtimeID: runtimeID) && model.configuration.enabledExtensions[runtimeID]?.contains(name) == true },
+                       set: { enabled in Task { await model.setExtension(name, enabled: enabled, runtimeID: runtimeID) } })
     }
 }
 
@@ -92,81 +103,73 @@ struct DatabaseView: View {
     private var running: Bool { service.map(model.serviceIsRunning) ?? false }
     private var webRunning: Bool { model.serviceIsRunning(.apache) || model.serviceIsRunning(.nginx) }
     private var engineName: String { state.postgreSQL ? "PostgreSQL" : "MySQL" }
+    private var port: UInt16 { state.postgreSQL ? model.configuration.ports.postgresqlListen : model.configuration.ports.mysqlListen }
+    private var user: String { state.postgreSQL ? "devstack" : "root" }
+    private var password: String { state.postgreSQL ? "devstack" : "root" }
 
     var body: some View {
-        Form {
-            Section("Services") {
-                DatabaseServiceRows()
-            }
+        PanelPage {
+            Panel("Services") { DatabaseServiceRows() }
 
-            Section {
+            Panel("Connection", note: service == nil ? "\(engineName) is not part of the stack. Choose a version under Services." : nil) {
+                ValueRow(label: "Host", value: "127.0.0.1")
+                ValueRow(label: "Port", value: String(port))
+                if state.postgreSQL { ValueRow(label: "Database", value: "postgres") }
+                ValueRow(label: "Username", value: user)
+                ValueRow(label: "Password", value: password)
+                ValueRow(label: "Socket", value: state.postgreSQL ? model.paths.sockets.path : model.paths.sockets.appendingPathComponent("mysql.sock").path)
+                ValueRow(label: "URL", value: state.postgreSQL ? "postgresql://\(user):\(password)@127.0.0.1:\(port)/postgres" : "mysql://\(user):\(password)@127.0.0.1:\(port)")
+                ValueRow(label: "Shell", value: state.postgreSQL ? "psql postgresql://\(user):\(password)@127.0.0.1:\(port)/postgres" : "mysql -h 127.0.0.1 -P \(port) -u \(user) -p\(password)")
+            } accessory: {
+                Button { Pasteboard.copy(dotEnv) } label: { Label("Copy .env", systemImage: "doc.on.doc") }
+                    .buttonStyle(.borderless)
+                    .help("Copy DB_ settings for a Laravel or Symfony .env file")
                 Picker("Database", selection: $state.postgreSQL) {
                     Text("MySQL").tag(false)
                     Text("PostgreSQL").tag(true)
                 }
                 .pickerStyle(.segmented)
-                .disabled(model.isBusy)
-                CopyableValueRow(label: "Host", value: "127.0.0.1")
-                CopyableValueRow(label: "Port", value: String(state.postgreSQL ? model.configuration.ports.postgresqlListen : model.configuration.ports.mysqlListen))
-                if state.postgreSQL { CopyableValueRow(label: "Database", value: "postgres") }
-                CopyableValueRow(label: "Username", value: state.postgreSQL ? "devstack" : "root")
-                CopyableValueRow(label: "Password", value: state.postgreSQL ? "devstack" : "root")
-                CopyableValueRow(label: "Socket", value: state.postgreSQL ? model.paths.sockets.path : model.paths.sockets.appendingPathComponent("mysql.sock").path)
-                LabeledContent("Web admin") {
-                    HStack {
-                        Button("Adminer") {
-                            model.openURL(model.toolURL("adminer") + (state.postgreSQL
-                                ? "/?pgsql=127.0.0.1%3A\(model.configuration.ports.postgresqlListen)&username=devstack&db=postgres"
-                                : "/?server=127.0.0.1%3A\(model.configuration.ports.mysqlListen)&username=root"))
-                        }
-                        if !state.postgreSQL {
-                            Button("phpMyAdmin") { model.openURL(model.toolURL("phpmyadmin")) }
-                        }
-                    }
-                    .disabled(!webRunning || !running)
-                }
-            } header: {
-                Text("Connection")
-            } footer: { SectionFooter {
-                if service == nil {
-                    Text("Choose a \(engineName) version above to include it in the stack.")
-                } else if !webRunning || !running {
-                    Text("The web admin tools open while \(engineName) and the web server are running.")
-                }
-            } }
+                .labelsHidden()
+                .fixedSize()
+            }
 
-            Section {
-                LabeledContent("SQL") {
-                    HStack {
-                        Button("Export…", action: exportDatabase)
-                        Button("Import…", action: chooseImportFile)
+            Panel("Tools", note: webRunning && running ? nil : "The web admin tools open while \(engineName) and the web server run.") {
+                PanelRow {
+                    Button {
+                        model.openURL(model.toolURL("adminer") + (state.postgreSQL
+                            ? "/?pgsql=127.0.0.1%3A\(port)&username=devstack&db=postgres"
+                            : "/?server=127.0.0.1%3A\(port)&username=root"))
+                    } label: { Label("Adminer", systemImage: "tablecells") }
+                    if !state.postgreSQL {
+                        Button { model.openURL(model.toolURL("phpmyadmin")) } label: { Label("phpMyAdmin", systemImage: "tablecells") }
                     }
-                    .disabled(model.isBusy || !running)
+                    Spacer()
                 }
+                .controlSize(.small)
+                .disabled(!webRunning || !running)
+            }
+
+            Panel("Backup and Restore", note: running ? "Importing backs up \(engineName) first." : "Start \(engineName) to export or import SQL.") {
+                PanelRow {
+                    Button("Export…", action: exportDatabase)
+                    Button("Import…", action: chooseImportFile)
+                    Spacer()
+                    Button("Show Backups") { NSWorkspace.shared.activateFileViewerSelecting([model.paths.backups]) }
+                }
+                .controlSize(.small)
+                .disabled(model.isBusy || !running)
                 if let backup = model.lastDatabaseBackup {
-                    CopyableValueRow(label: "Last backup", value: backup.path)
+                    ValueRow(label: "Last backup", value: backup.path, revealsFile: true)
                 }
-                LabeledContent("Backups") {
-                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([model.paths.backups]) }
-                }
-            } header: {
-                Text("Backup and restore")
-            } footer: { SectionFooter {
-                Text(running ? "Importing backs up \(engineName) first." : "Start \(engineName) to export or import SQL.")
-            } }
-
-            if !state.postgreSQL, service != nil {
-                Section {
-                    LabeledContent {
-                        Button("Reset MySQL…", role: .destructive) { state.confirmingReset = true }.disabled(model.isBusy)
-                    } label: {
-                        Text("Reset")
-                        Text("Backs up MySQL, archives its data folder and starts fresh.")
+                if !state.postgreSQL, service != nil {
+                    SettingRow(label: "Reset MySQL", detail: "Backs up MySQL, archives its data folder and starts fresh.") {
+                        Button("Reset…", role: .destructive) { state.confirmingReset = true }
+                            .controlSize(.small)
+                            .disabled(model.isBusy)
                     }
                 }
             }
         }
-        .formStyle(.grouped)
         .alert("Import \(state.pendingImport?.lastPathComponent ?? "SQL file")?", isPresented: $state.confirmingImport, presenting: state.pendingImport) { url in
             Button("Import", role: .destructive) { state.pendingImport = nil; Task { await model.importDatabase(from: url, postgreSQL: state.postgreSQL) } }
             Button("Cancel", role: .cancel) { state.pendingImport = nil }
@@ -179,6 +182,12 @@ struct DatabaseView: View {
         } message: {
             Text("DevStack backs up MySQL, archives its data folder, and creates a clean database with root/root credentials.")
         }
+    }
+
+    private var dotEnv: String {
+        state.postgreSQL
+            ? "DB_CONNECTION=pgsql\nDB_HOST=127.0.0.1\nDB_PORT=\(port)\nDB_DATABASE=postgres\nDB_USERNAME=\(user)\nDB_PASSWORD=\(password)\n"
+            : "DB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_PORT=\(port)\nDB_USERNAME=\(user)\nDB_PASSWORD=\(password)\n"
     }
 
     private func exportDatabase() {
@@ -211,44 +220,51 @@ struct MailpitView: View {
     @StateObject private var state = MailpitViewState()
 
     private var running: Bool { model.serviceIsRunning(.mailpit) }
-    private var inboxURL: String { "http://127.0.0.1:\(model.configuration.ports.mailpitInboxListen)" }
+    private var ports: ServicePorts { model.configuration.ports }
 
     var body: some View {
-        Form {
-            Section {
-                ServiceRow(title: "Mailpit", symbol: "envelope", detail: "Captures outgoing mail", service: .mailpit) {
-                    Button("Open Inbox") { model.openURL(inboxURL) }.disabled(!running)
+        PanelPage {
+            Panel("Service") {
+                ServiceRow(title: model.runtimeTitle("Mailpit", id: ServiceKind.mailpit.runtimeID), symbol: "envelope",
+                           address: "smtp :\(ports.mailpitSMTP) · web :\(ports.mailpitInbox)", service: .mailpit) {
+                    EmptyView()
                 } menuItems: {
                     Divider()
-                    Button("Clear Inbox…", role: .destructive) { state.isConfirmingClear = true }.disabled(!running || model.isBusy)
+                    Button("Open Inbox") { model.openURL(model.mailInboxURL) }
                 }
             }
-            Section {
-                CopyableValueRow(label: "Host", value: "127.0.0.1")
-                CopyableValueRow(label: "Port", value: String(model.configuration.ports.mailpitSMTP))
-                CopyableValueRow(label: "Inbox", value: inboxURL)
-            } header: {
-                Text("SMTP")
-            } footer: { SectionFooter {
-                Text("PHP's mail() sends here automatically. SMTP needs no authentication or encryption.")
-            } }
-            Section {
-                LabeledContent {
+
+            Panel("SMTP", note: "PHP's mail() sends here automatically. SMTP needs no authentication or encryption.") {
+                ValueRow(label: "Host", value: "127.0.0.1")
+                ValueRow(label: "Port", value: String(ports.mailpitSMTP))
+                ValueRow(label: "Inbox", value: model.mailInboxURL)
+            } accessory: {
+                Button { Pasteboard.copy(dotEnv) } label: { Label("Copy .env", systemImage: "doc.on.doc") }
+                    .buttonStyle(.borderless)
+                    .help("Copy MAIL_ settings for a Laravel .env file")
+            }
+
+            Panel("Inbox") {
+                PanelRow {
+                    Button { model.openURL(model.mailInboxURL) } label: { Label("Open Inbox", systemImage: "tray") }
+                    Spacer()
                     Button("Clear Inbox…", role: .destructive) { state.isConfirmingClear = true }
-                        .disabled(!running || model.isBusy)
-                } label: {
-                    Text("Messages")
-                    Text("Deletes every captured message.")
+                        .disabled(model.isBusy)
                 }
+                .controlSize(.small)
+                .disabled(!running)
             }
         }
-        .formStyle(.grouped)
         .alert("Clear the inbox?", isPresented: $state.isConfirmingClear) {
             Button("Clear Inbox", role: .destructive) { Task { await model.clearMailpit() } }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Every message stored in Mailpit is deleted.")
         }
+    }
+
+    private var dotEnv: String {
+        "MAIL_MAILER=smtp\nMAIL_HOST=127.0.0.1\nMAIL_PORT=\(ports.mailpitSMTP)\nMAIL_USERNAME=null\nMAIL_PASSWORD=null\nMAIL_ENCRYPTION=null\n"
     }
 }
 
@@ -261,64 +277,93 @@ struct LogsView: View {
     @StateObject private var state = LogsViewState()
 
     var body: some View {
-        GeometryReader { viewport in
-            ScrollView([.horizontal, .vertical]) {
-                Text(filteredContents.isEmpty ? (state.filter.isEmpty ? "No output yet." : "No lines match “\(state.filter)”.") : filteredContents)
-                    .font(.system(.callout, design: .monospaced))
-                    .foregroundStyle(filteredContents.isEmpty ? .secondary : .primary)
-                    .lineSpacing(2)
-                    .textSelection(.enabled)
-                    .padding(12)
-                    // At least the viewport, so short output starts at the top left.
-                    .frame(minWidth: viewport.size.width, minHeight: viewport.size.height, alignment: .topLeading)
-            }
-        }
-        .background(Color(nsColor: .textBackgroundColor))
-        .searchable(text: $state.filter, placement: .toolbar, prompt: "Filter")
-        .toolbar {
-            ToolbarItem {
-                Picker("Log", selection: $model.selectedLogFile) {
-                    ForEach([LogFiles.Group.services, .sites, .other], id: \.self) { group in
-                        let entries = state.entries.filter { $0.group == group }
-                        if !entries.isEmpty {
-                            Section(group.title) {
-                                ForEach(entries) { entry in Text(entry.title).tag(entry.fileName) }
-                            }
+        VStack(spacing: 0) {
+            bar
+            Divider()
+            GeometryReader { viewport in
+                ScrollView([.horizontal, .vertical]) {
+                    Group {
+                        if state.rendered.characters.isEmpty {
+                            Text(state.filter.isEmpty ? "No output yet." : "No lines match “\(state.filter)”.").foregroundStyle(.secondary)
+                        } else {
+                            Text(state.rendered)
                         }
                     }
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .lineSpacing(2)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    // At least the viewport, so short output starts at the top left.
+                    .frame(minWidth: viewport.size.width, minHeight: viewport.size.height, alignment: .topLeading)
                 }
-                .help("Choose a log")
+                // Like tail -f: the newest lines stay in view.
+                .defaultScrollAnchor(.bottomLeading)
             }
-            ToolbarItem {
-                Toggle(isOn: $state.live) { Label("Live", systemImage: "dot.radiowaves.left.and.right") }
-                    .help(state.live ? "Following new output" : "Paused")
-            }
-            ToolbarItem {
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(filteredContents, forType: .string)
-                } label: { Label("Copy", systemImage: "doc.on.doc") }
-                .help("Copy the shown output")
-            }
-            ToolbarItem {
-                Button { NSWorkspace.shared.activateFileViewerSelecting([model.paths.logs]) } label: { Label("Show in Finder", systemImage: "folder") }
-                    .help("Show the logs folder in Finder")
-            }
+            .background(Color(nsColor: .textBackgroundColor))
         }
         .onAppear(perform: refresh)
-        .onChange(of: model.selectedLogFile) { _, _ in refresh() }
+        .onChange(of: model.selectedLogFile) { _, _ in
+            state.contents = ""
+            state.rendered = AttributedString()
+            refresh()
+        }
+        .onChange(of: state.filter) { _, _ in render() }
         .task(id: state.live) {
             guard state.live else { return }
             while !Task.isCancelled {
-                refresh()
                 do { try await Task.sleep(for: .seconds(2)) } catch { break }
+                refresh()
             }
         }
     }
 
-    private var filteredContents: String {
-        state.filter.isEmpty ? state.contents
-            : state.contents.components(separatedBy: .newlines).filter { $0.localizedCaseInsensitiveContains(state.filter) }.joined(separator: "\n")
+    private var bar: some View {
+        HStack(spacing: 10) {
+            Picker("Log", selection: $model.selectedLogFile) {
+                ForEach([LogFiles.Group.services, .sites, .other], id: \.self) { group in
+                    let entries = state.entries.filter { $0.group == group }
+                    if !entries.isEmpty {
+                        Section(group.title) {
+                            ForEach(entries) { entry in Text(entry.title).tag(entry.fileName) }
+                        }
+                    }
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+            .help("Choose a log")
+            HStack(spacing: 4) {
+                Image(systemName: "line.3.horizontal.decrease").foregroundStyle(.secondary).accessibilityHidden(true)
+                TextField("Filter", text: $state.filter).textFieldStyle(.plain)
+                if !state.filter.isEmpty {
+                    Button { state.filter = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Clear filter")
+                }
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(PanelStyle.stroke))
+            .frame(maxWidth: 260)
+            Text("\(state.lineCount.formatted()) line\(state.lineCount == 1 ? "" : "s")")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .fixedSize()
+            Spacer(minLength: 8)
+            LiveToggle(isOn: $state.live)
+            IconButton(title: "Copy the shown output", symbol: "doc.on.doc") {
+                Pasteboard.copy(String(state.rendered.characters))
+            }
+            IconButton(title: "Show the log in Finder", symbol: "folder") {
+                let file = model.paths.logs.appendingPathComponent(model.selectedLogFile)
+                NSWorkspace.shared.activateFileViewerSelecting([FileManager.default.fileExists(atPath: file.path) ? file : model.paths.logs])
+            }
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
     }
 
     private func refresh() {
@@ -328,8 +373,71 @@ struct LogsView: View {
             // A slower read for an earlier selection must not overwrite the current one.
             guard fileName == model.selectedLogFile else { return }
             state.entries = snapshot.entries
+            guard snapshot.contents != state.contents || state.rendered.characters.isEmpty else { return }
             state.contents = snapshot.contents
+            render()
         }
+    }
+
+    private func render() {
+        let contents = state.contents
+        let filter = state.filter
+        Task {
+            let output = await Task.detached(priority: .userInitiated) { LogRendering.render(contents, filter: filter) }.value
+            guard contents == state.contents, filter == state.filter else { return }
+            state.rendered = output.text
+            state.lineCount = output.lines
+        }
+    }
+}
+
+/// Whether the log follows new output, spelled out: a green dot and "Live",
+/// or a pause symbol and "Paused".
+private struct LiveToggle: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Button { isOn.toggle() } label: {
+            HStack(spacing: 5) {
+                if isOn {
+                    Circle().fill(.green).frame(width: 7, height: 7)
+                } else {
+                    Image(systemName: "pause.fill").font(.system(size: 8, weight: .bold))
+                }
+                Text(isOn ? "Live" : "Paused")
+            }
+            .frame(minWidth: 54)
+        }
+        .buttonStyle(.bordered)
+        .tint(isOn ? .green : nil)
+        .help(isOn ? "Following new output. Click to pause." : "Paused. Click to follow new output.")
+        .accessibilityLabel(isOn ? "Live, following new output" : "Paused")
+    }
+}
+
+enum LogRendering {
+    /// The log as styled text: errors in red, warnings in orange; only the
+    /// lines containing `filter` when one is set.
+    static func render(_ contents: String, filter: String) -> (text: AttributedString, lines: Int) {
+        var text = AttributedString()
+        var lines = 0
+        var body = Substring(contents)
+        // The file's final newline does not start another line.
+        if body.hasSuffix("\n") { body = body.dropLast() }
+        guard !body.isEmpty else { return (text, 0) }
+        for line in body.split(separator: "\n", omittingEmptySubsequences: false) {
+            if !filter.isEmpty, !line.localizedCaseInsensitiveContains(filter) { continue }
+            var piece = AttributedString(lines == 0 ? String(line) : "\n" + line)
+            let lower = line.lowercased()
+            if lower.contains("error") || lower.contains("fatal") || lower.contains("[crit") || lower.contains("[emerg") || lower.contains("[alert") {
+                piece.foregroundColor = .red
+            } else if lower.contains("warn") || lower.contains("deprecated") {
+                piece.foregroundColor = .orange
+            }
+            text.append(piece)
+            lines += 1
+        }
+        return (text, lines)
     }
 }
 
@@ -346,6 +454,8 @@ private extension LogFiles.Group {
 @MainActor private final class LogsViewState: ObservableObject {
     @Published var entries: [LogFiles.Entry] = []
     @Published var contents = ""
+    @Published var rendered = AttributedString()
+    @Published var lineCount = 0
     @Published var filter = ""
     @Published var live = true
 }
@@ -357,80 +467,69 @@ struct DoctorView: View {
     @StateObject private var state = DoctorViewState()
 
     var body: some View {
-        Group {
-            if let report = model.diagnosticReport {
-                Form {
-                    if model.isRunningDoctor { progressSection }
-                    Section {
-                        LabeledContent("Results") {
-                            HStack(spacing: 14) {
-                                count(report, .info, "passed", "passed")
-                                count(report, .warning, "warning", "warnings")
-                                count(report, .error, "error", "errors")
-                            }
-                        }
-                        LabeledContent("Checked", value: report.generatedAt.formatted(date: .abbreviated, time: .shortened))
-                        Toggle("Show only what needs attention", isOn: $state.attentionOnly)
+        if model.diagnosticReport == nil && !model.isRunningDoctor {
+            ContentUnavailableView {
+                Label("Check Your Stack", systemImage: "stethoscope")
+            } description: {
+                Text("Doctor checks ports, runtimes, signatures, configuration and system integration.")
+            } actions: {
+                Button("Run Checks") { Task { await model.runDoctor() } }.buttonStyle(.borderedProminent)
+            }
+        } else {
+            PanelPage {
+                if model.isRunningDoctor {
+                    Banner(symbol: "stethoscope", title: model.diagnosticProgress ?? "Checking your stack…", tint: .accentColor) {
+                        ProgressView().controlSize(.small)
                     }
+                }
+                if let report = model.diagnosticReport {
                     let results = report.results.filter { !state.attentionOnly || $0.severity != .info }
-                    Section("Checks") {
+                    Panel("Checks", note: "Checked \(report.generatedAt.formatted(date: .abbreviated, time: .shortened)).") {
+                        PanelRow {
+                            count(report, .info, "passed", "passed")
+                            count(report, .warning, "warning", "warnings")
+                            count(report, .error, "error", "errors")
+                            Spacer()
+                            Toggle("Only what needs attention", isOn: $state.attentionOnly).toggleStyle(.checkbox).controlSize(.small)
+                        }
                         if results.isEmpty {
-                            NoticeRow(symbol: "checkmark.seal.fill", title: "Nothing needs attention",
-                                      message: "Every check passed. Turn off the filter to see them all.", tint: .green)
+                            PanelRow {
+                                Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+                                Text("Nothing needs attention.").foregroundStyle(.secondary)
+                                Spacer()
+                            }
                         }
                         ForEach(results) { result in
-                            DisclosureGroup {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text(result.evidence).foregroundStyle(.secondary).textSelection(.enabled)
-                                    if let remediation = result.remediation {
-                                        Label(remediation, systemImage: "wrench.and.screwdriver").foregroundStyle(.primary)
+                            PanelRow {
+                                DisclosureGroup {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text(result.evidence).foregroundStyle(.secondary).textSelection(.enabled)
+                                        if let remediation = result.remediation {
+                                            Label(remediation, systemImage: "wrench.and.screwdriver")
+                                        }
                                     }
-                                }
-                                .font(.callout)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.vertical, 4)
-                            } label: {
-                                Label {
-                                    Text(result.title)
-                                } icon: {
-                                    Image(systemName: result.severity.symbol).foregroundStyle(result.severity.color)
+                                    .font(.callout)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.top, 4)
+                                } label: {
+                                    Label {
+                                        Text(result.title)
+                                    } icon: {
+                                        Image(systemName: result.severity.symbol).foregroundStyle(result.severity.color)
+                                    }
                                 }
                             }
                         }
+                    } accessory: {
+                        Button(action: exportBundle) { Label("Export Support Bundle…", systemImage: "square.and.arrow.up") }
+                            .buttonStyle(.borderless)
+                            .disabled(model.isRunningDoctor)
+                            .help("Save a support bundle with the report and logs")
+                        Button { Task { await model.runDoctor() } } label: { Label("Run Again", systemImage: "arrow.clockwise") }
+                            .buttonStyle(.borderless)
+                            .disabled(model.isRunningDoctor)
                     }
                 }
-                .formStyle(.grouped)
-            } else if model.isRunningDoctor {
-                Form { progressSection }.formStyle(.grouped)
-            } else {
-                ContentUnavailableView {
-                    Label("Check Your Stack", systemImage: "stethoscope")
-                } description: {
-                    Text("Doctor checks ports, runtimes, signatures, configuration and system integration.")
-                } actions: {
-                    Button("Run Checks") { Task { await model.runDoctor() } }
-                }
-            }
-        }
-        .toolbar {
-            ToolbarItem {
-                Button(action: exportBundle) { Label("Export Support Bundle…", systemImage: "square.and.arrow.up") }
-                    .disabled(model.diagnosticReport == nil || model.isRunningDoctor)
-                    .help("Save a support bundle with the report and logs")
-            }
-            ToolbarItem {
-                Button { Task { await model.runDoctor() } } label: { Label("Run Checks", systemImage: "arrow.clockwise") }
-                    .disabled(model.isRunningDoctor)
-                    .help("Run every check again")
-            }
-        }
-    }
-
-    private var progressSection: some View {
-        Section {
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                Text(model.diagnosticProgress ?? "Checking your stack…").foregroundStyle(.secondary)
             }
         }
     }
@@ -438,8 +537,9 @@ struct DoctorView: View {
     private func count(_ report: DiagnosticReport, _ severity: DiagnosticSeverity, _ singular: String, _ plural: String) -> some View {
         let number = report.results.filter { $0.severity == severity }.count
         return Label("\(number) \(number == 1 ? singular : plural)", systemImage: severity.symbol)
-            .foregroundStyle(severity.color)
+            .foregroundStyle(number == 0 && severity != .info ? Color.secondary : severity.color)
             .labelStyle(.titleAndIcon)
+            .padding(.trailing, 6)
     }
 
     private func exportBundle() {
@@ -478,102 +578,91 @@ struct SettingsView: View {
     @ObservedObject private var updater = AppUpdater.shared
 
     var body: some View {
-        Form {
-            Section("General") {
-                Picker("Appearance", selection: $model.appearance) {
-                    ForEach(AppAppearance.allCases) { appearance in Text(appearance.rawValue).tag(appearance) }
+        PanelPage {
+            Panel("General") {
+                SettingRow(label: "Appearance") {
+                    Picker("Appearance", selection: $model.appearance) {
+                        ForEach(AppAppearance.allCases) { appearance in Text(appearance.rawValue).tag(appearance) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
                 }
-                Toggle("Open DevStack at login", isOn: Binding(get: { model.configuration.startAtLogin },
-                                                                set: { enabled in Task { await model.setStartAtLogin(enabled) } }))
+                SettingRow(label: "Open DevStack at login") {
+                    Toggle("Open DevStack at login", isOn: Binding(get: { model.configuration.startAtLogin },
+                                                                    set: { enabled in Task { await model.setStartAtLogin(enabled) } }))
+                        .toggleStyle(.switch).controlSize(.mini).labelsHidden()
+                }
             }
 
-            Section {
-                LabeledContent("Version") {
-                    HStack(spacing: 10) {
-                        Text(AppUpdater.currentVersion).foregroundStyle(.secondary)
-                        Button("Check Now", action: updater.checkForUpdates).disabled(!updater.canCheckForUpdates)
-                    }
+            Panel("Updates", note: updater.isAvailable ? nil : "Development builds don't check for updates.") {
+                SettingRow(label: "Version") {
+                    Text(AppUpdater.currentVersion).font(.callout.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                    Button("Check Now", action: updater.checkForUpdates).controlSize(.small).disabled(!updater.canCheckForUpdates)
                 }
-                Toggle("Check for updates automatically", isOn: Binding(get: { updater.automaticallyChecksForUpdates },
-                                                                         set: { updater.automaticallyChecksForUpdates = $0 }))
-                    .disabled(!updater.isAvailable)
-            } header: {
-                Text("Updates")
-            } footer: { SectionFooter {
-                if !updater.isAvailable { Text("Development builds don't check for updates.") }
-            } }
+                SettingRow(label: "Check for updates automatically") {
+                    Toggle("Check for updates automatically", isOn: Binding(get: { updater.automaticallyChecksForUpdates },
+                                                                             set: { updater.automaticallyChecksForUpdates = $0 }))
+                        .toggleStyle(.switch).controlSize(.mini).labelsHidden()
+                        .disabled(!updater.isAvailable)
+                }
+            }
 
-            Section {
-                LabeledContent("Helper") {
-                    HStack(spacing: 10) {
-                        if model.helperIsRegistered {
-                            StatusLabel(title: model.helperInstalled ? "Ready" : "Not responding", color: model.helperInstalled ? .green : .orange)
-                            if !model.helperInstalled {
-                                Button("Repair…") { Task { await model.installHelper() } }.disabled(model.isBusy)
-                            }
-                            Button("Remove…", role: .destructive) { state.confirmRemove = true }
-                                .disabled(model.isBusy || model.hasRunningServices)
-                        } else {
-                            StatusLabel(title: "Not set up", color: Color(nsColor: .tertiaryLabelColor))
-                            Button(model.helperSetupState.actionTitle) { Task { await model.installHelper() } }.disabled(model.isBusy)
+            Panel("System Integration", note: model.helperSetupState.message) {
+                SettingRow(label: "Helper", detail: "Custom hostnames, ports 80 and 443, local DNS") {
+                    if model.helperIsRegistered {
+                        StatusLabel(title: model.helperInstalled ? "Ready" : "Not responding", color: model.helperInstalled ? .green : .orange)
+                        if !model.helperInstalled {
+                            Button("Repair…") { Task { await model.installHelper() } }.controlSize(.small).disabled(model.isBusy)
                         }
+                        Button("Remove…", role: .destructive) { state.confirmRemove = true }
+                            .controlSize(.small)
+                            .disabled(model.isBusy || model.hasRunningServices)
+                    } else {
+                        StatusLabel(title: "Not set up", color: Color(nsColor: .tertiaryLabelColor))
+                        Button(model.helperSetupState.actionTitle) { Task { await model.installHelper() } }.controlSize(.small).disabled(model.isBusy)
                     }
                 }
-                LabeledContent("HTTPS certificates") {
-                    HStack(spacing: 10) {
-                        StatusLabel(title: model.localCATrusted ? "Trusted" : "Not trusted", color: model.localCATrusted ? .green : .orange)
-                        Button("Manage…") { model.selectedSection = .ssl }
-                    }
+                SettingRow(label: "HTTPS certificates") {
+                    StatusLabel(title: model.localCATrusted ? "Trusted" : "Not trusted", color: model.localCATrusted ? .green : .orange)
+                    Button("Manage…") { model.selectedSection = .ssl }.controlSize(.small)
                 }
-                LabeledContent("Setup") {
-                    Button("Run Setup Assistant…") { model.presentSetupWizard() }.disabled(model.isBusy)
+                SettingRow(label: "Setup assistant") {
+                    Button("Run…") { model.presentSetupWizard() }.controlSize(.small).disabled(model.isBusy)
                 }
                 if model.isPreviewBuild {
-                    LabeledContent {
-                        Button("Open Signed Copy…", action: model.openApplicationsBuild)
-                    } label: {
-                        Text("Preview build")
-                        Text("The helper works only with the signed copy in Applications.")
+                    SettingRow(label: "Preview build", detail: "The helper works only with the signed copy in Applications.") {
+                        Button("Open Signed Copy…", action: model.openApplicationsBuild).controlSize(.small)
                     }
                 }
-            } header: {
-                Text("System integration")
-            } footer: { SectionFooter {
-                Text(model.helperSetupState.message)
-            } }
-
-            PortsSection()
-            LocalDNSSection()
-
-            Section {
-                LabeledContent("Runtimes") {
-                    Button("Manage…") { model.selectedSection = .runtimes }
-                }
-                DisclosureGroup("Sources and licenses") {
-                    ForEach(model.runtimeManifests.filter { $0.kind != .phpExtension }) { manifest in RuntimeDetailsRow(manifest: manifest) }
-                }
-            } header: {
-                Text("Runtimes")
             }
 
-            Section {
-                CopyableValueRow(label: "App data", value: model.paths.applicationSupport.path)
-                CopyableValueRow(label: "Runtimes", value: model.paths.importedRuntimes.path)
-                CopyableValueRow(label: "Logs", value: model.paths.logs.path)
-                LabeledContent("Shell") {
-                    HStack {
-                        Button("Copy Environment", action: model.copyManagedEnvironmentCommand)
-                            .help("Copy a command that puts DevStack's tools on your shell's PATH")
-                        Button("Show App Data") { NSWorkspace.shared.activateFileViewerSelecting([model.paths.applicationSupport]) }
+            PortsPanel()
+            LocalDNSPanel()
+
+            Panel("Runtimes") {
+                SettingRow(label: "Installed runtimes") {
+                    Button("Manage…") { model.selectedSection = .runtimes }.controlSize(.small)
+                }
+                PanelRow {
+                    DisclosureGroup("Sources and licenses") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(model.runtimeManifests.filter { $0.kind != .phpExtension }) { manifest in RuntimeDetailsRow(manifest: manifest) }
+                        }
+                        .padding(.top, 4)
                     }
                 }
-            } header: {
-                Text("Locations")
-            } footer: { SectionFooter {
-                Text("DevStack \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development build") · Apple silicon · macOS 15 or later")
-            } }
+            }
+
+            Panel("Locations", note: "DevStack \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development build") · Apple silicon · macOS 15 or later") {
+                ValueRow(label: "App data", value: model.paths.applicationSupport.path, revealsFile: true)
+                ValueRow(label: "Runtimes", value: model.paths.importedRuntimes.path, revealsFile: true)
+                ValueRow(label: "Logs", value: model.paths.logs.path, revealsFile: true)
+                SettingRow(label: "Shell environment", detail: "Puts DevStack's PHP, Composer and database tools on your shell's PATH") {
+                    Button("Copy Command", action: model.copyManagedEnvironmentCommand).controlSize(.small)
+                }
+            }
         }
-        .formStyle(.grouped)
         .alert("Remove system integration?", isPresented: $state.confirmRemove) {
             Button("Remove", role: .destructive) { Task { await model.removeHelper() } }
             Button("Cancel", role: .cancel) {}
@@ -589,7 +678,7 @@ struct RuntimeDetailsRow: View {
     let manifest: RuntimeManifest
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Text("\(manifest.kind.displayName) \(manifest.version)")
                 Spacer()
@@ -601,11 +690,10 @@ struct RuntimeDetailsRow: View {
                 Text("Compatibility gate: \(gate)").font(.caption).foregroundStyle(.orange)
             }
         }
-        .padding(.vertical, 2)
     }
 }
 
-private struct PortsSection: View {
+private struct PortsPanel: View {
     @EnvironmentObject private var model: AppModel
     @State private var draft = PortsDraft()
     @State private var applied = ServicePorts()
@@ -613,14 +701,14 @@ private struct PortsSection: View {
     private var locked: Bool { model.hasRunningServices || model.isBusy }
 
     var body: some View {
-        Section {
-            portField("Web HTTP", text: $draft.webHTTP, fallback: ServicePorts.webHTTPFallback, isWebPort: true)
-            portField("Web HTTPS", text: $draft.webHTTPS, fallback: ServicePorts.webHTTPSFallback, isWebPort: true)
-            portField("MySQL", text: $draft.mysql, fallback: ServicePorts.mysqlFallback, isWebPort: false)
-            portField("PostgreSQL", text: $draft.postgresql, fallback: ServicePorts.postgresqlFallback, isWebPort: false)
-            portField("Mail SMTP", text: $draft.mailpitSMTP, fallback: ServicePorts.mailpitSMTPFallback, isWebPort: false)
-            portField("Mail inbox", text: $draft.mailpitInbox, fallback: ServicePorts.mailpitInboxFallback, isWebPort: false)
-            HStack {
+        Panel("Ports", note: note) {
+            portRow("Web HTTP", text: $draft.webHTTP, fallback: ServicePorts.webHTTPFallback, isWebPort: true)
+            portRow("Web HTTPS", text: $draft.webHTTPS, fallback: ServicePorts.webHTTPSFallback, isWebPort: true)
+            portRow("MySQL", text: $draft.mysql, fallback: ServicePorts.mysqlFallback, isWebPort: false)
+            portRow("PostgreSQL", text: $draft.postgresql, fallback: ServicePorts.postgresqlFallback, isWebPort: false)
+            portRow("Mail SMTP", text: $draft.mailpitSMTP, fallback: ServicePorts.mailpitSMTPFallback, isWebPort: false)
+            portRow("Mail inbox", text: $draft.mailpitInbox, fallback: ServicePorts.mailpitInboxFallback, isWebPort: false)
+            PanelRow {
                 Button("Use 8080 and 8443") { useDevPorts() }.disabled(locked).help("Ports that work without the helper")
                 Button("Use 80 and 443") { useStandardPorts() }.disabled(locked).help("Site addresses without a port number; needs the helper")
                 Spacer()
@@ -628,37 +716,33 @@ private struct PortsSection: View {
                 Button("Apply") { Task { await apply() } }
                     .disabled(locked || draft.ports?.isValid != true || draft.ports == applied)
             }
-        } header: {
-            Text("Ports")
-        } footer: { SectionFooter {
-            if model.hasRunningServices {
-                Text("Stop the stack to change ports.")
-            } else if let message = validationMessage {
-                Label(message, systemImage: validationIsError ? "exclamationmark.circle.fill" : "lock.shield")
-                    .foregroundStyle(validationIsError ? Color.red : Color.orange)
-            } else {
-                Text("Ports below 1024 use the helper, which forwards them to unprivileged ports.")
-            }
-        } }
+            .controlSize(.small)
+        }
         .onAppear { sync() }
         .onChange(of: model.configuration.ports) { _, _ in sync() }
     }
 
-    private func portField(_ title: String, text: Binding<String>, fallback: UInt16, isWebPort: Bool) -> some View {
-        LabeledContent {
-            HStack(spacing: 8) {
-                if let value = UInt16(text.wrappedValue), value > 0, value < 1024 {
-                    Text(verbatim: isWebPort && (value == 80 || value == 443) ? "Via the helper; no port in site URLs" : "Via the helper, to \(fallback)")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                TextField(title, text: text)
-                    .labelsHidden()
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 80)
-                    .disabled(locked)
-            }
-        } label: {
+    private var note: String {
+        if model.hasRunningServices { return "Stop the stack to change ports." }
+        if let message = validationMessage { return message }
+        return "Ports below 1024 use the helper, which forwards them to unprivileged ports."
+    }
+
+    private func portRow(_ title: String, text: Binding<String>, fallback: UInt16, isWebPort: Bool) -> some View {
+        PanelRow {
             Text(title)
+            Spacer(minLength: 8)
+            if let value = UInt16(text.wrappedValue), value > 0, value < 1024 {
+                Text(verbatim: isWebPort && (value == 80 || value == 443) ? "via the helper; no port in site URLs" : "via the helper, to \(fallback)")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            TextField(title, text: text)
+                .labelsHidden()
+                .font(.body.monospacedDigit())
+                .multilineTextAlignment(.trailing)
+                .frame(width: 70)
+                .controlSize(.small)
+                .disabled(locked)
         }
     }
 
@@ -668,11 +752,6 @@ private struct PortsSection: View {
         if !ports.collisions.isEmpty { return "These ports conflict: \(ports.collisions.map(String.init).joined(separator: ", "))." }
         if ports.requiresHelper, !model.helperInstalled { return "Set up the helper to use ports below 1024." }
         return nil
-    }
-
-    private var validationIsError: Bool {
-        guard let ports = draft.ports else { return true }
-        return !ports.isValid
     }
 
     private func useDevPorts() {
@@ -723,31 +802,30 @@ private struct PortsDraft: Equatable {
     }
 }
 
-private struct LocalDNSSection: View {
+private struct LocalDNSPanel: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        Section {
-            Toggle("Serve DevStack hostnames to this network", isOn: Binding(
-                get: { model.configuration.localNetworkAccess },
-                set: { enabled in Task { await model.setLocalNetworkAccess(enabled) } }))
-                .disabled(model.isBusy || !model.helperInstalled)
+        Panel("Local DNS", note: note) {
+            SettingRow(label: "Serve DevStack hostnames to this network") {
+                Toggle("Serve DevStack hostnames to this network", isOn: Binding(
+                    get: { model.configuration.localNetworkAccess },
+                    set: { enabled in Task { await model.setLocalNetworkAccess(enabled) } }))
+                    .toggleStyle(.switch).controlSize(.mini).labelsHidden()
+                    .disabled(model.isBusy || !model.helperInstalled)
+            }
             if let address = model.localNetworkAddress {
-                CopyableValueRow(label: "DNS address", value: address)
+                ValueRow(label: "DNS address", value: address)
             }
-            LabeledContent("Device setup") {
-                Button("Show Instructions…") { model.selectedSection = .localDNS }
+            SettingRow(label: "Device setup") {
+                Button("Show Instructions…") { model.selectedSection = .localDNS }.controlSize(.small)
             }
-        } header: {
-            Text("Local DNS")
-        } footer: { SectionFooter {
-            Text(footer)
-        } }
+        }
     }
 
-    private var footer: String {
-        guard model.helperInstalled else { return "Needs the helper. Set it up under System integration." }
+    private var note: String? {
+        guard model.helperInstalled else { return "Needs the helper. Set it up under System Integration." }
         guard model.localNetworkAddress != nil else { return "Connect to Wi-Fi or Ethernet to serve other devices." }
-        return "Phones and other devices can use this Mac as their DNS server for DevStack hostnames. Every other domain resolves as usual."
+        return nil
     }
 }

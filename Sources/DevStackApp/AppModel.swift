@@ -228,6 +228,9 @@ final class AppModel: ObservableObject {
         Set(configuration.sites.map(\.phpRuntimeID)).union(["php-8.5", configuration.defaultPHPRuntimeID])
     }
 
+    /// The PHP versions the stack runs, newest first.
+    var phpRuntimeIDsInUse: [String] { requiredPHPRuntimes.sorted(by: >) }
+
     var dashboardServices: [ServiceKind] {
         [configuration.selectedWebServer.service, ServiceKind(rawValue: configuration.defaultPHPRuntimeID) ?? .php85,
          .mailpit] + configuration.selectedDatabaseServices

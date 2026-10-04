@@ -27,6 +27,22 @@ import SwiftUI
                 SiteDefinition(name: "API Sandbox", hostname: "api.devstack.test", documentRoot: root.appendingPathComponent("Projects/api/public").path, tlsEnabled: false, logs: .init(access: "", error: ""))
             ]
         }
+        if CommandLine.arguments.contains("--installed") {
+            // Every current pack, as the installer leaves it; the legacy ones stay
+            // uninstalled so both states show.
+            let encoder = JSONEncoder()
+            for pin in model.runtimePackCatalog.packs where !pin.isLegacy {
+                model.configuration.importedRuntimeIDs.append(pin.id)
+                let directory = model.paths.importedRuntimes.appendingPathComponent(pin.id)
+                try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try? encoder.encode(pin).write(to: directory.appendingPathComponent(RuntimePackInstaller.markerName))
+                for entryPoint in model.runtimeManifests.first(where: { $0.id == pin.id })?.entryPoints.values.map({ $0 }) ?? [] {
+                    let file = directory.appendingPathComponent(entryPoint)
+                    try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    FileManager.default.createFile(atPath: file.path, contents: Data())
+                }
+            }
+        }
         if CommandLine.arguments.contains("--running") {
             model.helperInstalled = true
             model.serviceStates = ServiceKind.allCases.map { .init(service: $0, phase: [.apache, .php85, .mysql84, .mailpit].contains($0) ? .running : .stopped) }
@@ -57,19 +73,25 @@ import SwiftUI
         }
         Task { @MainActor in
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            // A window of its own, like the main window, so nothing waits on
-            // SwiftUI's scene restoration.
-            let host = NSHostingController(rootView: RootView().environmentObject(model).frame(minWidth: 760, minHeight: 520))
-            host.sceneBridgingOptions = [.toolbars, .title]
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
-                                  styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                                  backing: .buffered, defer: false)
-            window.toolbarStyle = .unified
-            window.contentViewController = host
+            NSApp.activate(ignoringOtherApps: true)
+            // Capture a scene window, as the app opens it. SwiftUI may restore
+            // none at launch, so a window of our own asks for one; it stays
+            // the fallback when no scene window appears.
+            let own = makeWindow(for: model)
+            own.makeKeyAndOrderFront(nil)
+            try? await Task.sleep(for: .milliseconds(500))
+            model.openMainWindow?()
+            var sceneWindow: NSWindow?
+            for _ in 0..<30 {
+                sceneWindow = NSApp.windows.first { $0 !== own && $0.identifier?.rawValue.hasPrefix("main") == true }
+                if sceneWindow != nil { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            if sceneWindow != nil { own.close() }
+            let window = sceneWindow ?? own
             window.setContentSize(NSSize(width: 980, height: 680))
             window.center()
             window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
             try? await Task.sleep(for: .seconds(2))
             guard let view = window.contentView else { NSApp.terminate(nil); return }
             for section in sections {
@@ -107,6 +129,17 @@ import SwiftUI
             }
             NSApp.terminate(nil)
         }
+    }
+
+    private static func makeWindow(for model: AppModel) -> NSWindow {
+        let host = NSHostingController(rootView: RootView().environmentObject(model).frame(minWidth: 760, minHeight: 520))
+        host.sceneBridgingOptions = [.toolbars, .title]
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.toolbarStyle = .unified
+        window.contentViewController = host
+        return window
     }
 
     private static func firstScrollView(in view: NSView) -> NSScrollView? {

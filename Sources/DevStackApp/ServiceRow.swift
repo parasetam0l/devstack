@@ -1,95 +1,213 @@
 import DevStackCore
 import SwiftUI
 
-/// Column widths shared by every service row, so pickers, states and buttons
-/// line up down a section.
+/// Column widths shared by service rows, so names, addresses, states and
+/// controls line up down a panel.
 enum ServiceRowLayout {
-    static let selector: CGFloat = 220
-    static let status: CGFloat = 84
-    static let button: CGFloat = 62
+    static let title: CGFloat = 168
+    static let state: CGFloat = 84
+    static let controls: CGFloat = 104
 }
 
-/// A service in a form section: what it is, which version, its state and its
-/// controls. `service` is nil while the service is left out of the stack.
-struct ServiceRow<Selector: View, MenuItems: View>: View {
+/// One service on one line: a state dot, the name and version, where it
+/// listens, its state and its controls.
+struct ServiceLine<Title: View, Controls: View, MenuItems: View>: View {
+    let symbol: String
+    let dot: Color
+    let state: String
+    var stateTint: Color = .secondary
+    var stateHelp: String?
+    let address: String
+    @ViewBuilder var title: Title
+    @ViewBuilder var controls: Controls
+    @ViewBuilder var menuItems: MenuItems
+
+    var body: some View {
+        PanelRow {
+            StatusDot(color: dot)
+            Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 18).accessibilityHidden(true)
+            title.frame(width: ServiceRowLayout.title, alignment: .leading)
+            Text(address)
+                .font(.callout.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(address)
+            Text(state)
+                .font(.callout)
+                .foregroundStyle(stateTint)
+                .lineLimit(1)
+                .frame(width: ServiceRowLayout.state, alignment: .leading)
+                .help(stateHelp ?? state)
+            HStack(spacing: 6) { controls }
+                .frame(width: ServiceRowLayout.controls, alignment: .trailing)
+        }
+        .contextMenu { menuItems }
+    }
+}
+
+/// A service DevStack supervises. `service` is nil while it is left out of
+/// the stack; `versions`, when given, is a picker that switches versions
+/// while the service is stopped.
+struct ServiceRow<Versions: View, MenuItems: View>: View {
     @EnvironmentObject private var model: AppModel
     let title: String
     let symbol: String
-    let detail: String
+    let address: String
     let service: ServiceKind?
-    @ViewBuilder var selector: Selector
+    var runtimeID: String?
+    @ViewBuilder var versions: Versions
     @ViewBuilder var menuItems: MenuItems
 
     private var phase: ServicePhase { service.map { model.serviceState($0).phase } ?? .stopped }
     private var running: Bool { phase == .running }
+    private var installed: Bool { (runtimeID ?? service?.runtimeID).map(model.runtimeIsAvailable) ?? true }
 
     var body: some View {
-        HStack(spacing: 12) {
-            ServiceRowTitle(title: title, symbol: symbol, detail: detail)
-            Spacer(minLength: 12)
-            selector
-                .labelsHidden()
-                .disabled(model.isBusy || running)
-                .help(running ? "Stop \(title) before changing its version." : "Choose the \(title) version")
-                .frame(width: ServiceRowLayout.selector, alignment: .trailing)
+        ServiceLine(symbol: symbol, dot: dot, state: state, stateTint: stateTint,
+                    stateHelp: service.flatMap { model.serviceState($0).failure?.message }, address: address) {
+            ServiceTitleMenu(title: title, locked: running || model.isBusy,
+                             lockedNote: running ? "Stop \(title) to switch versions" : nil) { versions }
+        } controls: {
             if let service {
-                StatusLabel(phase).frame(width: ServiceRowLayout.status, alignment: .leading)
-                Button(running ? "Stop" : "Start") {
-                    Task { if running { await model.stopService(service) } else { await model.startService(service) } }
+                if !installed {
+                    Button("Install") { model.installRuntime(runtimeID ?? service.runtimeID) }
+                        .controlSize(.small)
+                        .disabled(model.isBusy)
+                } else {
+                    IconButton(title: running ? "Stop \(title)" : "Start \(title)", symbol: running ? "stop.fill" : "play.fill") {
+                        Task { if running { await model.stopService(service) } else { await model.startService(service) } }
+                    }
+                    .disabled(model.isBusy)
+                    IconButton(title: "Restart \(title)", symbol: "arrow.clockwise") { Task { await model.restartService(service) } }
+                        .disabled(model.isBusy || !running)
+                    IconButton(title: "Show \(title) logs", symbol: "text.alignleft") { model.showLogs(for: service) }
                 }
-                .frame(width: ServiceRowLayout.button)
-                .disabled(model.isBusy || !model.runtimeIsAvailable(service.runtimeID))
-                .accessibilityLabel("\(running ? "Stop" : "Start") \(title)")
                 Menu {
                     Button("Show Logs") { model.showLogs(for: service) }
-                    Button("Restart") { Task { await model.restartService(service) } }
-                        .disabled(model.isBusy || !running)
+                    Button("Copy Address") { Pasteboard.copy(address) }
                     menuItems
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    Image(systemName: "ellipsis")
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(.borderless)
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .help("More \(title) actions")
-                .accessibilityLabel("\(title) actions")
-            } else {
-                StatusLabel(title: "Off", color: Color(nsColor: .tertiaryLabelColor))
-                    .frame(width: ServiceRowLayout.status, alignment: .leading)
-                ServiceRowSpacer()
+                .accessibilityLabel("More \(title) actions")
             }
+        } menuItems: {
+            if let service {
+                Button(running ? "Stop" : "Start") {
+                    Task { if running { await model.stopService(service) } else { await model.startService(service) } }
+                }
+                .disabled(model.isBusy || !installed)
+                Button("Restart") { Task { await model.restartService(service) } }.disabled(model.isBusy || !running)
+                Button("Show Logs") { model.showLogs(for: service) }
+                Divider()
+            }
+            Button("Copy Address") { Pasteboard.copy(address) }
+            menuItems
         }
-        .padding(.vertical, 2)
+    }
+
+    private var dot: Color {
+        guard service != nil else { return Color(nsColor: .tertiaryLabelColor) }
+        return installed || running ? phase.statusColor : .orange
+    }
+
+    private var state: String {
+        guard service != nil else { return "Off" }
+        if !installed && !running { return "Not installed" }
+        switch phase {
+        case .starting: return "Starting…"
+        case .stopping: return "Stopping…"
+        default: return phase.title
+        }
+    }
+
+    private var stateTint: Color {
+        if service != nil, !installed, !running { return .orange }
+        return phase == .failed ? .red : .secondary
     }
 }
 
 extension ServiceRow where MenuItems == EmptyView {
-    init(title: String, symbol: String, detail: String, service: ServiceKind?, @ViewBuilder selector: () -> Selector) {
-        self.init(title: title, symbol: symbol, detail: detail, service: service, selector: selector) { EmptyView() }
+    init(title: String, symbol: String, address: String, service: ServiceKind?, runtimeID: String? = nil,
+         @ViewBuilder versions: () -> Versions) {
+        self.init(title: title, symbol: symbol, address: address, service: service, runtimeID: runtimeID, versions: versions) { EmptyView() }
     }
 }
 
-struct ServiceRowTitle: View {
+/// A service's name and version. With version choices it is a menu, as in
+/// Xcode's scheme and destination menus; the choices lock while it runs.
+struct ServiceTitleMenu<Versions: View>: View {
     let title: String
-    let symbol: String
-    let detail: String
+    let locked: Bool
+    var lockedNote: String?
+    @ViewBuilder var versions: Versions
 
     var body: some View {
-        Label {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+        if Versions.self == EmptyView.self {
+            Text(title).fontWeight(.medium).lineLimit(1)
+        } else {
+            Menu {
+                versions
+                    .pickerStyle(.inline)
+                    .disabled(locked)
+                if let lockedNote, locked {
+                    Divider()
+                    Text(lockedNote)
+                }
+            } label: {
+                // Flush with plain titles; the chevron marks the choice.
+                HStack(spacing: 3) {
+                    Text(title).fontWeight(.medium).lineLimit(1)
+                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
             }
-        } icon: {
-            // A fixed column, so titles line up whatever the symbol's width.
-            Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 22)
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(locked ? (lockedNote ?? "Busy") : "Switch version")
         }
     }
 }
 
-/// Keeps a row without a Start/Stop button and menu aligned with the others.
-struct ServiceRowSpacer: View {
-    var body: some View {
-        Color.clear.frame(width: ServiceRowLayout.button + 12 + 22, height: 1)
+extension ServicePhase {
+    var statusColor: Color {
+        switch self {
+        case .running: .green
+        case .failed: .red
+        case .starting, .stopping: .orange
+        case .stopped: Color(nsColor: .tertiaryLabelColor)
+        }
+    }
+
+    var title: String { rawValue.capitalized }
+}
+
+extension AppModel {
+    /// Installs one runtime pack (and what it needs) from a row's Install button.
+    func installRuntime(_ id: String) {
+        guard runtimePackCatalog.pin(for: id) != nil else { selectedSection = .runtimes; return }
+        Task {
+            if let message = await installRuntimePacks([id]) { errorMessage = message }
+        }
+    }
+
+    /// A runtime's version from its manifest, such as "2.4.68".
+    func runtimeVersion(_ id: String) -> String? {
+        runtimeManifests.first { $0.id == id }?.version
+    }
+
+    /// "Apache 2.4.68": a product with the version DevStack runs.
+    func runtimeTitle(_ name: String, id: String) -> String {
+        runtimeVersion(id).map { "\(name) \($0)" } ?? name
     }
 }

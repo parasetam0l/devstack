@@ -20,70 +20,23 @@ struct SitesView: View {
             } else if filteredSites.isEmpty {
                 ContentUnavailableView.search(text: state.search)
             } else {
-                Table(filteredSites, selection: $state.selection) {
-                    TableColumn("Name") { site in
-                        HStack(spacing: 6) {
-                            Image(systemName: "globe").foregroundStyle(.secondary)
-                            Text(site.name)
-                            if site.hostname == "localhost" { Text("Default").font(.caption).foregroundStyle(.secondary) }
+                PanelPage {
+                    Panel {
+                        ForEach(filteredSites) { site in
+                            SiteRow(site: site, served: served(site), edit: { state.editingSite = site }, remove: { state.deletingSite = site })
                         }
                     }
-                    .width(min: 120, ideal: 160)
-                    TableColumn("Hostname") { site in Text(site.hostname) }
-                        .width(min: 120, ideal: 180)
-                    TableColumn("PHP") { site in
-                        Text(site.phpRuntimeID.replacingOccurrences(of: "php-", with: ""))
-                            .foregroundStyle(site.phpRuntimeID == "php-7.4" ? .orange : .primary)
-                            .help(site.phpRuntimeID == "php-7.4" ? "PHP 7.4 is end-of-life" : "")
-                    }
-                    .width(48)
-                    TableColumn("HTTPS") { site in
-                        Image(systemName: site.tlsEnabled ? "lock.fill" : "lock.open")
-                            .foregroundStyle(site.tlsEnabled ? .primary : .tertiary)
-                            .accessibilityLabel(site.tlsEnabled ? "HTTPS" : "HTTP only")
-                    }
-                    .width(52)
-                    TableColumn("Folder") { site in
-                        Text((site.documentRoot as NSString).abbreviatingWithTildeInPath)
-                            .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                            .help(site.documentRoot)
-                    }
-                    .width(min: 120)
-                }
-                .contextMenu(forSelectionType: SiteDefinition.ID.self) { ids in
-                    if ids.count == 1, let site = sites(ids).first {
-                        Button("Open in Browser") { model.openURL(model.siteURL(site)) }
-                        Button("Edit Site…") { state.editingSite = site }
-                        Divider()
-                        Button("Show Project Folder in Finder") {
-                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: site.documentRoot)])
-                        }
-                        Button("Copy URL") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(model.siteURL(site), forType: .string)
-                        }
-                        if site.hostname != "localhost" {
-                            Divider()
-                            Button("Remove Site…", role: .destructive) { state.deletingSite = site }
-                        }
-                    }
-                } primaryAction: { ids in
-                    if let site = sites(ids).first { state.editingSite = site }
+                    Text("Double-click a site to edit it.").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4).padding(.top, -9)
                 }
             }
         }
         .searchable(text: $state.search, placement: .toolbar, prompt: "Search Sites")
         .toolbar {
-            ToolbarItem {
-                Button { if let site = selectedSite { model.openURL(model.siteURL(site)) } } label: {
-                    Label("Open in Browser", systemImage: "safari")
-                }
-                .disabled(selectedSite == nil)
-                .help("Open the selected site in the browser")
-            }
+            // Its own glass capsule, apart from the stack controls.
+            if #available(macOS 26, *) { ToolbarSpacer(.fixed) }
             ToolbarItem {
                 Button { state.editingSite = newSite() } label: { Label("New Site", systemImage: "plus") }
-                    .help("Add a site")
+                    .help("Add a site (⌘N)")
             }
         }
         .sheet(item: $state.editingSite) { site in
@@ -108,10 +61,10 @@ struct SitesView: View {
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
-    private var selectedSite: SiteDefinition? { sites(state.selection).first }
-
-    private func sites(_ ids: Set<SiteDefinition.ID>) -> [SiteDefinition] {
-        model.configuration.sites.filter { ids.contains($0.id) }
+    /// Served while the web server and the site's PHP version run.
+    private func served(_ site: SiteDefinition) -> Bool {
+        model.serviceIsRunning(model.configuration.selectedWebServer.service)
+            && ServiceKind(rawValue: site.phpRuntimeID).map(model.serviceIsRunning) == true
     }
 
     private func presentRequestedSite() {
@@ -131,10 +84,79 @@ struct SitesView: View {
     }
 }
 
+/// A site on one line: whether it is served, its name, URL, folder and PHP
+/// version, and quick actions. Double-click edits it.
+private struct SiteRow: View {
+    @EnvironmentObject private var model: AppModel
+    let site: SiteDefinition
+    let served: Bool
+    let edit: () -> Void
+    let remove: () -> Void
+
+    var body: some View {
+        let url = model.siteURL(site)
+        let folder = URL(fileURLWithPath: site.documentRoot)
+        PanelRow {
+            StatusDot(color: served ? .green : Color(nsColor: .tertiaryLabelColor))
+                .help(served ? "Served" : "Not served while the stack is stopped")
+            Image(systemName: site.tlsEnabled ? "lock" : "globe").foregroundStyle(.secondary).frame(width: 18)
+                .help(site.tlsEnabled ? "HTTPS" : "HTTP only")
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(site.name).fontWeight(.medium).lineLimit(1)
+                    if site.hostname == "localhost" { Tag(text: "Default") }
+                }
+                Text((site.documentRoot as NSString).abbreviatingWithTildeInPath)
+                    .font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                    .help(site.documentRoot)
+            }
+            .frame(width: 220, alignment: .leading)
+            Text(url).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(url)
+            Tag(text: site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP "), tint: site.phpRuntimeID == "php-7.4" ? .orange : .secondary)
+                .help(site.phpRuntimeID == "php-7.4" ? "PHP 7.4 is end-of-life" : "")
+            HStack(spacing: 6) {
+                IconButton(title: "Open \(site.name) in the browser", symbol: "arrow.up.forward.app") { model.openURL(url) }
+                IconButton(title: "Show the project folder in Finder", symbol: "folder") { NSWorkspace.shared.activateFileViewerSelecting([folder]) }
+                IconButton(title: "Edit \(site.name)", symbol: "pencil", action: edit)
+                Menu {
+                    menuItems(url: url, folder: folder)
+                } label: {
+                    Image(systemName: "ellipsis")
+                }
+                .menuStyle(.button).buttonStyle(.borderless).menuIndicator(.hidden).fixedSize()
+                .accessibilityLabel("More actions for \(site.name)")
+            }
+            .frame(width: ServiceRowLayout.controls, alignment: .trailing)
+        }
+        .onTapGesture(count: 2, perform: edit)
+        .contextMenu { menuItems(url: url, folder: folder) }
+    }
+
+    @ViewBuilder private func menuItems(url: String, folder: URL) -> some View {
+        Button("Open in Browser") { model.openURL(url) }
+        Button("Edit Site…", action: edit)
+        Divider()
+        Button("Show Project Folder in Finder") { NSWorkspace.shared.activateFileViewerSelecting([folder]) }
+        Button("Copy URL") { Pasteboard.copy(url) }
+        Button("Copy Folder Path") { Pasteboard.copy(site.documentRoot) }
+        if !site.logs.error.isEmpty {
+            Button("Show Error Log") {
+                model.selectedLogFile = URL(fileURLWithPath: site.logs.error).lastPathComponent
+                model.selectedSection = .logs
+            }
+        }
+        if site.hostname != "localhost" {
+            Divider()
+            Button("Remove Site…", role: .destructive, action: remove)
+        }
+    }
+}
+
 @MainActor private final class SitesViewState: ObservableObject {
     @Published var editingSite: SiteDefinition?
     @Published var deletingSite: SiteDefinition?
-    @Published var selection = Set<SiteDefinition.ID>()
     @Published var search = ""
 }
 

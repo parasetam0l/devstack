@@ -111,7 +111,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !isFinishingTermination, let model, model.hasRunningServices else { return .terminateNow }
+        // Review mode only pretends services run; it has nothing to stop.
+        guard !isFinishingTermination, let model, model.hasRunningServices, !model.isReviewMode else { return .terminateNow }
 
         if AppUpdater.shared.isRelaunchingForUpdate {
             // Runtimes installed as packs live outside the app, so their
@@ -128,8 +129,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let alert = NSAlert()
         alert.messageText = "Stop DevStack services before quitting?"
-        alert.informativeText = "DevStack services are still running."
+        alert.informativeText = "Services left running keep serving your sites, and DevStack picks them up when it opens again."
         alert.alertStyle = .warning
+        // DevStack's own icon, also where macOS can't resolve the bundle's
+        // (a development build run from .build).
+        if let icon = DevStackDesign.icon { alert.icon = icon }
         alert.addButton(withTitle: "Stop Services and Quit")
         alert.addButton(withTitle: "Quit Without Stopping")
         alert.addButton(withTitle: "Cancel")

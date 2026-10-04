@@ -205,53 +205,38 @@ struct RuntimesView: View {
     @State private var confirmingRemoval: RuntimePackPin?
 
     var body: some View {
-        Form {
-            if let progress = model.runtimePackProgress {
-                Section { RuntimePackProgressPanel(progress: progress) }
-            } else if !model.missingRuntimePacks.isEmpty {
-                let missing = model.missingRuntimePacks
-                Section {
-                    NoticeRow(symbol: "arrow.down.circle", title: "\(missing.count) runtime\(missing.count == 1 ? "" : "s") to install",
-                              message: missing.map(\.displayName).joined(separator: ", "), tint: .accentColor) {
-                        Button("Install All (\(ByteCountFormatter.string(fromByteCount: missing.reduce(0) { $0 + $1.size }, countStyle: .file)))") {
-                            Task { message = await model.installRuntimePacks(missing.map(\.id)) }
-                        }
-                        .disabled(model.isBusy)
-                    }
-                }
-            }
+        PanelPage {
             if let message {
-                Section { NoticeRow(symbol: "exclamationmark.triangle.fill", title: "Couldn't finish", message: message) }
-            }
-            if model.runtimePackCatalog.packs.isEmpty {
-                Section {
-                    NoticeRow(symbol: "shippingbox", title: "This build bundles its runtimes",
-                              message: "Runtimes come with this copy of DevStack. Later versions download them here instead.", tint: .secondary)
+                Banner(symbol: "exclamationmark.triangle.fill", title: "Couldn't finish", detail: message) {
+                    Button("Dismiss") { self.message = nil }
                 }
+            }
+            RuntimeInstallBanner()
+            if model.runtimePackCatalog.packs.isEmpty {
+                Banner(symbol: "shippingbox", title: "This build bundles its runtimes",
+                       detail: "Runtimes come with this copy of DevStack. Later versions download them here instead.", tint: .secondary)
             } else {
-                ForEach(RuntimePackGroup.allCases) { group in
+                ForEach(Array(RuntimePackGroup.allCases.enumerated()), id: \.element) { index, group in
                     let packs = model.runtimePackCatalog.packs(in: group)
                     if !packs.isEmpty {
-                        Section(group.rawValue) {
+                        Panel(group.rawValue) {
                             ForEach(packs) { pin in
                                 RuntimePackRow(pin: pin, status: model.runtimePackStatus(pin), inUse: model.runtimePacksInUse.contains(pin.id),
                                                install: { Task { message = await model.installRuntimePacks([pin.id]) } },
                                                remove: { confirmingRemoval = pin })
                             }
+                        } accessory: {
+                            if index == 0 {
+                                Button(action: chooseRuntimePack) { Label("Import Pack…", systemImage: "square.and.arrow.down") }
+                                    .buttonStyle(.borderless)
+                                    .disabled(model.isBusy)
+                                    .help("Install a signed .devstack-runtime pack from a file")
+                            }
                         }
                     }
                 }
-                Section {} footer: {
-                    SectionFooter { Text("Each runtime downloads once, is checked against DevStack's signature and hash, and stays on this Mac.") }
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .toolbar {
-            ToolbarItem {
-                Button(action: chooseRuntimePack) { Label("Import Pack…", systemImage: "square.and.arrow.down") }
-                    .disabled(model.isBusy)
-                    .help("Install a signed .devstack-runtime pack from a file")
+                Text("Each runtime downloads once, is checked against DevStack's signature and hash, and stays on this Mac.")
+                    .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4)
             }
         }
         .alert("Remove \(confirmingRemoval?.displayName ?? "runtime")?", isPresented: Binding(get: { confirmingRemoval != nil }, set: { if !$0 { confirmingRemoval = nil } }), presenting: confirmingRemoval) { pin in
@@ -280,31 +265,38 @@ private struct RuntimePackRow: View {
     let remove: () -> Void
 
     var body: some View {
-        LabeledContent {
-            HStack(spacing: 10) {
+        PanelRow {
+            StatusDot(color: dot)
+            Text(pin.displayName).fontWeight(.medium).frame(width: 120, alignment: .leading)
+            Text(pin.version).font(.callout.monospaced()).foregroundStyle(.secondary).frame(width: 92, alignment: .leading)
+            if pin.isLegacy { Tag(text: "Legacy", tint: .orange) }
+            Text(detail).font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(detail)
+            HStack(spacing: 6) {
                 switch status {
                 case .installed:
-                    if !inUse { Button("Remove", action: remove).disabled(model.isBusy) }
-                    StatusLabel(title: "Installed", color: .green)
+                    Text("Installed").font(.callout).foregroundStyle(.secondary)
+                    if !inUse {
+                        IconButton(title: "Remove \(pin.displayName)", symbol: "trash", action: remove).disabled(model.isBusy)
+                    }
                 case .updateAvailable:
-                    Button("Update", action: install).disabled(model.isBusy)
+                    Button("Update", action: install).controlSize(.small).disabled(model.isBusy)
                 case .bundled:
-                    Text("Bundled").foregroundStyle(.secondary)
+                    Text("Bundled").font(.callout).foregroundStyle(.secondary)
                 case .notInstalled:
-                    Button("Install", action: install).disabled(model.isBusy)
+                    Button("Install", action: install).controlSize(.small).disabled(model.isBusy)
                 }
             }
-        } label: {
-            HStack(spacing: 6) {
-                Text(pin.displayName)
-                Text(pin.version).foregroundStyle(.secondary)
-                if pin.isLegacy {
-                    Text("Legacy").font(.caption.weight(.medium)).foregroundStyle(.orange)
-                        .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(.orange.opacity(0.15), in: Capsule())
-                }
-            }
-            Text(detail)
+            .frame(width: 104, alignment: .trailing)
+        }
+    }
+
+    private var dot: Color {
+        switch status {
+        case .installed, .bundled: .green
+        case .updateAvailable: .orange
+        case .notInstalled: inUse ? .orange : Color(nsColor: .tertiaryLabelColor)
         }
     }
 
