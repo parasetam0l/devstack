@@ -944,8 +944,10 @@ final class AppModel: ObservableObject {
         do {
             let keyData = try loadTrustedRuntimeKeys()
             let destination = paths.importedRuntimes
+            // A signed DevStack accepts only packs signed by its own team.
+            let teamID = helper.teamIdentifier
             let manifest = try await Task.detached {
-                let verifier = RuntimePackVerifier(trustedPublicKeys: keyData)
+                let verifier = RuntimePackVerifier(trustedPublicKeys: keyData, requiredTeamID: teamID)
                 return try RuntimePackImporter(verifier: verifier).importArchive(archive, into: destination)
             }.value
             if !configuration.importedRuntimeIDs.contains(manifest.id) {

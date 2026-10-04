@@ -581,6 +581,15 @@ enum DevStackCoreChecks {
         let executableSignature = try privateKey.signature(for: unsignedVerifier.canonicalManifestData(executableManifest))
         executableManifest.signature = RuntimePackSignature(keyID: "test", value: executableSignature.base64EncodedString())
         try verifier.verify(manifest: executableManifest, root: executablePackRoot)
+        for team in ["ABCDE12345", "ABC\" or true"] {
+            do {
+                try RuntimePackVerifier(trustedPublicKeys: ["test": privateKey.publicKey.rawRepresentation], requiredTeamID: team)
+                    .verify(manifest: executableManifest, root: executablePackRoot)
+                throw CheckFailure(description: "An ad-hoc signed executable passed a Team ID requirement (\(team))")
+            } catch RuntimePackVerificationError.invalidCodeSignature {
+                // Expected.
+            }
+        }
         var forbiddenManifest = executableManifest
         forbiddenManifest.runtime.dependencyPaths = ["/opt/homebrew/lib/libdevstack.dylib"]
         do {

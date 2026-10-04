@@ -42,11 +42,16 @@ public enum RuntimePackVerificationError: LocalizedError, Equatable, Sendable {
 public struct RuntimePackVerifier: Sendable {
     public let trustedPublicKeys: [String: Data]
     public let requireSignature: Bool
+    /// When set, every executable must be signed with a Developer ID of this
+    /// team, as the running app is. Nil (an unsigned development build)
+    /// accepts any valid signature, ad-hoc included.
+    public let requiredTeamID: String?
     private let runner: ProcessRunner
 
-    public init(trustedPublicKeys: [String: Data], requireSignature: Bool = true, runner: ProcessRunner = .init()) {
+    public init(trustedPublicKeys: [String: Data], requireSignature: Bool = true, requiredTeamID: String? = nil, runner: ProcessRunner = .init()) {
         self.trustedPublicKeys = trustedPublicKeys
         self.requireSignature = requireSignature
+        self.requiredTeamID = requiredTeamID
         self.runner = runner
     }
 
@@ -216,10 +221,19 @@ public struct RuntimePackVerifier: Sendable {
         }
 
         if verifyCodeSignature {
+            var arguments = ["--verify", "--strict", "--verbose=2"]
+            if let requiredTeamID {
+                // Interpolated into a code requirement, so only a well-formed
+                // Team ID is accepted.
+                guard requiredTeamID.range(of: "^[A-Z0-9]{10}$", options: .regularExpression) != nil else {
+                    throw RuntimePackVerificationError.invalidCodeSignature(relativePath)
+                }
+                arguments.append("-R=anchor apple generic and certificate leaf[subject.OU] = \"\(requiredTeamID)\"")
+            }
             do {
                 _ = try runner.runChecked(
                     executable: URL(fileURLWithPath: "/usr/bin/codesign"),
-                    arguments: ["--verify", "--strict", "--verbose=2", url.path],
+                    arguments: arguments + [url.path],
                     timeout: 30
                 )
             } catch {
