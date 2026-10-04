@@ -78,8 +78,9 @@ Builds made before `SUPublicEDKey` is set don't check for updates.
 
 1. Make sure the runtime packs you want are pinned
    (`scripts/pin-runtime.sh <pack-name>`; see `Documentation/Building.md`).
-   The workflow stops when none are pinned. It also re-downloads every pinned
-   pack and checks it against its hash.
+   The workflow stops while any runtime but the legacy PHP 7.4 and MySQL 5.7
+   is unpinned. It also re-downloads every pinned pack and checks it against
+   its hash.
 2. GitHub → **Actions** → **Release** → **Run workflow**, enter the version
    (e.g. `0.4.0`) and run it. It takes about 20–40 minutes, most of it
    waiting for Apple's notary service, which runs twice: once for the app,

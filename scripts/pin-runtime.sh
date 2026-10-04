@@ -9,6 +9,9 @@
 #
 # A pack is pinned only after its download matches the size and SHA-256 its
 # release states in pack.json. Replacing a runtime's pin replaces its entry.
+# --check also fails while a runtime a release needs is not pinned; only the
+# legacy PHP 7.4 and MySQL 5.7 may be missing, since they publish only when
+# their feasibility gate passes.
 
 set -euo pipefail
 
@@ -31,6 +34,14 @@ check_download() {  # check_download URL SIZE SHA256 LABEL
 }
 
 if [[ "${1:-}" == "--check" ]]; then
+    /usr/bin/python3 - "$catalog" <<'PY'
+import json, sys
+required = {"openssl-3.5", "imagemagick-7.1", "postgresql-18", "apache-2.4", "nginx-1.30", "mysql-8.4",
+            "php-8.5", "php-8.4", "mailpit-1.31.1", "phpmyadmin-5.2.3", "adminer-6.1.1", "composer-2.10.3"}
+missing = required - {pack["id"] for pack in json.load(open(sys.argv[1]))["packs"]}
+if missing:
+    raise SystemExit("Not pinned yet: " + ", ".join(sorted(missing)))
+PY
     while IFS=$'\t' read -r name url size sha256; do
         [[ -n "$name" ]] || continue
         check_download "$url" "$size" "$sha256" "$name"
@@ -43,7 +54,7 @@ for pack in json.load(open(sys.argv[1]))["packs"]:
     exit 0
 fi
 
-[[ $# -gt 0 ]] || { /usr/bin/sed -n '3,12p' "$0" >&2; exit 64; }
+[[ $# -gt 0 ]] || { /usr/bin/sed -n '3,14p' "$0" >&2; exit 64; }
 for name in "$@"; do
     [[ "$name" =~ ^[a-z0-9][a-z0-9.+-]*-r[0-9]+$ ]] || { echo "Not a pack name: $name" >&2; exit 64; }
     fetch "$releases/$name/pack.json" "$work/pack.json"

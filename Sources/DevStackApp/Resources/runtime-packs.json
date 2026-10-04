@@ -1,4 +1,17 @@
 {
-  "packs": [],
+  "packs": [
+    {
+      "contents": [],
+      "id": "mailpit-1.31.1",
+      "minimumMacOS": "15.0",
+      "name": "mailpit-1.31.1-r1",
+      "packRevision": 1,
+      "requires": [],
+      "sha256": "23bc1f43c360a1fbe69a969fd439456af050af07fdd6a9547a7736d6bb1f0148",
+      "size": 9929731,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/mailpit-1.31.1-r1/mailpit-1.31.1-r1.devstack-runtime",
+      "version": "1.31.1"
+    }
+  ],
   "schemaVersion": 1
 }
