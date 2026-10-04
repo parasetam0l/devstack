@@ -72,18 +72,24 @@ enum DevStackRuntimePackager {
 
         let unsignedVerifier = RuntimePackVerifier(trustedPublicKeys: [:], requireSignature: false)
         var files: [RuntimePackFile] = []
-        guard let enumerator = FileManager.default.enumerator(
-            at: staging,
-            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]
-        ) else { throw PackagerError.unsafePayload(staging.path) }
-        while let file = enumerator.nextObject() as? URL {
-            let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-            guard values.isSymbolicLink != true else { throw PackagerError.unsafePayload(file.path) }
-            guard values.isRegularFile == true else { continue }
-            // Every file in the archive is listed, hidden ones included: the
-            // importer rejects anything the signed manifest does not cover.
-            let relative = String(file.path.dropFirst(staging.path.count + 1))
-            files.append(RuntimePackFile(path: relative, sha256: try unsignedVerifier.sha256(file), executable: try isMachO(file)))
+        // Relative paths straight from the enumerator: deriving them from
+        // absolute URLs breaks when the temporary folder is reported as
+        // /var in one place and /private/var in another.
+        guard let enumerator = FileManager.default.enumerator(atPath: staging.path) else {
+            throw PackagerError.unsafePayload(staging.path)
+        }
+        while let relative = enumerator.nextObject() as? String {
+            switch enumerator.fileAttributes?[.type] as? FileAttributeType {
+            case .typeRegular?:
+                // Every file in the archive is listed, hidden ones included:
+                // the importer rejects anything the signed manifest does not cover.
+                let file = staging.appendingPathComponent(relative)
+                files.append(RuntimePackFile(path: relative, sha256: try unsignedVerifier.sha256(file), executable: try isMachO(file)))
+            case .typeDirectory?:
+                continue
+            default:
+                throw PackagerError.unsafePayload(relative)
+            }
         }
         files.sort { $0.path < $1.path }
 
