@@ -38,7 +38,94 @@ import SwiftUI
                 .init(id: "port", title: "Port 3306 is available", severity: .info, evidence: "No conflicting listener was found on the loopback interface.")
             ])
         }
+        if let directory = argument("--snapshot") {
+            // The bare debug executable has no bundle, so it launches as a
+            // background tool without windows.
+            NSApplication.shared.setActivationPolicy(.regular)
+            scheduleSnapshots(of: model, into: URL(fileURLWithPath: directory))
+        }
         return model
+    }
+
+    /// `--snapshot DIR` renders every page (or `--pages a,b`) of the main
+    /// window to DIR/<page>.png and quits. The app draws its own window, so
+    /// this needs no screen-recording permission.
+    private static func scheduleSnapshots(of model: AppModel, into directory: URL) {
+        let requested = argument("--pages")?.split(separator: ",").map { $0.lowercased() }
+        let sections = NavigationSection.allCases.filter { section in
+            requested.map { $0.contains(section.rawValue.lowercased().replacingOccurrences(of: " ", with: "-")) } ?? true
+        }
+        Task { @MainActor in
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            // A window of its own, like the main window, so nothing waits on
+            // SwiftUI's scene restoration.
+            let host = NSHostingController(rootView: RootView().environmentObject(model).frame(minWidth: 760, minHeight: 520))
+            host.sceneBridgingOptions = [.toolbars, .title]
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                                  backing: .buffered, defer: false)
+            window.toolbarStyle = .unified
+            window.contentViewController = host
+            window.setContentSize(NSSize(width: 980, height: 680))
+            window.center()
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            try? await Task.sleep(for: .seconds(2))
+            guard let view = window.contentView else { NSApp.terminate(nil); return }
+            for section in sections {
+                model.selectedSection = section
+                try? await Task.sleep(for: .milliseconds(900))
+                if CommandLine.arguments.contains("--scroll-bottom"), let scrollView = firstScrollView(in: view) {
+                    let height = scrollView.documentView?.frame.height ?? 0
+                    scrollView.contentView.scroll(to: NSPoint(x: 0, y: max(0, height - scrollView.contentView.bounds.height)))
+                    scrollView.reflectScrolledClipView(scrollView.contentView)
+                    try? await Task.sleep(for: .milliseconds(300))
+                }
+                // The window as the window server composites it, glass included.
+                // An app may capture its own windows without screen-recording
+                // permission; the call is gone from the SDK, so it is looked up.
+                guard let image = captureWindow(window.windowNumber) else {
+                    FileHandle.standardError.write(Data("snapshot: could not capture the window\n".utf8))
+                    continue
+                }
+                let bitmap = NSBitmapImageRep(cgImage: image)
+                let name = section.rawValue.lowercased().replacingOccurrences(of: " ", with: "-")
+                try? bitmap.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("\(name).png"))
+                // --sheets also captures the page's sheet: the new-site editor
+                // on Sites and the setup wizard on the Dashboard.
+                if CommandLine.arguments.contains("--sheets"), section == .sites || section == .dashboard {
+                    if section == .sites { model.isPresentingNewSite = true } else { model.isPresentingSetupWizard = true }
+                    try? await Task.sleep(for: .milliseconds(1200))
+                    if let sheet = window.attachedSheet, let image = captureWindow(sheet.windowNumber) {
+                        try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?
+                            .write(to: directory.appendingPathComponent("\(name)-sheet.png"))
+                        window.endSheet(sheet)
+                    }
+                    model.isPresentingSetupWizard = false
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
+            }
+            NSApp.terminate(nil)
+        }
+    }
+
+    private static func firstScrollView(in view: NSView) -> NSScrollView? {
+        // The detail page's scroll view, not the sidebar's: the widest one.
+        var found: [NSScrollView] = []
+        func walk(_ view: NSView) {
+            if let scrollView = view as? NSScrollView { found.append(scrollView) }
+            view.subviews.forEach(walk)
+        }
+        walk(view)
+        return found.max { $0.frame.width < $1.frame.width }
+    }
+
+    private static func captureWindow(_ number: Int) -> CGImage? {
+        typealias Capture = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") else { return nil }
+        let capture = unsafeBitCast(symbol, to: Capture.self)
+        // .optionIncludingWindow, .boundsIgnoreFraming
+        return capture(.null, 1 << 3, UInt32(number), 1 << 0)?.takeRetainedValue()
     }
 
     private struct Catalog: Decodable { var runtimes: [RuntimeManifest] }
