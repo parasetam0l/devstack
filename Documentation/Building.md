@@ -146,7 +146,43 @@ open -a /Applications/DevStack.app
 The first launch needs the helper to be approved once in System Settings →
 General → Login Items & Extensions; the setup wizard walks through it.
 
+## Runtime packs
+
+Runtimes are built and published by
+[devstack-runtimes](https://github.com/parasetam0l/devstack-runtimes), one
+signed, notarized pack per runtime. DevStack installs them during setup and
+from its Runtimes page into `~/Library/Application Support/DevStack/Runtimes`.
+
+Each DevStack version pins the exact packs it installs in
+`Sources/DevStackApp/Resources/runtime-packs.json`. To pin a newly
+published pack (it is downloaded and checked against its `pack.json` first):
+
+```sh
+scripts/pin-runtime.sh php-8.5-8.5.11-r1
+```
+
+Before a release, check that every pinned pack is still available and
+intact:
+
+```sh
+scripts/pin-runtime.sh --check
+```
+
+To try packs before they are published, build them in devstack-runtimes and
+point a debug build at a local catalog whose URLs are `file:` URLs:
+
+```sh
+DEVSTACK_RUNTIME_CATALOG=/path/to/runtime-packs.json "$(swift build --show-bin-path)/DevStack"
+```
+
+A signed DevStack installs only packs whose binaries carry its own Team ID;
+a debug build accepts any valid signature.
+
 ## Building the runtime payload
+
+Until the pinned catalog lists packs, release builds still bundle the
+payload below. The pipeline now lives in devstack-runtimes; the copies here
+go away once DevStack no longer bundles runtimes.
 
 The payload is the signed `Contents/Resources/Runtimes` tree copied into the
 app. It never downloads or builds anything on the user's Mac. On the release
