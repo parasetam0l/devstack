@@ -205,60 +205,67 @@ struct RuntimesView: View {
     @State private var confirmingRemoval: RuntimePackPin?
 
     var body: some View {
-        WorkspacePage {
-            HStack(alignment: .top) {
-                PageHeading(title: "Runtimes", subtitle: "The server software DevStack runs. Each runtime downloads once, is verified, and stays on this Mac.")
-                Spacer()
-                Button("Import Pack…", action: chooseRuntimePack).buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy)
-            }
+        Form {
             if let progress = model.runtimePackProgress {
-                RuntimePackProgressPanel(progress: progress)
+                Section { RuntimePackProgressPanel(progress: progress) }
             } else if !model.missingRuntimePacks.isEmpty {
                 let missing = model.missingRuntimePacks
-                SurfacePanel {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("\(missing.count) runtime\(missing.count == 1 ? "" : "s") to install").font(.system(size: 13, weight: .semibold))
-                            Text(missing.map(\.displayName).joined(separator: ", ")).font(.system(size: 12)).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Install (\(ByteCountFormatter.string(fromByteCount: missing.reduce(0) { $0 + $1.size }, countStyle: .file)))") {
+                Section {
+                    NoticeRow(symbol: "arrow.down.circle", title: "\(missing.count) runtime\(missing.count == 1 ? "" : "s") to install",
+                              message: missing.map(\.displayName).joined(separator: ", "), tint: .accentColor) {
+                        Button("Install All (\(ByteCountFormatter.string(fromByteCount: missing.reduce(0) { $0 + $1.size }, countStyle: .file)))") {
                             Task { message = await model.installRuntimePacks(missing.map(\.id)) }
-                        }.buttonStyle(DevStackProminentButtonStyle()).disabled(model.isBusy)
+                        }
+                        .disabled(model.isBusy)
                     }
                 }
             }
             if let message {
-                InfoNotice(symbol: "exclamationmark.triangle", title: "Runtimes", message: message, color: .orange)
+                Section { NoticeRow(symbol: "exclamationmark.triangle.fill", title: "Couldn't finish", message: message) }
             }
             if model.runtimePackCatalog.packs.isEmpty {
-                InfoNotice(symbol: "shippingbox", title: "This build bundles its runtimes",
-                           message: "Runtimes come with this copy of DevStack. Later versions download them here instead.")
+                Section {
+                    NoticeRow(symbol: "shippingbox", title: "This build bundles its runtimes",
+                              message: "Runtimes come with this copy of DevStack. Later versions download them here instead.", tint: .secondary)
+                }
             } else {
                 ForEach(RuntimePackGroup.allCases) { group in
                     let packs = model.runtimePackCatalog.packs(in: group)
                     if !packs.isEmpty {
-                        SurfacePanel(title: group.rawValue) {
-                            VStack(spacing: 0) {
-                                ForEach(packs) { pin in
-                                    RuntimePackRow(pin: pin, status: model.runtimePackStatus(pin), inUse: model.runtimePacksInUse.contains(pin.id),
-                                                   install: { Task { message = await model.installRuntimePacks([pin.id]) } },
-                                                   remove: { confirmingRemoval = pin })
-                                    if pin.id != packs.last?.id { Divider() }
-                                }
+                        Section(group.rawValue) {
+                            ForEach(packs) { pin in
+                                RuntimePackRow(pin: pin, status: model.runtimePackStatus(pin), inUse: model.runtimePacksInUse.contains(pin.id),
+                                               install: { Task { message = await model.installRuntimePacks([pin.id]) } },
+                                               remove: { confirmingRemoval = pin })
                             }
                         }
                     }
                 }
+                Section {} footer: {
+                    SectionFooter { Text("Each runtime downloads once, is checked against DevStack's signature and hash, and stays on this Mac.") }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .toolbar {
+            ToolbarItem {
+                Button(action: chooseRuntimePack) { Label("Import Pack…", systemImage: "square.and.arrow.down") }
+                    .disabled(model.isBusy)
+                    .help("Install a signed .devstack-runtime pack from a file")
             }
         }
         .alert("Remove \(confirmingRemoval?.displayName ?? "runtime")?", isPresented: Binding(get: { confirmingRemoval != nil }, set: { if !$0 { confirmingRemoval = nil } }), presenting: confirmingRemoval) { pin in
             Button("Remove", role: .destructive) { Task { message = await model.removeRuntimePack(pin) } }
-        } message: { _ in Text("Its databases and settings stay. You can install it again at any time.") }
+        } message: { _ in
+            Text("Its databases and settings stay. You can install it again at any time.")
+        }
     }
 
     private func chooseRuntimePack() {
-        let panel = NSOpenPanel(); panel.allowedContentTypes = [.data]; panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.data]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
         panel.message = "Choose a signed .devstack-runtime pack."
         if panel.runModal() == .OK, let url = panel.url { Task { await model.importRuntimePack(from: url) } }
     }
@@ -273,28 +280,32 @@ private struct RuntimePackRow: View {
     let remove: () -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(pin.displayName).font(.system(size: 12, weight: .semibold))
-                    Text(pin.version).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                    if pin.isLegacy { StatusBadge(title: "LEGACY", color: .orange) }
+        LabeledContent {
+            HStack(spacing: 10) {
+                switch status {
+                case .installed:
+                    if !inUse { Button("Remove", action: remove).disabled(model.isBusy) }
+                    StatusLabel(title: "Installed", color: .green)
+                case .updateAvailable:
+                    Button("Update", action: install).disabled(model.isBusy)
+                case .bundled:
+                    Text("Bundled").foregroundStyle(.secondary)
+                case .notInstalled:
+                    Button("Install", action: install).disabled(model.isBusy)
                 }
-                Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            Spacer()
-            switch status {
-            case .installed:
-                StatusBadge(title: "Installed", dot: true, dotColor: .green)
-                if !inUse { Button("Remove", action: remove).buttonStyle(.borderless).disabled(model.isBusy) }
-            case .updateAvailable:
-                Button("Update", action: install).buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy)
-            case .bundled:
-                StatusBadge(title: "Bundled")
-            case .notInstalled:
-                Button("Install", action: install).buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy)
+        } label: {
+            HStack(spacing: 6) {
+                Text(pin.displayName)
+                Text(pin.version).foregroundStyle(.secondary)
+                if pin.isLegacy {
+                    Text("Legacy").font(.caption.weight(.medium)).foregroundStyle(.orange)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(.orange.opacity(0.15), in: Capsule())
+                }
             }
-        }.padding(.vertical, 7)
+            Text(detail)
+        }
     }
 
     private var detail: String {
@@ -302,23 +313,22 @@ private struct RuntimePackRow: View {
         if !pin.requires.isEmpty {
             parts.append("needs " + pin.requires.map { id in model.runtimePackCatalog.pin(for: id)?.displayName ?? id }.joined(separator: ", "))
         }
-        if inUse { parts.append("used by the current stack") }
+        if inUse { parts.append("used by your stack") }
         return parts.joined(separator: " · ")
     }
 }
 
+/// Install progress, in the Runtimes page and the setup assistant.
 struct RuntimePackProgressPanel: View {
     let progress: RuntimePackProgress
 
     var body: some View {
-        SurfacePanel {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Installing \(progress.packName) (\(progress.index) of \(progress.count))").font(.system(size: 12, weight: .semibold))
-                // The app's neutral accent, not the window tint.
-                ProgressView(value: progress.fraction).tint(.primary)
-                Text("\(ByteCountFormatter.string(fromByteCount: progress.completedBytes, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: progress.totalBytes, countStyle: .file)), verified before installing")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-            }
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Installing \(progress.packName) (\(progress.index) of \(progress.count))")
+            ProgressView(value: progress.fraction)
+            Text("\(ByteCountFormatter.string(fromByteCount: progress.completedBytes, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: progress.totalBytes, countStyle: .file)) · each runtime is verified before it is installed")
+                .font(.caption).foregroundStyle(.secondary)
         }
+        .padding(.vertical, 4)
     }
 }

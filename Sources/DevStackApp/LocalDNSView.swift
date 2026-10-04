@@ -11,72 +11,80 @@ struct LocalDNSView: View {
     private var hostnames: [String] { model.localNetworkHostnames }
 
     var body: some View {
-        WorkspacePage {
-            PageHeading(title: "Local DNS", subtitle: "Serve DevStack hostnames to phones and other devices on this network.")
-            SurfacePanel {
-                HStack(spacing: 8) {
-                    FeatureIcon(symbol: "wifi.router")
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Local DNS responder").font(.system(size: 13, weight: .semibold))
-                        Text(verbatim: "Port 53 · answers \(hostnames.count) hostnames · other queries forwarded").font(.system(size: 12)).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    StatusBadge(
-                        title: available ? (running ? "Running" : "Stopped") : "Unavailable",
-                        color: available ? (running ? DevStackDesign.success : .secondary) : .secondary,
-                        dot: true,
-                        dotColor: running ? .green : nil
-                    )
-                    Button(running ? "Stop" : "Start") {
-                        Task { await model.setLocalNetworkAccess(!running) }
-                    }.buttonStyle(DevStackGlassButtonStyle())
+        Form {
+            Section {
+                HStack(spacing: 12) {
+                    ServiceRowTitle(title: "DNS responder", symbol: "wifi.router",
+                                    detail: "Port 53 · \(hostnames.count) hostname\(hostnames.count == 1 ? "" : "s") · everything else forwarded")
+                    Spacer(minLength: 12)
+                    StatusLabel(title: available ? (running ? "Running" : "Stopped") : "Unavailable",
+                                color: running ? .green : Color(nsColor: .tertiaryLabelColor))
+                    Button(running ? "Stop" : "Start") { Task { await model.setLocalNetworkAccess(!running) } }
                         .disabled(model.isBusy || !available)
-                        .help(available ? "Answer DevStack hostnames for devices on this network" : "Requires the privileged helper")
+                        .help(available ? "Answer DevStack hostnames for devices on this network" : "Needs the DevStack helper")
                         .accessibilityLabel(running ? "Stop local DNS" : "Start local DNS")
                 }
+                .padding(.vertical, 2)
                 if !available {
-                    InfoNotice(symbol: "lock.shield", title: "Helper required", message: "Local DNS runs inside the privileged helper. Set it up in Settings → System integration.", color: .orange)
-                } else if !running {
-                    InfoNotice(symbol: "info.circle", title: "Not serving", message: "Start the responder to answer DevStack hostnames for this network.", color: .secondary)
+                    NoticeRow(symbol: "lock.shield", title: "Needs the helper",
+                              message: "The DNS responder runs inside DevStack's privileged helper.") {
+                        Button("Settings…") { model.selectedSection = .settings }
+                    }
+                }
+            } footer: {
+                SectionFooter {
+                    Text("Phones and other devices can use this Mac as their DNS server for DevStack hostnames. Every other domain resolves through your usual DNS servers.")
                 }
             }
-            if available, running {
-                SurfacePanel(title: "Addresses", subtitle: "Point each device's DNS at one of these addresses.") {
-                    if addresses.isEmpty {
-                        Text("No active Wi-Fi or Ethernet connection.").font(.system(size: 12)).foregroundStyle(.secondary)
-                    } else {
-                        ForEach(addresses, id: \.address) { entry in
-                            CopyValueRow(label: entry.interface, value: entry.address)
+
+            Section {
+                if addresses.isEmpty {
+                    Text("No active Wi-Fi or Ethernet connection.").foregroundStyle(.secondary)
+                } else {
+                    ForEach(addresses, id: \.address) { entry in
+                        CopyableValueRow(label: entry.interface, value: entry.address)
+                    }
+                }
+            } header: {
+                Text("Addresses")
+            } footer: {
+                SectionFooter {
+                    Text("On a phone: Wi-Fi settings → Configure DNS → Manual → \(model.localNetworkAddress ?? "one of these addresses").")
+                }
+            }
+
+            Section {
+                ForEach(hostnames, id: \.self) { hostname in
+                    LabeledContent {
+                        Text(model.configuration.sites.contains { $0.hostname == hostname } ? "Site" : "DevStack")
+                            .foregroundStyle(.secondary)
+                    } label: {
+                        Text(hostname).font(.body.monospaced())
+                        if hostname.hasSuffix(".localhost") {
+                            Text("Resolves on each device itself, not through this Mac")
                         }
-                        Divider()
-                        Text("On a phone: Wi-Fi settings → Configure DNS → Manual → \(model.localNetworkAddress ?? "the address above").")
-                            .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                SurfacePanel(title: "Hostnames", subtitle: "Answered with this Mac's address; everything else is forwarded.") {
-                    ForEach(hostnames, id: \.self) { hostname in
-                        HStack(spacing: 8) {
-                            Text(hostname).font(.system(size: 12, design: .monospaced))
-                            if hostname.hasSuffix(".localhost") {
-                                StatusBadge(title: "Device-local", color: .secondary)
-                            }
-                            Spacer()
-                            Text(model.configuration.sites.contains { $0.hostname == hostname } ? "Site" : "Management")
-                                .font(.system(size: 10)).foregroundStyle(.secondary)
-                        }.padding(.vertical, 4)
-                    }
-                    Divider()
-                    Text("Names ending in .localhost resolve on the device itself; use .test domains for sites you open from other devices.")
-                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Hostnames")
+            } footer: {
+                SectionFooter {
+                    Text("Use .test names for sites you open from other devices; names ending in .localhost always point at the device itself.")
                 }
-                SurfacePanel(title: "HTTPS", subtitle: "Devices need the DevStack CA before HTTPS stops warning.") {
-                    if let address = model.localNetworkAddress {
-                        CopyValueRow(label: "CA URL", value: "http://\(address):\(model.configuration.ports.webHTTPListen)/devstack-ca.crt")
-                    }
-                    Text("iOS: install the profile, then enable full trust in Settings → General → About → Certificate Trust Settings. Android: install it as a CA certificate. Use each site's hostname (not the IP) for HTTPS.")
-                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section {
+                if let address = model.localNetworkAddress {
+                    CopyableValueRow(label: "CA certificate", value: "http://\(address):\(model.configuration.ports.webHTTPListen)/devstack-ca.crt")
+                }
+            } header: {
+                Text("HTTPS on other devices")
+            } footer: {
+                SectionFooter {
+                    Text("Open the CA certificate's address on the device and install it. On iOS, also turn on full trust in Settings → General → About → Certificate Trust Settings. Open sites by hostname, not IP address.")
                 }
             }
         }
+        .formStyle(.grouped)
     }
 }

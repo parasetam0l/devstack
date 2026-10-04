@@ -11,14 +11,14 @@ struct DevStackApp: App {
         WindowGroup("DevStack", id: "main") {
             RootView()
                 .environmentObject(model)
-                .frame(minWidth: 820, minHeight: 540)
+                .frame(minWidth: 760, minHeight: 520)
                 .onAppear {
                     appDelegate.model = model
                     NSApp.applicationIconImage = DevStackDesign.icon
                     appDelegate.configureWindow()
                 }
         }
-        .defaultSize(width: 920, height: 620)
+        .defaultSize(width: 980, height: 680)
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(after: .appInfo) {
@@ -78,13 +78,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // it through openWindow, so poll briefly instead of giving up.
             for _ in 0..<40 {
                 if let window = MainWindowLocator.current {
-                    window.contentMaxSize = NSSize(width: 1100, height: window.contentMaxSize.height)
-                    window.collectionBehavior.remove(.fullScreenPrimary)
-                    window.collectionBehavior.insert(.fullScreenNone)
-                    if let size = window.contentView?.bounds.size, size.width > 920 || size.height > 620 {
-                        window.setContentSize(NSSize(width: min(size.width, 920), height: min(size.height, 620)))
-                        window.center()
-                    }
                     widenSidebarIfNeeded(window)
                     return
                 }
@@ -172,6 +165,8 @@ private struct MenuBarView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
+        Button("Open DevStack") { model.showMainWindow() }
+        Divider()
         ForEach(model.dashboardServices) { service in
             let state = model.serviceState(service)
             Menu {
@@ -182,31 +177,28 @@ private struct MenuBarView: View {
                     }
                 }.disabled(model.isBusy)
                 Button("Restart") { Task { await model.restartService(service) } }.disabled(model.isBusy || state.phase != .running)
+                Button("Show Logs") { model.showMainWindow(); model.showLogs(for: service) }
             } label: {
-                Label("\(service.displayName) · \(state.phase.rawValue.capitalized)", systemImage: state.phase.symbol)
+                Label("\(service.displayName) — \(state.phase.title)", systemImage: state.phase.symbol)
             }
         }
-        Divider()
         let dnsRunning = model.helperStatus?.dnsEnabled == true
         Menu {
             Button(dnsRunning ? "Stop" : "Start") {
                 Task { await model.setLocalNetworkAccess(!dnsRunning) }
             }.disabled(model.isBusy || !model.helperInstalled)
         } label: {
-            Label("Local DNS · \(dnsRunning ? "Running" : "Stopped")", systemImage: "wifi.router")
+            Label("Local DNS — \(dnsRunning ? "Running" : "Stopped")", systemImage: dnsRunning ? "checkmark.circle.fill" : "circle")
         }
         Divider()
-        Button("Open DevStack") {
-            model.showMainWindow()
-        }
-        Button("Start All") { Task { await model.startAll() } }
+        Button("Start Stack") { Task { await model.startAll() } }
             .disabled(model.isBusy || model.stackIsRunning || !model.missingRuntimePacks.isEmpty)
-        Button("Stop All") { Task { await model.stopAll() } }
+        Button("Stop Stack") { Task { await model.stopAll() } }
             .disabled(model.isBusy || !model.hasRunningServices)
         Divider()
-        Button("Quit") {
-            NSApplication.shared.terminate(nil)
-        }
+        Button("Settings…") { model.showMainWindow(); model.selectedSection = .settings }
+        Button("Quit DevStack") { NSApplication.shared.terminate(nil) }
+            .keyboardShortcut("q")
     }
 }
 

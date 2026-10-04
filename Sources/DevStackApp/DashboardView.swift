@@ -5,230 +5,178 @@ struct DashboardView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        WorkspacePage {
-            HStack {
-                PageHeading(title: "Dashboard", subtitle: "Services, sites and tools at a glance.")
-                Spacer()
-            }
+        Form {
             if !model.missingRuntimePacks.isEmpty {
-                HStack(alignment: .center) {
-                    InfoNotice(symbol: "shippingbox", title: "Runtimes to install",
-                               message: "The stack needs \(model.missingRuntimePacks.map(\.displayName).joined(separator: ", ")) before it can start.", color: .orange)
-                    Button("Install…") { model.selectedSection = .runtimes }.buttonStyle(DevStackGlassButtonStyle())
+                Section {
+                    NoticeRow(symbol: "shippingbox", title: "Runtimes to install",
+                              message: "The stack needs \(model.missingRuntimePacks.map(\.displayName).joined(separator: ", ")) before it can start.") {
+                        Button("Install…") { model.selectedSection = .runtimes }
+                    }
                 }
             }
 
-            SurfacePanel(title: "Services") {
-                VStack(spacing: 0) {
-                    ServiceControl(title: "Web Server", service: model.configuration.selectedWebServer.service,
-                        detail: "HTTP \(model.configuration.ports.webHTTP) · HTTPS \(model.configuration.ports.webHTTPS)") {
-                        Picker("Web server", selection: Binding(get: { model.configuration.selectedWebServer }, set: { server in Task { await model.selectWebServer(server) } })) {
-                            ForEach(WebServer.allCases) { server in
-                                Text(model.runtimeOptionTitle(server.displayName, id: server.service.runtimeID)).tag(server)
-                                    .disabled(!model.runtimeIsAvailable(server.service.runtimeID))
-                            }
+            Section("Services") {
+                ServiceRow(title: "Web Server", symbol: "globe",
+                           detail: "HTTP \(model.configuration.ports.webHTTP) · HTTPS \(model.configuration.ports.webHTTPS)",
+                           service: model.configuration.selectedWebServer.service) {
+                    Picker("Web server", selection: Binding(get: { model.configuration.selectedWebServer },
+                                                            set: { server in Task { await model.selectWebServer(server) } })) {
+                        ForEach(WebServer.allCases) { server in
+                            Text(model.runtimeOptionTitle(server.displayName, id: server.service.runtimeID)).tag(server)
+                                .disabled(!model.runtimeIsAvailable(server.service.runtimeID))
                         }
                     }
-                    Divider()
-                    ServiceControl(title: "PHP", service: ServiceKind(rawValue: model.configuration.defaultPHPRuntimeID) ?? .php85, detail: "Default runtime") { PHPVersionPicker() }
-                    Divider()
-                    DatabaseServiceControl(embedded: true)
-                    Divider()
-                    ServiceControl(title: "Mail", service: .mailpit, detail: "SMTP \(model.configuration.ports.mailpitSMTP) · Inbox \(model.configuration.ports.mailpitInbox)") { Text("Mailpit").font(.system(size: 12, weight: .medium)).padding(.leading, 10) }
-                    Divider()
-                    LocalDNSServiceControl()
                 }
+                ServiceRow(title: "PHP", symbol: "chevron.left.forwardslash.chevron.right", detail: "Default for new sites",
+                           service: ServiceKind(rawValue: model.configuration.defaultPHPRuntimeID) ?? .php85) {
+                    PHPVersionPicker()
+                } menuItems: {
+                    Divider()
+                    Button("Extensions…") { model.selectedSection = .php }
+                    ForEach(model.serviceStates.filter { $0.service.phpRuntimeID != nil && $0.service.rawValue != model.configuration.defaultPHPRuntimeID && $0.phase == .running }) { other in
+                        Button("Stop \(other.service.displayName)") { Task { await model.stopService(other.service) } }
+                    }
+                }
+                DatabaseServiceRows()
+                ServiceRow(title: "Mail", symbol: "envelope",
+                           detail: "SMTP \(model.configuration.ports.mailpitSMTP) · Inbox \(model.configuration.ports.mailpitInbox)",
+                           service: .mailpit) {
+                    Text("Mailpit").foregroundStyle(.secondary)
+                } menuItems: {
+                    Divider()
+                    Button("Open Inbox") { model.openURL("http://127.0.0.1:\(model.configuration.ports.mailpitInboxListen)") }
+                }
+                LocalDNSServiceRow()
             }
 
-            SurfacePanel {
-                HStack {
-                    Text("Sites").font(.system(size: 13, weight: .semibold))
-                    Spacer()
-                    if !model.configuration.sites.isEmpty {
-                        Button("View All") { model.selectedSection = .sites }.buttonStyle(.borderless)
-                    }
-                    Button { model.requestNewSite() } label: { Label("New Site", systemImage: "plus") }.buttonStyle(DevStackProminentButtonStyle())
-                }
+            Section {
                 if model.configuration.sites.isEmpty {
-                    HStack(spacing: 8) {
-                        FeatureIcon(symbol: "globe")
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("No sites yet").font(.system(size: 13, weight: .medium))
-                            Text("Add a project folder to create a site.").font(.system(size: 12)).foregroundStyle(.secondary)
+                    NoticeRow(symbol: "globe", title: "No sites yet", message: "Add a project folder to serve it at its own local domain.", tint: .secondary) {
+                        Button("New Site…") { model.requestNewSite() }
+                    }
+                } else {
+                    ForEach(model.configuration.sites.prefix(5)) { site in
+                        DashboardSiteRow(site: site)
+                    }
+                    HStack {
+                        if model.configuration.sites.count > 5 {
+                            Text("\(model.configuration.sites.count - 5) more").foregroundStyle(.secondary)
                         }
                         Spacer()
-                    }.padding(.vertical, 4)
-                } else {
-                    VStack(spacing: 0) {
-                        ForEach(Array(model.configuration.sites.prefix(4).enumerated()), id: \.element.id) { index, site in
-                            if index > 0 { Divider().padding(.vertical, 5) }
-                            HStack(spacing: 8) {
-                                FeatureIcon(symbol: "globe")
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(site.name).font(.system(size: 13, weight: .semibold))
-                                    Text(site.hostname).font(.system(size: 12)).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                StatusBadge(title: site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP "))
-                                StatusBadge(title: site.tlsEnabled ? "HTTPS" : "HTTP", color: site.tlsEnabled ? DevStackDesign.success : .secondary)
-                                Button { model.openURL(model.siteURL(site)) } label: { Image(systemName: "arrow.up.right") }
-                                    .buttonStyle(.borderless).help("Open \(site.name)").accessibilityLabel("Open \(site.name)")
-                            }.padding(.vertical, 2)
-                        }
+                        Button("Show All") { model.selectedSection = .sites }
+                        Button("New Site…") { model.requestNewSite() }
                     }
                 }
+            } header: {
+                Text("Sites")
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Tools").font(.system(size: 13, weight: .semibold))
-                DevStackGlassGroup(spacing: 8) {
-                    HStack(spacing: 8) {
-                        QuickAccessTile(symbol: "externaldrive", title: "Database", subtitle: "Connections and backups") { model.selectedSection = .database }
-                        QuickAccessTile(symbol: "tray", title: "Mail Inbox", subtitle: "Open mail tools") { model.selectedSection = .mailpit }
-                        QuickAccessTile(symbol: "terminal", title: "Terminal", subtitle: "Open managed shell", action: model.openManagedShell)
+            Section("Open") {
+                LabeledContent("Database tools") {
+                    HStack {
+                        Button("phpMyAdmin") { model.openURL(model.toolURL("phpmyadmin")) }
+                        Button("Adminer") { model.openURL(model.toolURL("adminer")) }
                     }
+                    .disabled(!webServerRunning)
+                }
+                LabeledContent("Mail") {
+                    Button("Inbox") { model.openURL("http://127.0.0.1:\(model.configuration.ports.mailpitInboxListen)") }
+                        .disabled(!model.serviceIsRunning(.mailpit))
+                }
+                LabeledContent("Shell") {
+                    Button("Terminal") { model.openManagedShell() }
                 }
             }
         }
+        .formStyle(.grouped)
     }
 
+    private var webServerRunning: Bool { model.serviceIsRunning(model.configuration.selectedWebServer.service) }
 }
 
-private struct ServiceControl<Selector: View>: View {
+private struct DashboardSiteRow: View {
     @EnvironmentObject private var model: AppModel
-    let title: String
-    let service: ServiceKind
-    let detail: String
-    @ViewBuilder var selector: Selector
-    private var state: ServiceState { model.serviceState(service) }
+    let site: SiteDefinition
 
     var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: service.icon).foregroundStyle(.secondary).frame(width: 16)
-            Text(title).font(.system(size: 12, weight: .medium)).lineLimit(1).frame(width: 80, alignment: .leading)
-            selector.pickerStyle(.menu).labelsHidden().controlSize(.small)
-                .tint(.primary)
-                .disabled(model.isBusy || state.phase == .running)
-                .help(state.phase == .running ? "Stop the service before changing its version." : "Change \(title.lowercased())")
-                .frame(width: 180, alignment: .leading)
-            Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
-                .layoutPriority(-1)
-            Spacer(minLength: 4)
-            StatusBadge(title: state.phase.rawValue.capitalized, color: state.phase.color, dot: true, dotColor: state.phase.dotColor).frame(minWidth: 64, alignment: .trailing)
-            Button(state.phase == .running ? "Stop" : "Start") {
-                Task {
-                    if state.phase == .running { await model.stopService(service) }
-                    else { await model.startService(service) }
-                }
-            }.buttonStyle(DevStackGlassButtonStyle())
-                .disabled(model.isBusy || !model.runtimeIsAvailable(service.runtimeID))
-                .accessibilityLabel("\(state.phase == .running ? "Stop" : "Start") \(service.displayName)")
-                .frame(width: 55)
-                Menu {
-                    Button("Open Logs") { model.showLogs(for: service) }
-                    Button("Restart") { Task { await model.restartService(service) } }
-                        .disabled(model.isBusy || state.phase != .running)
-                    if service.phpRuntimeID != nil {
-                        Divider()
-                        Button("Extensions…") { model.selectedSection = .php }
-                        ForEach(model.serviceStates.filter { $0.service.phpRuntimeID != nil && $0.service != service && $0.phase == .running }) { other in
-                            Button("Stop \(other.service.displayName)") { Task { await model.stopService(other.service) } }
-                        }
-                    }
-                } label: { Image(systemName: "ellipsis") }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().frame(width: 22).accessibilityLabel("\(title) actions")
-        }.padding(.vertical, 6)
+        HStack(spacing: 12) {
+            ServiceRowTitle(title: site.name, symbol: "globe", detail: site.hostname)
+            Spacer(minLength: 12)
+            Text(site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP ")).foregroundStyle(.secondary)
+            Label(site.tlsEnabled ? "HTTPS" : "HTTP", systemImage: site.tlsEnabled ? "lock.fill" : "lock.open")
+                .labelStyle(.titleAndIcon).foregroundStyle(.secondary)
+                .frame(width: 80, alignment: .leading)
+            Button { model.openURL(model.siteURL(site)) } label: { Image(systemName: "arrow.up.forward.square") }
+                .buttonStyle(.borderless)
+                .help("Open \(site.name) in the browser")
+                .accessibilityLabel("Open \(site.name)")
+        }
+        .padding(.vertical, 2)
+        .contextMenu {
+            Button("Open in Browser") { model.openURL(model.siteURL(site)) }
+            Button("Show All Sites") { model.selectedSection = .sites }
+        }
     }
 }
 
-/// The helper's local DNS responder shown as a service row: it answers
-/// DevStack hostnames for phones and other devices on the network.
-private struct LocalDNSServiceControl: View {
+/// The helper's DNS responder as a service row: it answers DevStack hostnames
+/// for phones and other devices on the network.
+private struct LocalDNSServiceRow: View {
     @EnvironmentObject private var model: AppModel
 
     private var running: Bool { model.helperStatus?.dnsEnabled == true }
     private var available: Bool { model.helperInstalled }
 
     var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "wifi.router").foregroundStyle(.secondary).frame(width: 16)
-            Text("Local DNS").font(.system(size: 12, weight: .medium)).lineLimit(1).frame(width: 80, alignment: .leading)
+        HStack(spacing: 12) {
+            ServiceRowTitle(title: "Local DNS", symbol: "wifi.router", detail: detail)
+            Spacer(minLength: 12)
             Text(model.localNetworkAddress ?? "No network")
-                .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                .lineLimit(1).padding(.leading, 10).frame(width: 180, alignment: .leading)
-            Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
-                .layoutPriority(-1)
-            Spacer(minLength: 4)
-            StatusBadge(
-                title: available ? (running ? "Running" : "Stopped") : "Unavailable",
-                color: available ? (running ? DevStackDesign.success : .secondary) : .secondary,
-                dot: true,
-                dotColor: running ? .green : nil
-            ).frame(minWidth: 64, alignment: .trailing)
-            Button(running ? "Stop" : "Start") {
-                Task { await model.setLocalNetworkAccess(!running) }
-            }.buttonStyle(DevStackGlassButtonStyle())
+                .font(.body.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                .frame(width: ServiceRowLayout.selector, alignment: .trailing)
+            StatusLabel(title: available ? (running ? "Running" : "Stopped") : "Unavailable",
+                        color: running ? .green : Color(nsColor: .tertiaryLabelColor))
+                .frame(width: ServiceRowLayout.status, alignment: .leading)
+            Button(running ? "Stop" : "Start") { Task { await model.setLocalNetworkAccess(!running) } }
+                .frame(width: ServiceRowLayout.button)
                 .disabled(model.isBusy || !available)
-                .help(available ? "Answer DevStack hostnames for devices on this network" : "Requires the privileged helper")
+                .help(available ? "Answer DevStack hostnames for devices on this network" : "Needs the DevStack helper")
                 .accessibilityLabel(running ? "Stop local DNS" : "Start local DNS")
-                .frame(width: 55)
             Menu {
-                Button("Open Local DNS…") { model.selectedSection = .localDNS }
+                Button("Local DNS Settings…") { model.selectedSection = .localDNS }
                 if let address = model.localNetworkAddress {
-                    Button("Copy DNS address") {
+                    Button("Copy DNS Address") {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(address, forType: .string)
                     }
                 }
-                Button("Run Doctor") { model.selectedSection = .doctor }
-            } label: { Image(systemName: "ellipsis") }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().frame(width: 22)
-                .help("Local DNS actions").accessibilityLabel("Local DNS actions")
-        }.padding(.vertical, 6)
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("Local DNS actions")
+        }
+        .padding(.vertical, 2)
     }
 
     private var detail: String {
-        guard available else { return "Set up the helper in Settings" }
-        guard running else { return "Off — serve DevStack hostnames to this network" }
-        return "Answers DevStack hostnames · other queries forwarded"
+        guard available else { return "Needs the DevStack helper" }
+        return running ? "Answers DevStack hostnames" : "Hostnames for other devices"
     }
 }
 
 struct PHPVersionPicker: View {
     @EnvironmentObject private var model: AppModel
+
     var body: some View {
-        Picker("PHP version", selection: Binding(get: { model.configuration.defaultPHPRuntimeID }, set: { id in Task { await model.selectPHP(id) } })) {
+        Picker("PHP version", selection: Binding(get: { model.configuration.defaultPHPRuntimeID },
+                                                 set: { id in Task { await model.selectPHP(id) } })) {
             ForEach(model.phpRuntimes) { runtime in
                 Text(model.runtimeOptionTitle("PHP \(runtime.version)", id: runtime.id)).tag(runtime.id)
                     .disabled(!model.runtimeIsAvailable(runtime.id))
             }
-        }.pickerStyle(.menu)
-            .tint(.primary)
-            .disabled(model.isBusy || defaultRuntimeIsRunning)
-            .help(defaultRuntimeIsRunning ? "Stop PHP before changing the default version." : "Choose the default PHP runtime.")
-    }
-
-    private var defaultRuntimeIsRunning: Bool {
-        model.serviceIsRunning(ServiceKind(rawValue: model.configuration.defaultPHPRuntimeID) ?? .php85)
-    }
-}
-
-private struct QuickAccessTile: View {
-    let symbol: String
-    let title: String
-    let subtitle: String
-    let action: () -> Void
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: symbol).font(.system(size: 14, weight: .light)).foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(.primary)
-                    Text(subtitle).font(.system(size: 10)).foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "arrow.up.right").font(.system(size: 9)).foregroundStyle(.tertiary)
-            }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
-        }.buttonStyle(.plain).devStackGlass(.rect(cornerRadius: 12), interactive: true)
+        }
     }
 }

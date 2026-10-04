@@ -20,22 +20,33 @@ struct SetupWizardView: View {
 
     enum Step: Int, CaseIterable {
         case welcome, runtimes, helper, certificate, ports, done
-        var title: String {
+
+        var heading: String {
             switch self {
-            case .welcome: "Welcome"
-            case .runtimes: "Runtimes"
-            case .helper: "Helper"
-            case .certificate: "Certificate"
-            case .ports: "Ports"
-            case .done: "Done"
+            case .welcome: "Welcome to DevStack"
+            case .runtimes: "Download the Runtimes"
+            case .helper: "Set Up the Helper"
+            case .certificate: "Trust HTTPS"
+            case .ports: "Choose the Web Ports"
+            case .done: "You're All Set"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .welcome: "Set up your local development stack."
+            case .runtimes: "The servers and tools your stack runs."
+            case .helper: "For ports 80 and 443, custom hostnames and local DNS."
+            case .certificate: "So browsers accept your sites' certificates."
+            case .ports: "Where the web server answers."
+            case .done: "Your stack is ready to start."
             }
         }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(spacing: 0) {
             header
-            Divider()
             Group {
                 switch step {
                 case .welcome: welcomeStep
@@ -46,13 +57,11 @@ struct SetupWizardView: View {
                 case .done: doneStep
                 }
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             Divider()
             footer
         }
-        .frame(width: 560)
-        .focusEffectDisabled()
+        .frame(width: 600, height: 560)
         .interactiveDismissDisabled(true)
         .onChange(of: step) { _, newStep in
             if newStep == .ports { syncPorts() }
@@ -62,53 +71,37 @@ struct SetupWizardView: View {
     // MARK: - Chrome
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                BrandIcon(size: 30)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Set up DevStack").font(.system(size: 16, weight: .semibold))
-                    Text("A few one-time steps so local sites, HTTPS and ports 80/443 just work.")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                Spacer()
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(step.heading).font(.title2.weight(.semibold))
+                Text(step.subtitle).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            HStack(spacing: 6) {
-                ForEach(Step.allCases, id: \.self) { candidate in
-                    let current = candidate.rawValue <= step.rawValue
-                    Text(candidate.title)
-                        .font(.system(size: 10, weight: current ? .semibold : .regular))
-                        .foregroundStyle(current ? DevStackDesign.accent : .secondary)
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(Capsule().fill(current ? DevStackDesign.accent.opacity(0.14) : Color.clear))
-                }
-            }
+            Spacer()
+            Text("Step \(step.rawValue + 1) of \(Step.allCases.count)").font(.callout).foregroundStyle(.secondary)
         }
-        .padding(20)
+        .padding(.horizontal, 24).padding(.top, 22).padding(.bottom, 4)
     }
 
     private var footer: some View {
         HStack(spacing: 8) {
-            Spacer()
             if step != .welcome, step != .done {
-                Button("Back") { goBack() }
-                    .buttonStyle(DevStackGlassButtonStyle())
-                    .disabled(model.isBusy || startingStack)
+                Button("Back") { goBack() }.disabled(model.isBusy || startingStack)
             }
+            Spacer()
             if step == .runtimes, runtimeDownloadSize > 0 {
-                Button("Skip for Now") { step = .helper }
-                    .buttonStyle(DevStackGlassButtonStyle())
-                    .disabled(model.isBusy)
+                Button("Skip for Now") { step = .helper }.disabled(model.isBusy)
             }
             if step == .helper, !model.helperInstalled, !helperIsImpossible {
                 Button("Continue Without Helper") {
                     model.cancelHelperSetup()
                     step = .certificate
                 }
-                .buttonStyle(DevStackGlassButtonStyle())
                 .disabled(startingStack)
             }
+            if step == .certificate, !model.localCATrusted {
+                Button("Skip for Now") { step = .ports }.disabled(model.isBusy)
+            }
             Button(primaryTitle) { Task { await primaryAction() } }
-                .buttonStyle(DevStackProminentButtonStyle())
                 .keyboardShortcut(.defaultAction)
                 .disabled(primaryDisabled)
         }
@@ -122,14 +115,14 @@ struct SetupWizardView: View {
 
     private var primaryTitle: String {
         switch step {
-        case .welcome: "Get Started"
+        case .welcome: "Continue"
         case .runtimes:
             runtimeDownloadSize > 0 ? "Install (\(ByteCountFormatter.string(fromByteCount: runtimeDownloadSize, countStyle: .file)))" : "Continue"
         case .helper:
             if model.helperInstalled || helperIsImpossible { "Continue" } else { "Set Up Helper" }
-        case .certificate: model.localCATrusted ? "Continue" : "Install Certificate"
+        case .certificate: model.localCATrusted ? "Continue" : "Trust Certificate"
         case .ports: model.hasRunningServices ? "Continue" : "Apply and Continue"
-        case .done: "Finish"
+        case .done: "Done"
         }
     }
 
@@ -144,20 +137,29 @@ struct SetupWizardView: View {
     // MARK: - Steps
 
     private var welcomeStep: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if !model.runtimePackCatalog.packs.isEmpty {
-                bullet("shippingbox", "Download the runtimes",
-                       "Apache, PHP, MySQL and the other servers you choose, each checked against the signature and hash this version of DevStack expects.")
+        Form {
+            Section {
+                HStack(spacing: 16) {
+                    BrandIcon(size: 56)
+                    Text("A few one-time steps, so local sites, HTTPS and ports 80 and 443 just work. Everything runs on this Mac.")
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.vertical, 4)
             }
-            bullet("lock.shield", "Install the privileged helper",
-                   "Needed for ports 80/443, /etc/hosts entries and the local DNS responder. macOS asks you to approve it once in Login Items & Extensions — it no longer accepts an administrator password for background helpers.")
-            bullet("checkmark.seal", "Create and trust the DevStack certificate authority",
-                   "HTTPS stops warning on every DevStack site. macOS asks for your administrator password once.")
-            bullet("network", "Choose your web ports",
-                   "Use 80 and 443 so site URLs have no port number, or keep 8080/8443 to run without the helper.")
-            Text("Everything runs on this Mac. The helper only listens on loopback and your local network.")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
+            Section {
+                if !model.runtimePackCatalog.packs.isEmpty {
+                    item("shippingbox", "Download the runtimes",
+                         "Apache, PHP, MySQL and the others you choose, each checked against the signature this version of DevStack expects.")
+                }
+                item("lock.shield", "Set up the helper",
+                     "For ports 80 and 443, custom hostnames and local DNS. macOS asks you to approve it once in Login Items & Extensions.")
+                item("checkmark.seal", "Trust the DevStack certificate authority",
+                     "So HTTPS works without warnings. macOS asks for your administrator password once.")
+                item("network", "Choose the web ports",
+                     "80 and 443 keep port numbers out of site addresses; 8080 and 8443 work without the helper.")
+            }
         }
+        .formStyle(.grouped)
     }
 
     /// Optional runtimes offered on top of the ones the stack always uses.
@@ -171,23 +173,31 @@ struct SetupWizardView: View {
     }
 
     private var runtimesStep: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        Form {
             if model.runtimePackCatalog.packs.isEmpty {
-                statusRow(title: "Runtimes are included", detail: "This copy of DevStack bundles its runtimes; there is nothing to download.", ok: true)
+                Section {
+                    NoticeRow(symbol: "checkmark.circle.fill", title: "Runtimes are included",
+                              message: "This copy of DevStack bundles its runtimes; there is nothing to download.", tint: .green)
+                }
             } else {
-                statusRow(
-                    title: runtimeDownloadSize == 0 ? "Runtimes are ready" : "Download the runtimes",
-                    detail: "Each runtime is checked against the signature and hash this version of DevStack expects before it installs. You can add or remove runtimes later on the Runtimes page.",
-                    ok: runtimeDownloadSize == 0
-                )
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Always installed").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                if let progress = model.runtimePackProgress {
+                    Section { RuntimePackProgressPanel(progress: progress) }
+                }
+                if let runtimeError {
+                    Section { NoticeRow(symbol: "exclamationmark.triangle.fill", title: "Couldn't install", message: runtimeError) }
+                }
+                Section {
                     Text(model.runtimePacksInUse.compactMap { model.runtimePackCatalog.pin(for: $0)?.displayName }.joined(separator: ", "))
-                        .font(.system(size: 11)).fixedSize(horizontal: false, vertical: true)
+                        .fixedSize(horizontal: false, vertical: true)
+                } header: {
+                    Text("Your stack")
+                } footer: {
+                    SectionFooter {
+                        Text(runtimeDownloadSize == 0 ? "Everything your stack needs is installed." : "Each runtime is checked before it installs. Add or remove runtimes later on the Runtimes page.")
+                    }
                 }
                 if !optionalRuntimeIDs.isEmpty {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("Optional").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    Section("Also install") {
                         ForEach(optionalRuntimeIDs, id: \.self) { id in
                             if let pin = model.runtimePackCatalog.pin(for: id) {
                                 let installed = model.runtimePackStatus(pin) != .notInstalled
@@ -195,188 +205,181 @@ struct SetupWizardView: View {
                                     get: { installed || optionalRuntimes.contains(id) },
                                     set: { selected in if selected { optionalRuntimes.insert(id) } else { optionalRuntimes.remove(id) } }
                                 )) {
-                                    HStack(spacing: 6) {
-                                        Text(pin.displayName).font(.system(size: 12))
-                                        if pin.isLegacy { StatusBadge(title: "LEGACY", color: .orange) }
-                                        Text(installed ? "installed" : ByteCountFormatter.string(fromByteCount: pin.size, countStyle: .file))
-                                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                                    }
+                                    Text(pin.displayName + (pin.isLegacy ? " (legacy)" : ""))
+                                    Text(installed ? "Installed" : ByteCountFormatter.string(fromByteCount: pin.size, countStyle: .file))
                                 }
-                                .toggleStyle(.checkbox)
                                 .disabled(installed || model.isBusy)
                             }
                         }
                     }
                 }
-                if let progress = model.runtimePackProgress {
-                    RuntimePackProgressPanel(progress: progress)
-                }
-                if let runtimeError {
-                    Label(runtimeError, systemImage: "exclamationmark.circle")
-                        .font(.system(size: 11)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
-                }
             }
         }
+        .formStyle(.grouped)
     }
 
     private var helperStep: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            statusRow(
-                title: model.helperInstalled ? "Helper is ready" : (model.helperSetupState == .requiresApproval ? "Waiting for approval" : "Helper not set up yet"),
-                detail: model.helperInstalled
-                    ? "Authorized and responding. Ports below 1024, custom domains and local DNS are available."
-                    : model.helperSetupState.message,
-                ok: model.helperInstalled
-            )
-            if !model.helperInstalled {
-                Text("Approve DevStack in System Settings → General → Login Items & Extensions → Allow in the Background. This window updates automatically once the helper answers.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Text("macOS no longer installs background helpers with your password; this one-time switch is the only way, and it survives app updates.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                if model.helperSetupState == .requiresApproval {
-                    Button("Open Login Items…") { SMAppService.openSystemSettingsLoginItems() }
-                        .buttonStyle(DevStackGlassButtonStyle())
-                }
-                if model.isBusy {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("Waiting for the helper…").font(.system(size: 11)).foregroundStyle(.secondary)
+        Form {
+            Section {
+                LabeledContent("Helper") {
+                    HStack(spacing: 10) {
+                        if model.isBusy, !model.helperInstalled { ProgressView().controlSize(.small) }
+                        StatusLabel(title: model.helperInstalled ? "Ready" : (model.helperSetupState == .requiresApproval ? "Waiting for approval" : "Not set up"),
+                                    color: model.helperInstalled ? .green : .orange)
                     }
+                }
+                if !model.helperInstalled, model.helperSetupState == .requiresApproval {
+                    LabeledContent("Approval") {
+                        Button("Open Login Items…") { SMAppService.openSystemSettingsLoginItems() }
+                    }
+                }
+            } footer: {
+                SectionFooter {
+                    Text(model.helperInstalled
+                         ? "Ports below 1024, custom hostnames and local DNS are available."
+                         : "Approve DevStack in System Settings → General → Login Items & Extensions → Allow in the Background. This window updates as soon as the helper answers. The approval survives app updates.")
                 }
             }
             if model.isPreviewBuild {
-                Label("This preview build cannot drive the helper. Install the signed build in Applications.", systemImage: "exclamationmark.triangle")
-                    .font(.system(size: 11)).foregroundStyle(.orange)
+                Section {
+                    NoticeRow(symbol: "exclamationmark.triangle.fill", title: "Preview build",
+                              message: "This build cannot use the helper. Set it up from the signed copy in Applications.")
+                }
             }
-            Text("You can continue without the helper and use ports 8080/8443 with .localhost domains.")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
+            Section {} footer: {
+                SectionFooter { Text("You can continue without the helper and use ports 8080 and 8443 with .localhost names.") }
+            }
         }
+        .formStyle(.grouped)
     }
 
     private var certificateStep: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            statusRow(
-                title: model.localCATrusted ? "Certificate is trusted" : "Certificate not trusted yet",
-                detail: model.localCATrusted
-                    ? "Every user and browser on this Mac accepts DevStack HTTPS certificates."
-                    : "Installs the DevStack local CA into the system trust store. macOS asks for your administrator password once; credentials never pass through DevStack.",
-                ok: model.localCATrusted
-            )
-            if let certificateError {
-                Label(certificateError, systemImage: "exclamationmark.circle")
-                    .font(.system(size: 11)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
-            }
-            if !model.localCATrusted {
-                HStack(spacing: 8) {
-                    Button("Trust for This User Only") {
-                        Task {
-                            certificateError = await model.trustForCurrentUserFromWizard()
-                            if certificateError == nil, model.localCATrusted { step = .ports }
-                        }
-                    }
-                    .buttonStyle(DevStackGlassButtonStyle())
-                    .disabled(model.isBusy)
-                    Button("Skip for Now") { step = .ports }
-                        .buttonStyle(DevStackGlassButtonStyle())
-                        .disabled(model.isBusy)
+        Form {
+            Section {
+                LabeledContent("DevStack Local CA") {
+                    StatusLabel(title: model.localCATrusted ? "Trusted" : "Not trusted", color: model.localCATrusted ? .green : .orange)
                 }
-                Text("User-only trust needs no administrator password but applies just to this Mac account.")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                if !model.localCATrusted {
+                    LabeledContent {
+                        Button("Trust for This User Only") {
+                            Task {
+                                certificateError = await model.trustForCurrentUserFromWizard()
+                                if certificateError == nil, model.localCATrusted { step = .ports }
+                            }
+                        }
+                        .disabled(model.isBusy)
+                    } label: {
+                        Text("Without a password")
+                        Text("Trusts the CA for your account only.")
+                    }
+                }
+            } footer: {
+                SectionFooter {
+                    Text(model.localCATrusted
+                         ? "Every user and browser on this Mac accepts DevStack's HTTPS certificates."
+                         : "Trust Certificate adds the DevStack CA to the system trust store. macOS asks for your administrator password; it never passes through DevStack.")
+                }
+            }
+            if let certificateError {
+                Section { NoticeRow(symbol: "exclamationmark.triangle.fill", title: "Couldn't trust the certificate", message: certificateError) }
             }
         }
+        .formStyle(.grouped)
     }
 
     private var portsStep: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Choose where the web server answers. With the helper you can use the standard 80 and 443 so site URLs drop the port number.")
-                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                GridRow {
-                    Text("HTTP port").foregroundStyle(.secondary).frame(width: 90, alignment: .leading)
-                    TextField("80", text: $httpPort).textFieldStyle(.roundedBorder).frame(width: 90).disabled(model.hasRunningServices)
-                    hint(for: httpPort, configured: model.configuration.ports.webHTTP)
+        Form {
+            Section {
+                LabeledContent("HTTP port") {
+                    TextField("HTTP port", text: $httpPort).labelsHidden().multilineTextAlignment(.trailing).frame(width: 80)
+                        .disabled(model.hasRunningServices)
                 }
-                GridRow {
-                    Text("HTTPS port").foregroundStyle(.secondary).frame(width: 90, alignment: .leading)
-                    TextField("443", text: $httpsPort).textFieldStyle(.roundedBorder).frame(width: 90).disabled(model.hasRunningServices)
-                    hint(for: httpsPort, configured: model.configuration.ports.webHTTPS)
+                LabeledContent("HTTPS port") {
+                    TextField("HTTPS port", text: $httpsPort).labelsHidden().multilineTextAlignment(.trailing).frame(width: 80)
+                        .disabled(model.hasRunningServices)
                 }
-            }
-            if model.hasRunningServices {
-                Label("Stop the stack to change ports; the current ports stay in place.", systemImage: "info.circle")
-                    .font(.system(size: 11)).foregroundStyle(.orange)
-            }
-            if let portError {
-                Label(portError, systemImage: "exclamationmark.triangle")
-                    .font(.system(size: 11)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+            } footer: {
+                SectionFooter {
+                    if model.hasRunningServices {
+                        Text("Stop the stack to change ports; the current ports stay in place.")
+                    } else if let note = portNote {
+                        Label(note, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    } else {
+                        Text("With the helper, 80 and 443 keep port numbers out of site addresses.")
+                    }
+                    if let portError {
+                        Label(portError, systemImage: "exclamationmark.circle.fill").foregroundStyle(.red)
+                    }
+                }
             }
         }
+        .formStyle(.grouped)
     }
 
     private var doneStep: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            bullet(model.helperInstalled ? "checkmark.circle.fill" : "circle.dashed",
-                   model.helperInstalled ? "Helper ready" : "Helper skipped",
-                   model.helperInstalled ? "Ports below 1024, custom domains and local DNS are available." : "You can set it up later in Settings → System integration.")
-            bullet(model.localCATrusted ? "checkmark.circle.fill" : "circle.dashed",
-                   model.localCATrusted ? "Certificate trusted" : "Certificate skipped",
-                   model.localCATrusted ? "HTTPS sites open without warnings." : "Trust the CA later from the SSL page.")
-            bullet("network", "Web ports \(model.configuration.ports.webHTTPListen) / \(model.configuration.ports.webHTTPSListen)",
-                   model.helperInstalled && model.configuration.ports.webHTTP < 1024
-                   ? "Site URLs have no port number."
-                   : "Site URLs include the port, for example http://localhost:\(model.configuration.ports.webHTTPListen).")
-            Divider()
-            HStack(spacing: 8) {
-                Button("Start Stack") {
-                    startingStack = true
-                    Task {
-                        await model.startAll()
-                        startingStack = false
-                    }
+        Form {
+            Section {
+                LabeledContent("Helper") {
+                    StatusLabel(title: model.helperInstalled ? "Ready" : "Skipped", color: model.helperInstalled ? .green : Color(nsColor: .tertiaryLabelColor))
                 }
-                .buttonStyle(DevStackGlassButtonStyle())
-                .disabled(model.isBusy || startingStack || model.stackIsRunning)
-                Text(model.stackIsRunning ? "Stack is running." : "Optional — you can start it any time from the toolbar.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                LabeledContent("HTTPS certificate") {
+                    StatusLabel(title: model.localCATrusted ? "Trusted" : "Skipped", color: model.localCATrusted ? .green : Color(nsColor: .tertiaryLabelColor))
+                }
+                LabeledContent("Web ports", value: "\(model.configuration.ports.webHTTPListen) and \(model.configuration.ports.webHTTPSListen)")
+            } footer: {
+                SectionFooter {
+                    Text(model.helperInstalled && model.configuration.ports.webHTTP < 1024
+                         ? "Site addresses have no port number."
+                         : "Site addresses include the port, for example http://localhost:\(model.configuration.ports.webHTTPListen). Skipped steps are in Settings.")
+                }
+            }
+            Section {
+                LabeledContent {
+                    Button(model.stackIsRunning ? "Running" : "Start Stack") {
+                        startingStack = true
+                        Task {
+                            await model.startAll()
+                            startingStack = false
+                        }
+                    }
+                    .disabled(model.isBusy || startingStack || model.stackIsRunning)
+                } label: {
+                    Text("Start now")
+                    Text("Or any time from the toolbar.")
+                }
             }
         }
+        .formStyle(.grouped)
     }
 
     // MARK: - Pieces
 
-    private func bullet(_ symbol: String, _ title: String, _ detail: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: symbol).font(.system(size: 15)).foregroundStyle(DevStackDesign.accent).frame(width: 20)
+    private func item(_ symbol: String, _ title: String, _ detail: String) -> some View {
+        Label {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 12, weight: .semibold))
-                Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(title)
+                Text(detail).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
+        } icon: {
+            Image(systemName: symbol).foregroundStyle(.tint).frame(width: 22)
         }
+        .padding(.vertical, 2)
     }
 
-    private func statusRow(title: String, detail: String, ok: Bool) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: ok ? "checkmark.circle.fill" : "circle.dashed")
-                .font(.system(size: 16)).foregroundStyle(ok ? DevStackDesign.success : .secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 13, weight: .semibold))
-                Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    /// A warning about the ports typed so far, if any.
+    private var portNote: String? {
+        for text in [httpPort, httpsPort] {
+            guard let value = UInt16(text), value > 0 else { continue }
+            if value < 1024, !model.helperInstalled {
+                return "Ports below 1024 need the helper. Without it, sites answer on \(ServicePorts.webHTTPFallback) and \(ServicePorts.webHTTPSFallback)."
+            }
+            if value != model.configuration.ports.webHTTP, value != model.configuration.ports.webHTTPS, !PortAvailability.isFree(value) {
+                // The current ports may be held by DevStack's own forwarding,
+                // so only other ports are checked.
+                return "Port \(value) is already in use by another app."
             }
         }
-    }
-
-    private func hint(for text: String, configured: UInt16) -> some View {
-        Group {
-            if let value = UInt16(text), value > 0, value < 1024, !model.helperInstalled {
-                Text("Needs the helper · without it sites answer on \(ServicePorts.webHTTPFallback)/\(ServicePorts.webHTTPSFallback)")
-                    .font(.system(size: 10)).foregroundStyle(.orange)
-            } else if let value = UInt16(text), value > 0, value != configured, !PortAvailability.isFree(value) {
-                // The current port may be held by DevStack's own helper
-                // forwarding, so only other ports are checked.
-                Text("Port \(value) is already in use by another app")
-                    .font(.system(size: 10)).foregroundStyle(.orange)
-            }
-        }
+        return nil
     }
 
     // MARK: - Actions

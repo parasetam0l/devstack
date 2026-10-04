@@ -4,11 +4,6 @@ import DevStackCore
 import SwiftUI
 
 enum DevStackDesign {
-    static let accent = Color(nsColor: NSColor(name: nil) { appearance in
-        NSColor(calibratedWhite: appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? 0.65 : 0.35, alpha: 1)
-    })
-    static let success = Color.primary
-    static let radius: CGFloat = 12
     static let icon: NSImage? = {
         DevStackResources.bundle.url(forResource: "DevStackIcon", withExtension: "png").flatMap { NSImage(contentsOf: $0) }
     }()
@@ -57,242 +52,11 @@ struct BrandIcon: View {
             if let icon = DevStackDesign.icon {
                 Image(nsImage: icon).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
             } else {
-                Image(systemName: "square.3.layers.3d").resizable().scaledToFit().foregroundStyle(DevStackDesign.accent).padding(size * 0.15)
+                Image(systemName: "square.3.layers.3d").resizable().scaledToFit().foregroundStyle(.secondary).padding(size * 0.15)
             }
         }
         .frame(width: size, height: size)
         .accessibilityHidden(true)
-    }
-}
-
-struct WorkspaceBackground: View {
-    @Environment(\.colorScheme) private var colorScheme
-    var body: some View {
-        ZStack {
-            (colorScheme == .dark ? Color.black : Color.white).opacity(0.12)
-        }.ignoresSafeArea()
-    }
-}
-
-// MARK: - Glass surfaces
-
-extension View {
-    /// Liquid Glass on macOS 26 and later. Earlier versions have no glass
-    /// effect, so they get a translucent material with a hairline border in
-    /// the same shape.
-    @ViewBuilder
-    func devStackGlass<S: Shape>(_ shape: S, interactive: Bool = false, tint: Color? = nil) -> some View {
-        if #available(macOS 26, *) {
-            glassEffect(DevStackGlass.style(interactive: interactive, tint: tint), in: shape)
-        } else {
-            background {
-                ZStack {
-                    shape.fill(.regularMaterial)
-                    if let tint { shape.fill(tint) }
-                }
-            }
-            .overlay(shape.stroke(Color.primary.opacity(0.1), lineWidth: 1))
-        }
-    }
-}
-
-private enum DevStackGlass {
-    @available(macOS 26, *)
-    static func style(interactive: Bool, tint: Color?) -> Glass {
-        var glass = Glass.regular
-        if let tint { glass = glass.tint(tint) }
-        if interactive { glass = glass.interactive() }
-        return glass
-    }
-}
-
-extension ToolbarContent {
-    /// Drops the shared glass background macOS 26 draws behind toolbar items;
-    /// earlier versions draw none.
-    @ToolbarContentBuilder
-    func devStackHidingSharedBackground() -> some ToolbarContent {
-        if #available(macOS 26, *) {
-            sharedBackgroundVisibility(.hidden)
-        } else {
-            self
-        }
-    }
-}
-
-/// Groups glass surfaces so they blend on macOS 26 and later; a plain
-/// container on earlier versions.
-struct DevStackGlassGroup<Content: View>: View {
-    var spacing: CGFloat
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        if #available(macOS 26, *) {
-            GlassEffectContainer(spacing: spacing) { content }
-        } else {
-            content
-        }
-    }
-}
-
-struct WorkspacePage<Content: View>: View {
-    @ViewBuilder var content: Content
-    var body: some View {
-        ScrollView {
-            DevStackGlassGroup(spacing: 8) {
-                VStack(alignment: .leading, spacing: 10) { content }
-            }
-                .frame(maxWidth: 1040, alignment: .leading)
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .top)
-        }
-        .background(WorkspaceBackground())
-        .controlSize(.small)
-        .font(.system(size: 12))
-    }
-}
-
-struct PageHeading: View {
-    let title: String
-    let subtitle: String
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.system(size: 20, weight: .semibold)).tracking(-0.4)
-            if !subtitle.isEmpty { Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
-        }
-    }
-}
-
-struct SurfacePanel<Content: View>: View {
-    var title: String? = nil
-    var subtitle: String? = nil
-    @ViewBuilder var content: Content
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let title {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title).font(.system(size: 13, weight: .semibold))
-                    if let subtitle { Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary) }
-                }
-            }
-            content
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .devStackGlass(.rect(cornerRadius: 12))
-    }
-}
-
-struct StatusBadge: View {
-    let title: String
-    var color: Color = .secondary
-    var dot = false
-    var dotColor: Color? = nil
-    var body: some View {
-        HStack(spacing: 5) {
-            if dot { Circle().fill(dotColor ?? color).frame(width: 5, height: 5) }
-            Text(title).font(.system(size: 10, weight: .semibold))
-        }
-        .foregroundStyle(color)
-        .padding(.horizontal, 7).padding(.vertical, 3)
-        .background(color.opacity(0.1), in: Capsule())
-    }
-}
-
-struct FeatureIcon: View {
-    let symbol: String
-    var color: Color = .secondary
-    var body: some View {
-        Image(systemName: symbol).font(.system(size: 14, weight: .medium))
-            .foregroundStyle(color).frame(width: 26, height: 26)
-            .background(color.opacity(0.09), in: RoundedRectangle(cornerRadius: 7))
-            .accessibilityHidden(true)
-    }
-}
-
-struct EmptyWorkspace: View {
-    let symbol: String
-    let title: String
-    let description: String
-    var actionTitle: String? = nil
-    var action: (() -> Void)? = nil
-    var body: some View {
-        VStack(spacing: 8) {
-            Image(systemName: symbol).font(.system(size: 23, weight: .light))
-                .foregroundStyle(DevStackDesign.accent).frame(width: 42, height: 42)
-                .background(DevStackDesign.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
-            Text(title).font(.system(size: 15, weight: .semibold, design: .rounded))
-            Text(description).font(.system(size: 13)).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center).frame(maxWidth: 360)
-            if let actionTitle, let action {
-                Button(actionTitle, action: action).buttonStyle(DevStackGlassButtonStyle()).controlSize(.small).padding(.top, 4)
-            }
-        }.frame(maxWidth: .infinity).padding(.vertical, 14)
-    }
-}
-
-struct InfoNotice: View {
-    let symbol: String
-    let title: String
-    let message: String
-    var color: Color = .secondary
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: symbol).foregroundStyle(color).padding(.top, 1)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.system(size: 12, weight: .semibold))
-                Text(message).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-        }.padding(9).frame(maxWidth: .infinity, alignment: .leading)
-            .background(color.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
-    }
-}
-
-struct CopyValueRow: View {
-    let label: String
-    let value: String
-    @StateObject private var state = CopyValueState()
-    var body: some View {
-        HStack(spacing: 8) {
-            Text(label).font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 80, alignment: .leading)
-            Text(value).font(.system(size: 12, design: .monospaced)).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
-            Spacer(minLength: 8)
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(value, forType: .string)
-                state.copied = true
-                Task { try? await Task.sleep(for: .seconds(2)); state.copied = false }
-            } label: { Image(systemName: state.copied ? "checkmark" : "doc.on.doc").foregroundStyle(state.copied ? DevStackDesign.accent : .secondary) }
-            .buttonStyle(.borderless).help("Copy \(label.lowercased())").accessibilityLabel("Copy \(label.lowercased())")
-        }
-    }
-}
-
-@MainActor private final class CopyValueState: ObservableObject { @Published var copied = false }
-
-extension ServicePhase {
-    var color: Color {
-        switch self {
-        case .running: DevStackDesign.success
-        case .failed: .red
-        case .starting, .stopping: .orange
-        case .stopped: .secondary
-        }
-    }
-
-    /// Accent for the status dot only, so running chips show a green indicator without tinting the label.
-    var dotColor: Color? {
-        self == .running ? .green : nil
-    }
-}
-
-extension ServiceKind {
-    var icon: String {
-        switch self {
-        case .apache, .nginx: "globe"
-        case .php74, .php84, .php85: "chevron.left.forwardslash.chevron.right"
-        case .mysql57, .mysql84, .postgresql18: "externaldrive"
-        case .mailpit: "envelope"
-        }
     }
 }
 
@@ -315,36 +79,126 @@ extension RuntimeKind {
     }
 }
 
-struct DevStackGlassButtonStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var enabled
-    @Environment(\.keyboardShortcut) private var shortcut
-    func makeBody(configuration: Configuration) -> some View {
-        // Custom styles own the emphasis; the system focus effect draws a
-        // blue rectangle that does not follow the glass capsule (and lags the
-        // pressed scaling), so it is disabled here. The default action keeps
-        // its own ring/tint from the keyboardShortcut environment.
-        let isDefaultAction = shortcut == .defaultAction
-        return configuration.label.font(.system(size: 12, weight: .medium))
-            .foregroundStyle(enabled ? Color.primary : Color.secondary)
-            .padding(.horizontal, 11).padding(.vertical, 5)
-            .devStackGlass(.capsule, interactive: true)
-            .overlay(Capsule().strokeBorder(.white.opacity(isDefaultAction ? 0.4 : 0), lineWidth: 1))
-            .focusEffectDisabled()
-            .opacity(enabled ? 1 : 0.5)
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+// MARK: - Native building blocks
+
+/// A state as macOS shows it in lists and settings: a coloured dot and a
+/// secondary label ("Running", "Stopped").
+struct StatusLabel: View {
+    let title: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(title).foregroundStyle(.secondary)
+        }
+        .fixedSize()
+        .accessibilityElement(children: .combine)
     }
 }
 
-struct DevStackProminentButtonStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var enabled
-    @Environment(\.keyboardShortcut) private var shortcut
-    func makeBody(configuration: Configuration) -> some View {
-        let isDefaultAction = shortcut == .defaultAction
-        return configuration.label.font(.system(size: 12, weight: .semibold))
-            .padding(.horizontal, 13).padding(.vertical, 5)
-            .devStackGlass(.capsule, interactive: true, tint: DevStackDesign.accent.opacity(isDefaultAction ? 0.5 : 0.35))
-            .focusEffectDisabled()
-            .opacity(enabled ? 1 : 0.5)
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+extension StatusLabel {
+    init(_ phase: ServicePhase) {
+        self.init(title: phase.title, color: phase.statusColor)
+    }
+}
+
+extension ServicePhase {
+    var title: String { rawValue.capitalized }
+
+    var statusColor: Color {
+        switch self {
+        case .running: .green
+        case .failed: .red
+        case .starting, .stopping: .orange
+        case .stopped: Color(nsColor: .tertiaryLabelColor)
+        }
+    }
+}
+
+/// A value to read and copy, such as a host, a port or a path.
+struct CopyableValueRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        LabeledContent(label) {
+            HStack(spacing: 6) {
+                Text(value)
+                    .font(.body.monospaced())
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                CopyButton(value: value, label: label)
+            }
+        }
+    }
+}
+
+struct CopyButton: View {
+    let value: String
+    var label: String = "value"
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(value, forType: .string)
+            copied = true
+            Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(.borderless)
+        .help("Copy \(label.lowercased())")
+        .accessibilityLabel("Copy \(label.lowercased())")
+    }
+}
+
+/// Something that needs attention, inside a form section: an icon, a title,
+/// an explanation, and optionally an action on the trailing side.
+struct NoticeRow<Accessory: View>: View {
+    let symbol: String
+    let title: String
+    let message: String
+    var tint: Color = .orange
+    @ViewBuilder var accessory: Accessory
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: symbol)
+                .font(.title2)
+                .foregroundStyle(tint)
+                .frame(width: 28)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.headline)
+                Text(message).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            accessory
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+extension NoticeRow where Accessory == EmptyView {
+    init(symbol: String, title: String, message: String, tint: Color = .orange) {
+        self.init(symbol: symbol, title: title, message: message, tint: tint) { EmptyView() }
+    }
+}
+
+/// A form section's footnote as System Settings sets it: leading, secondary,
+/// in the callout size.
+struct SectionFooter<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) { content }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

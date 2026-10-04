@@ -9,130 +9,184 @@ struct SSLView: View {
     @StateObject private var state = SSLViewState()
 
     var body: some View {
-        WorkspacePage {
-            HStack {
-                PageHeading(title: "SSL", subtitle: "Local CA and site certificates.")
-                Spacer()
-                Button("Issue Certificate…", systemImage: "plus") { state.hostname = ""; state.issuing = true }.buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy)
-                Button { Task { await model.refreshCertificates() } } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(DevStackGlassButtonStyle()).help("Refresh certificates").accessibilityLabel("Refresh certificates").disabled(model.isBusy)
-            }
-            SurfacePanel {
-                HStack(spacing: 8) {
-                    FeatureIcon(symbol: "lock.shield")
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("DevStack Local CA").font(.system(size: 12, weight: .semibold))
-                        Text(model.localCATrusted ? "Trusted by macOS" : "Trust required for browser HTTPS")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 8)
-                    if let ca = model.caSummary {
-                        Text(expiration(ca)).font(.system(size: 11)).foregroundStyle(.secondary)
-                        Button("Details") { state.detailCertificate = ca }.buttonStyle(.borderless)
-                        Menu {
-                            Button("Export CA…") { exportCertificate(ca) }
-                            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([ca.certificate]) }
-                        } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().accessibilityLabel("CA actions")
-                    }
+        Form {
+            Section {
+                HStack(spacing: 12) {
+                    ServiceRowTitle(title: "DevStack Local CA", symbol: "checkmark.shield",
+                                    detail: model.caSummary.map(expiration) ?? "Created when the stack first starts")
+                    Spacer(minLength: 12)
+                    StatusLabel(title: model.localCATrusted ? "Trusted" : "Not trusted", color: model.localCATrusted ? .green : .orange)
                     if !model.localCATrusted {
-                        Button("Trust CA…") { Task { await model.trustHTTPS(); await model.refreshCertificates() } }
-                            .buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy)
-                    } else { StatusBadge(title: "Trusted", color: DevStackDesign.success) }
-                }
-            }
-            SurfacePanel {
-                HStack {
-                    Text("Certificates").font(.system(size: 13, weight: .semibold))
-                    Spacer()
-                    Text("\(model.certificateSummaries.count)").foregroundStyle(.secondary)
-                }
-                if model.certificateSummaries.isEmpty {
-                    EmptyWorkspace(symbol: "lock.doc", title: "No certificates yet", description: "Issue a certificate or start the stack to create certificates for your sites.")
-                } else {
-                    VStack(spacing: 0) {
-                        ForEach(Array(model.certificateSummaries.enumerated()), id: \.element.id) { index, certificate in
-                            if index > 0 { Divider() }
-                            certificateRow(certificate)
+                        Button("Trust…") { Task { await model.trustHTTPS(); await model.refreshCertificates() } }
+                            .disabled(model.isBusy)
+                    }
+                    if let ca = model.caSummary {
+                        Menu {
+                            Button("Details…") { state.detailCertificate = ca }
+                            Button("Export…") { exportCertificate(ca) }
+                            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([ca.certificate]) }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
                         }
+                        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                        .accessibilityLabel("Certificate authority actions")
                     }
                 }
+                .padding(.vertical, 2)
+            } header: {
+                Text("Certificate authority")
+            } footer: {
+                SectionFooter {
+                    Text(model.localCATrusted
+                         ? "Browsers on this Mac trust every certificate DevStack issues."
+                         : "Trust the DevStack CA so browsers on this Mac accept your sites' HTTPS without warnings.")
+                }
+            }
+
+            Section("Certificates") {
+                if model.certificateSummaries.isEmpty {
+                    NoticeRow(symbol: "lock.doc", title: "No certificates yet",
+                              message: "Starting the stack creates certificates for your HTTPS sites. You can also issue one yourself.", tint: .secondary) {
+                        Button("Issue…") { beginIssuing() }.disabled(model.isBusy)
+                    }
+                } else {
+                    ForEach(model.certificateSummaries) { certificate in certificateRow(certificate) }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .toolbar {
+            ToolbarItem {
+                Button { Task { await model.refreshCertificates() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                    .disabled(model.isBusy)
+                    .help("Read the certificates again")
+            }
+            ToolbarItem {
+                Button(action: beginIssuing) { Label("Issue Certificate", systemImage: "plus") }
+                    .disabled(model.isBusy)
+                    .help("Issue a certificate for a hostname")
             }
         }
         .task { await model.refreshCertificates() }
-        .sheet(isPresented: $state.issuing) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Issue SSL Certificate").font(.system(size: 17, weight: .semibold))
-                TextField("Hostname", text: $state.hostname).textFieldStyle(.roundedBorder).frame(width: 340)
-                Text("For example, project.localhost. Certificates are signed by the DevStack Local CA.")
-                    .font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 340, alignment: .leading)
-                HStack { Spacer(); Button("Cancel") { state.issuing = false }.buttonStyle(DevStackGlassButtonStyle()).keyboardShortcut(.cancelAction)
-                    Button("Issue") { let host = state.hostname; state.issuing = false; Task { await model.issueCertificate(for: host) } }
-                        .buttonStyle(DevStackGlassButtonStyle()).keyboardShortcut(.defaultAction).disabled(state.hostname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }.padding(18).focusEffectDisabled()
-        }
-        .sheet(item: $state.detailCertificate) { certificate in
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text(certificate.hostname).font(.system(size: 16, weight: .semibold))
-                    Spacer()
-                    StatusBadge(title: certificate.error != nil ? "Invalid" : certificate.isExpired ? "Expired" : "Valid", color: certificate.error != nil || certificate.isExpired ? .orange : DevStackDesign.success)
-                }
-                details(certificate)
-                HStack {
-                    Button("Export…") { exportCertificate(certificate) }.buttonStyle(DevStackGlassButtonStyle())
-                    Spacer()
-                    Button("Done") { state.detailCertificate = nil }.buttonStyle(DevStackGlassButtonStyle()).keyboardShortcut(.defaultAction)
-                }
-            }.padding(18).frame(width: 580).controlSize(.small).focusEffectDisabled()
-        }
-        .alert("Delete certificate?", isPresented: $state.confirmingDelete, presenting: state.pendingDelete) { certificate in
+        .sheet(isPresented: $state.issuing) { issueSheet }
+        .sheet(item: $state.detailCertificate) { certificate in detailSheet(certificate) }
+        .alert("Delete the certificate for \(state.pendingDelete?.hostname ?? "this hostname")?", isPresented: $state.confirmingDelete, presenting: state.pendingDelete) { certificate in
             Button("Delete", role: .destructive) { Task { await model.deleteCertificate(certificate) }; state.pendingDelete = nil }
             Button("Cancel", role: .cancel) { state.pendingDelete = nil }
-        } message: { certificate in Text("This removes the certificate and private key for \(certificate.hostname).") }
+        } message: { _ in
+            Text("This removes the certificate and its private key.")
+        }
     }
 
     private func certificateRow(_ certificate: CertificateSummary) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "lock.doc").font(.system(size: 13)).foregroundStyle(certificate.isExpired ? Color.orange : Color.secondary).frame(width: 18)
-            Button { state.detailCertificate = certificate } label: {
-                Text(certificate.hostname).font(.system(size: 12, weight: .medium)).foregroundStyle(.primary).lineLimit(1)
-            }.buttonStyle(.plain).help("Certificate details").accessibilityLabel("Details for \(certificate.hostname)")
-            Spacer(minLength: 8)
-            Text(expiration(certificate)).font(.system(size: 11)).foregroundStyle(.secondary)
-            StatusBadge(title: certificate.error != nil ? "Invalid" : certificate.isExpired ? "Expired" : "Valid", color: certificate.error != nil || certificate.isExpired ? .orange : DevStackDesign.success).frame(width: 55)
-            Button("Renew") { Task { await model.issueCertificate(for: certificate.hostname) } }.buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy)
+        HStack(spacing: 12) {
+            ServiceRowTitle(title: certificate.hostname, symbol: "lock.doc", detail: expiration(certificate))
+            Spacer(minLength: 12)
+            StatusLabel(title: status(certificate), color: certificate.error != nil || certificate.isExpired ? .orange : .green)
+            Button("Renew") { Task { await model.issueCertificate(for: certificate.hostname) } }
+                .disabled(model.isBusy)
                 .accessibilityLabel("Renew \(certificate.hostname)")
             Menu {
-                Button("Certificate Details…") { state.detailCertificate = certificate }
-                Button("Export Certificate…") { exportCertificate(certificate) }
+                Button("Details…") { state.detailCertificate = certificate }
+                Button("Export…") { exportCertificate(certificate) }
                 Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([certificate.certificate]) }
                 if !model.managedTLSHostnames.contains(certificate.hostname) {
                     Divider()
                     Button("Delete…", role: .destructive) { state.pendingDelete = certificate; state.confirmingDelete = true }
                 }
-            } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().frame(width: 22).disabled(model.isBusy)
-                .accessibilityLabel("Certificate actions for \(certificate.hostname)")
-        }.padding(.vertical, 6)
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .disabled(model.isBusy)
+            .accessibilityLabel("Actions for \(certificate.hostname)")
+        }
+        .padding(.vertical, 2)
+        .contextMenu {
+            Button("Details…") { state.detailCertificate = certificate }
+            Button("Export…") { exportCertificate(certificate) }
+        }
     }
+
+    private var issueSheet: some View {
+        VStack(spacing: 0) {
+            Text("Issue Certificate").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20).padding(.top, 18)
+            Form {
+                Section {
+                    TextField("Hostname", text: $state.hostname, prompt: Text("project.localhost"))
+                } footer: {
+                    SectionFooter { Text("Signed by the DevStack Local CA, like your sites' certificates.") }
+                }
+            }
+            .formStyle(.grouped)
+            .scrollDisabled(true)
+            HStack {
+                Spacer()
+                Button("Cancel") { state.issuing = false }.keyboardShortcut(.cancelAction)
+                Button("Issue") {
+                    let host = state.hostname
+                    state.issuing = false
+                    Task { await model.issueCertificate(for: host) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(state.hostname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(16)
+        }
+        .frame(width: 460, height: 230)
+    }
+
+    private func detailSheet(_ certificate: CertificateSummary) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(certificate.hostname).font(.headline)
+                Spacer()
+                StatusLabel(title: status(certificate), color: certificate.error != nil || certificate.isExpired ? .orange : .green)
+            }
+            .padding(.horizontal, 20).padding(.top, 18)
+            Form {
+                if let error = certificate.error {
+                    Section { NoticeRow(symbol: "exclamationmark.triangle.fill", title: "Unreadable certificate", message: error) }
+                }
+                Section {
+                    CopyableValueRow(label: "Subject", value: certificate.subject)
+                    CopyableValueRow(label: "Issuer", value: certificate.issuer)
+                    CopyableValueRow(label: "Serial", value: certificate.serial)
+                    CopyableValueRow(label: "SHA-256", value: certificate.fingerprint)
+                    if let date = certificate.validFrom { LabeledContent("Valid from", value: date.formatted(date: .abbreviated, time: .shortened)) }
+                    if let date = certificate.expiresAt { LabeledContent(certificate.isExpired ? "Expired" : "Expires", value: date.formatted(date: .abbreviated, time: .shortened)) }
+                    CopyableValueRow(label: "File", value: certificate.certificate.path)
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                Button("Export…") { exportCertificate(certificate) }
+                Spacer()
+                Button("Done") { state.detailCertificate = nil }.keyboardShortcut(.defaultAction)
+            }
+            .padding(16)
+        }
+        .frame(width: 600, height: 470)
+    }
+
+    private func beginIssuing() {
+        state.hostname = ""
+        state.issuing = true
+    }
+
+    private func status(_ certificate: CertificateSummary) -> String {
+        certificate.error != nil ? "Invalid" : certificate.isExpired ? "Expired" : "Valid"
+    }
+
     private func expiration(_ certificate: CertificateSummary) -> String {
-        guard let date = certificate.expiresAt else { return certificate.error == nil ? "Expiration unknown" : "Unable to read certificate" }
+        guard let date = certificate.expiresAt else { return certificate.error == nil ? "Expiration unknown" : "Unable to read the certificate" }
         return "\(certificate.isExpired ? "Expired" : "Expires") \(date.formatted(date: .abbreviated, time: .omitted))"
     }
-    private func details(_ certificate: CertificateSummary) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            if let error = certificate.error { Text(error).foregroundStyle(.orange).textSelection(.enabled) }
-            CopyValueRow(label: "Subject", value: certificate.subject)
-            CopyValueRow(label: "Issuer", value: certificate.issuer)
-            CopyValueRow(label: "Serial", value: certificate.serial)
-            CopyValueRow(label: "SHA-256", value: certificate.fingerprint)
-            CopyValueRow(label: "File", value: certificate.certificate.path)
-            if let date = certificate.validFrom { CopyValueRow(label: "Valid from", value: date.formatted()) }
-            if let date = certificate.expiresAt { CopyValueRow(label: "Expires", value: date.formatted()) }
-        }.font(.system(size: 12))
-    }
+
     private func exportCertificate(_ certificate: CertificateSummary) {
-        let panel = NSSavePanel(); panel.nameFieldStringValue = certificate.hostname + ".pem"
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = certificate.hostname + ".pem"
         panel.allowedContentTypes = [UTType(filenameExtension: "pem") ?? .data]
         if panel.runModal() == .OK, let target = panel.url {
             do { try AtomicFileWriter.write(Data(contentsOf: certificate.certificate), to: target, permissions: 0o644) }
