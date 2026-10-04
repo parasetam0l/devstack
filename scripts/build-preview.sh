@@ -11,8 +11,10 @@ if [[ "${DEVSTACK_INSTALL_PREVIEW:-0}" == "1" ]] && /usr/bin/pgrep -x DevStack >
     echo "Quit DevStack before replacing the installed app." >&2
     exit 75
 fi
-swift build --jobs "${DEVSTACK_BUILD_JOBS:-2}"
+source "$repository_root/scripts/swift-link-options.sh"
+swift build --jobs "${DEVSTACK_BUILD_JOBS:-2}" "${swift_link_options[@]}"
 products="$(swift build --show-bin-path)"
+check_sdk_version "$products/DevStack"
 mkdir -p "$application/Contents/MacOS" "$application/Contents/Resources" "$application/Contents/Library/LaunchServices" "$application/Contents/Library/LaunchDaemons"
 cp "$repository_root/Packaging/Info.plist" "$application/Contents/Info.plist"
 cp "$products/DevStack" "$application/Contents/MacOS/DevStack"

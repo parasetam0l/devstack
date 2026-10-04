@@ -43,6 +43,12 @@ swift build --show-bin-path           # directory holding the built executables
 `.build/debug` and `.build/release` are symlinks to the SwiftPM product
 directories under `.build/out/Products`.
 
+A plain `swift build` records the deployment target (macOS 15) as the SDK the
+app was built with, so macOS 26 and later draw it without Liquid Glass. The
+build scripts pass the real SDK version to the linker
+(`scripts/swift-link-options.sh`); use them, or pass the same options, to see
+the app as it ships.
+
 Run the checks:
 
 ```sh

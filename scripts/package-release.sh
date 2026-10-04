@@ -47,8 +47,10 @@ detach_layout_image() {
 trap detach_layout_image EXIT
 
 cd "$repository_root"
-swift build -c release --jobs "${DEVSTACK_BUILD_JOBS:-2}"
+source "$repository_root/scripts/swift-link-options.sh"
+swift build -c release --jobs "${DEVSTACK_BUILD_JOBS:-2}" "${swift_link_options[@]}"
 products="$(swift build -c release --show-bin-path)"
+check_sdk_version "$products/DevStack"
 "$products/DevStackCoreChecks"
 mkdir -p "$application/Contents/MacOS" \
     "$application/Contents/Resources" \
