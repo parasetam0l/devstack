@@ -15,6 +15,10 @@ let package = Package(
         .executable(name: "DevStackRuntimeChecks", targets: ["DevStackRuntimeChecks"]),
         .executable(name: "DevStackCoreChecks", targets: ["DevStackCoreChecks"])
     ],
+    dependencies: [
+        // App updates, as in DevStack's sibling apps (SemiVPN, LocalDesktop).
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0")
+    ],
     targets: [
         .target(
             name: "DevStackCore",
@@ -25,7 +29,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "DevStackApp",
-            dependencies: ["DevStackCore"],
+            dependencies: ["DevStackCore", .product(name: "Sparkle", package: "Sparkle")],
             resources: [.process("Resources")],
             linkerSettings: [
                 .linkedFramework("ServiceManagement")

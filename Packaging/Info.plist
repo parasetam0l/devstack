@@ -12,13 +12,19 @@
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.3.3</string>
     <key>CFBundleVersion</key><string>13</string>
-    <!-- The app itself runs on macOS 15. This stays at 27.0 while it bundles
-         runtimes built for macOS 27, and drops to 15.0 once runtimes come
-         from the packs built for macOS 15. -->
-    <key>LSMinimumSystemVersion</key><string>27.0</string>
+    <!-- The app runs on macOS 15. While a release still bundles runtimes,
+         package-release.sh raises this to the newest macOS they require. -->
+    <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
     <key>NSHumanReadableCopyright</key><string>Copyright © 2026 DevStack contributors. MIT licensed.</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSHighResolutionCapable</key><true/>
+    <!-- Updates (Sparkle): the feed is appcast.xml on the latest published
+         release. SUPublicEDKey stays empty until the update signing key exists
+         (docs/RELEASING.md); builds without it don't check for updates. -->
+    <key>SUFeedURL</key><string>https://github.com/parasetam0l/devstack/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key><string></string>
+    <key>SUEnableAutomaticChecks</key><true/>
+    <key>SUScheduledCheckInterval</key><integer>86400</integer>
 </dict>
 </plist>

@@ -418,9 +418,28 @@ struct DoctorView: View {
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @StateObject private var state = SettingsViewState()
+    @ObservedObject private var updater = AppUpdater.shared
     var body: some View {
         WorkspacePage {
-            PageHeading(title: "Settings", subtitle: "Appearance, helper, ports and runtimes.")
+            PageHeading(title: "Settings", subtitle: "Appearance, helper, ports, runtimes and updates.")
+            SurfacePanel {
+                HStack {
+                    Label("Updates", systemImage: "arrow.down.circle").fontWeight(.medium)
+                    Spacer()
+                    Toggle("Check for updates automatically", isOn: Binding(
+                        get: { updater.automaticallyChecksForUpdates },
+                        set: { updater.automaticallyChecksForUpdates = $0 }
+                    )).toggleStyle(.switch).controlSize(.small).disabled(!updater.isAvailable)
+                }
+                HStack {
+                    Text("DevStack \(AppUpdater.currentVersion)").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Check Now", action: updater.checkForUpdates).buttonStyle(.borderless).disabled(!updater.canCheckForUpdates)
+                }
+                if !updater.isAvailable {
+                    Text("Development builds don't check for updates.").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            }
             SurfacePanel {
                 HStack {
                     Label("Appearance", systemImage: "circle.lefthalf.filled").fontWeight(.medium)

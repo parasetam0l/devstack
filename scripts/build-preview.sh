@@ -28,6 +28,7 @@ for id in nginx-1.30 adminer-6.1.1 php-8.4 apache-2.4 php-8.5 mysql-8.4 postgres
         cp -cR "$runtime_root/$id" "$application/Contents/Resources/Runtimes/$id"
     fi
 done
+"$repository_root/scripts/embed-sparkle.sh" "$application" "$products" -
 /usr/bin/codesign --force --entitlements "$repository_root/Packaging/Helper.entitlements" --sign - "$application/Contents/Library/LaunchServices/DevStackPrivilegedHelper"
 /usr/bin/codesign --force --entitlements "$repository_root/Packaging/DevStack.entitlements" --sign - "$application"
 /usr/bin/codesign --verify --deep --strict "$application"

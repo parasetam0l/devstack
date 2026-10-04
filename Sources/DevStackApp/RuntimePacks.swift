@@ -78,6 +78,12 @@ extension AppModel {
         return runtimePackCatalog.packs.map(\.id).filter(ids.contains)
     }
 
+    /// True while a service runs from a runtime inside the app bundle, which an
+    /// app update would replace underneath it.
+    var runsBundledRuntimes: Bool {
+        serviceStates.contains { $0.phase == .running && !configuration.importedRuntimeIDs.contains($0.service.runtimeID) }
+    }
+
     /// Packs the current configuration needs that are neither installed nor bundled.
     var missingRuntimePacks: [RuntimePackPin] {
         (try? runtimePackCatalog.installationOrder(for: runtimePacksInUse))?

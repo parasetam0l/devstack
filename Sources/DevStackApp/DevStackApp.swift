@@ -21,6 +21,10 @@ struct DevStackApp: App {
         .defaultSize(width: 920, height: 620)
         .windowToolbarStyle(.unified)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { AppUpdater.shared.checkForUpdates() }
+                    .disabled(!AppUpdater.shared.isAvailable)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New Site…") { model.requestNewSite() }.keyboardShortcut("n")
             }
@@ -61,6 +65,11 @@ struct DevStackApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
     private var isFinishingTermination = false
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Starts the daily update check (release builds).
+        _ = AppUpdater.shared
+    }
 
     func configureWindow() {
         Task { @MainActor in
@@ -109,6 +118,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isFinishingTermination, let model, model.hasRunningServices else { return .terminateNow }
+
+        if AppUpdater.shared.isRelaunchingForUpdate {
+            // Runtimes installed as packs live outside the app, so their
+            // services keep running and the new version adopts them. Services
+            // running from the app bundle must stop before it is replaced.
+            guard model.runsBundledRuntimes else { return .terminateNow }
+            isFinishingTermination = true
+            Task { @MainActor in
+                await model.stopAll()
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
 
         let alert = NSAlert()
         alert.messageText = "Stop DevStack services before quitting?"
