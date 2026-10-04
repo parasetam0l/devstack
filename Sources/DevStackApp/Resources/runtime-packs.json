@@ -115,6 +115,50 @@
       "version": "3.5.8"
     },
     {
+      "contents": [
+        "redis-php",
+        "imagick-php",
+        "xdebug-php84",
+        "openssl-3.5",
+        "imagemagick-7.1",
+        "postgresql-18"
+      ],
+      "id": "php-8.4",
+      "minimumMacOS": "15.0",
+      "name": "php-8.4-8.4.26-r1",
+      "packRevision": 1,
+      "requires": [
+        "imagemagick-7.1",
+        "openssl-3.5"
+      ],
+      "sha256": "2426ce138b34881b9c906cb1c907fcb4ba7ed273d1e7a0923daca1023c6fbdb5",
+      "size": 40680459,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.4-8.4.26-r1/php-8.4-8.4.26-r1.devstack-runtime",
+      "version": "8.4.26"
+    },
+    {
+      "contents": [
+        "xdebug-php85",
+        "redis-php",
+        "imagick-php",
+        "openssl-3.5",
+        "imagemagick-7.1",
+        "postgresql-18"
+      ],
+      "id": "php-8.5",
+      "minimumMacOS": "15.0",
+      "name": "php-8.5-8.5.11-r1",
+      "packRevision": 1,
+      "requires": [
+        "imagemagick-7.1",
+        "openssl-3.5"
+      ],
+      "sha256": "6d53aa66fb0f1557a63131d34e85b7ff69b9182867fc237e1b2bf52870e77c65",
+      "size": 43401271,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.5-8.5.11-r1/php-8.5-8.5.11-r1.devstack-runtime",
+      "version": "8.5.11"
+    },
+    {
       "contents": [],
       "id": "phpmyadmin-5.2.3",
       "minimumMacOS": "15.0",
