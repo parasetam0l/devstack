@@ -130,6 +130,27 @@
     },
     {
       "contents": [
+        "xdebug-php74",
+        "redis-php",
+        "imagick-php",
+        "openssl-3.5",
+        "imagemagick-7.1"
+      ],
+      "id": "php-7.4",
+      "minimumMacOS": "15.0",
+      "name": "php-7.4-7.4.33-r1",
+      "packRevision": 1,
+      "requires": [
+        "imagemagick-7.1",
+        "openssl-3.5"
+      ],
+      "sha256": "4de6d6b854968fa8e6c2db5219507a18b1cd21a56363fa5de8115631eccafb12",
+      "size": 35410298,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-7.4-7.4.33-r1/php-7.4-7.4.33-r1.devstack-runtime",
+      "version": "7.4.33"
+    },
+    {
+      "contents": [
         "redis-php",
         "imagick-php",
         "xdebug-php84",
