@@ -15,6 +15,7 @@ private enum PackagerError: LocalizedError {
             """
             Usage: DevStackRuntimePackager PAYLOAD RUNTIME_MANIFEST SBOM LICENSES KEY_ID RAW_ED25519_KEY OUTPUT.devstack-runtime
                    DevStackRuntimePackager verify PACK.devstack-runtime TRUSTED_KEYS.json [TEAM_ID]
+                   DevStackRuntimePackager install PACK.devstack-runtime TRUSTED_KEYS.json RUNTIMES_DIRECTORY [TEAM_ID]
                    DevStackRuntimePackager generate-key KEY_ID PRIVATE_KEY_OUTPUT PUBLIC_KEYS_OUTPUT.json
             """
         case .invalidTrustedKeys:
@@ -35,6 +36,17 @@ enum DevStackRuntimePackager {
                 pack: URL(fileURLWithPath: CommandLine.arguments[2]),
                 trustedKeys: URL(fileURLWithPath: CommandLine.arguments[3]),
                 teamID: CommandLine.arguments.count == 5 ? CommandLine.arguments[4] : nil
+            )
+            return
+        }
+        if (5...6).contains(CommandLine.arguments.count), CommandLine.arguments[1] == "install" {
+            // Installs a pack the way the app does, for build hosts that use
+            // published packs as inputs to other runtimes.
+            try verify(
+                pack: URL(fileURLWithPath: CommandLine.arguments[2]),
+                trustedKeys: URL(fileURLWithPath: CommandLine.arguments[3]),
+                teamID: CommandLine.arguments.count == 6 ? CommandLine.arguments[5] : nil,
+                into: URL(fileURLWithPath: CommandLine.arguments[4], isDirectory: true)
             )
             return
         }
@@ -152,18 +164,18 @@ enum DevStackRuntimePackager {
         return links.sorted { $0.path < $1.path }
     }
 
-    private static func verify(pack: URL, trustedKeys: URL, teamID: String?) throws {
+    private static func verify(pack: URL, trustedKeys: URL, teamID: String?, into installation: URL? = nil) throws {
         struct TrustedKeys: Decodable { var keys: [String: String] }
         let document = try JSONDecoder().decode(TrustedKeys.self, from: Data(contentsOf: trustedKeys))
         let keys = try document.keys.mapValues { encoded -> Data in
             guard let data = Data(base64Encoded: encoded), data.count == 32 else { throw PackagerError.invalidTrustedKeys }
             return data
         }
-        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("devstack-verify-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: destination) }
+        let destination = installation ?? FileManager.default.temporaryDirectory.appendingPathComponent("devstack-verify-\(UUID().uuidString)", isDirectory: true)
+        defer { if installation == nil { try? FileManager.default.removeItem(at: destination) } }
         let verifier = RuntimePackVerifier(trustedPublicKeys: keys, requiredTeamID: teamID)
         let runtime = try RuntimePackImporter(verifier: verifier).importArchive(pack, into: destination)
-        print("Verified \(runtime.id) \(runtime.version) for macOS \(runtime.minimumMacOS)+\(teamID.map { ", Team \($0)" } ?? "")")
+        print("\(installation == nil ? "Verified" : "Installed") \(runtime.id) \(runtime.version) for macOS \(runtime.minimumMacOS)+\(teamID.map { ", Team \($0)" } ?? "")")
     }
 
     private static func isMachO(_ file: URL) throws -> Bool {
