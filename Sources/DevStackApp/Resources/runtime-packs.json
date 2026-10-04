@@ -28,6 +28,18 @@
     },
     {
       "contents": [],
+      "id": "openssl-3.5",
+      "minimumMacOS": "15.0",
+      "name": "openssl-3.5-3.5.8-r1",
+      "packRevision": 1,
+      "requires": [],
+      "sha256": "fc56c73ca90ed2eda21f9a92d4ba6237f57a2fca275ede5898a60da1a3cf6ee4",
+      "size": 7495685,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/openssl-3.5-3.5.8-r1/openssl-3.5-3.5.8-r1.devstack-runtime",
+      "version": "3.5.8"
+    },
+    {
+      "contents": [],
       "id": "phpmyadmin-5.2.3",
       "minimumMacOS": "15.0",
       "name": "phpmyadmin-5.2.3-r1",
