@@ -1,6 +1,20 @@
 {
   "packs": [
     {
+      "contents": [],
+      "id": "adminer-6.1.1",
+      "minimumMacOS": "15.0",
+      "name": "adminer-6.1.1-r1",
+      "packRevision": 1,
+      "requires": [
+        "php-8.5"
+      ],
+      "sha256": "605ca6a2e283df52599889c01683c4b6d3dd8a60c09e10e31db345509bf8acce",
+      "size": 174080,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/adminer-6.1.1-r1/adminer-6.1.1-r1.devstack-runtime",
+      "version": "6.1.1"
+    },
+    {
       "contents": [
         "openssl-3.5"
       ],
