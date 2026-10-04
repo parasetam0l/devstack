@@ -54,6 +54,7 @@ enum NavigationSection: String, CaseIterable, Identifiable {
     case ssl = "SSL"
     case mailpit = "Mail Inbox"
     case localDNS = "Local DNS"
+    case runtimes = "Runtimes"
     case logs = "Logs"
     case doctor = "Doctor"
     case settings = "Settings"
@@ -69,6 +70,7 @@ enum NavigationSection: String, CaseIterable, Identifiable {
         case .ssl: "lock.shield"
         case .mailpit: "envelope"
         case .localDNS: "wifi.router"
+        case .runtimes: "shippingbox"
         case .logs: "doc.text.magnifyingglass"
         case .doctor: "stethoscope"
         case .settings: "gearshape"
@@ -108,6 +110,9 @@ final class AppModel: ObservableObject {
     @Published var lastDatabaseBackup: URL?
     @Published var isPresentingNewSite = false
     @Published var isPresentingSetupWizard = false
+    @Published var runtimePackProgress: RuntimePackProgress?
+    /// The exact runtime packs this version installs (Resources/runtime-packs.json).
+    let runtimePackCatalog = AppModel.loadRuntimePackCatalog()
     @Published var appearance = AppAppearance(rawValue: UserDefaults.standard.string(forKey: "DevStackAppearance") ?? "") ?? .system {
         didSet { if !isReviewMode { UserDefaults.standard.set(appearance.rawValue, forKey: "DevStackAppearance") } }
     }
@@ -1119,6 +1124,16 @@ final class AppModel: ObservableObject {
         }.value
     }
 
+    func saveConfiguration() async throws {
+        try await store.save(configuration)
+    }
+
+    /// Re-reads runtime manifests after packs were installed or removed.
+    func refreshRuntimeInventory() async {
+        if let manifests = try? loadRuntimeLock() { runtimeManifests = manifests }
+        objectWillChange.send()
+    }
+
     private func persistConfiguration() async {
         do { try await store.save(configuration) } catch { errorMessage = error.localizedDescription }
     }
@@ -1208,7 +1223,7 @@ final class AppModel: ObservableObject {
         required.append(contentsOf: requiredPHPRuntimes)
         let missing = required.filter { !runtimeIsAvailable($0) }
         guard missing.isEmpty else {
-            throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "Runtime payloads are not installed: \(missing.joined(separator: ", ")). Build or import signed runtime packs first."])
+            throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "Runtimes are not installed: \(missing.joined(separator: ", ")). Install them on the Runtimes page."])
         }
     }
 
@@ -1604,7 +1619,7 @@ final class AppModel: ObservableObject {
         return manifests
     }
 
-    private func loadTrustedRuntimeKeys() throws -> [String: Data] {
+    func loadTrustedRuntimeKeys() throws -> [String: Data] {
         guard let url = DevStackResources.bundle.url(forResource: "trusted-runtime-keys", withExtension: "json") else {
             throw CocoaError(.fileNoSuchFile)
         }

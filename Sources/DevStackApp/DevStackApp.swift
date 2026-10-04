@@ -28,9 +28,14 @@ struct DevStackApp: App {
                 Button("Settings…") { model.selectedSection = .settings }.keyboardShortcut(",")
             }
             CommandMenu("Workspace") {
+                // ⌘1–⌘9 and ⌘0 for the first ten pages; Settings keeps ⌘,.
                 ForEach(Array(NavigationSection.allCases.enumerated()), id: \.element.id) { index, section in
-                    Button(section.rawValue) { model.selectedSection = section }
-                        .keyboardShortcut(KeyEquivalent(Character(index < 9 ? String(index + 1) : "0")))
+                    if index < 10 {
+                        Button(section.rawValue) { model.selectedSection = section }
+                            .keyboardShortcut(KeyEquivalent(Character(index < 9 ? String(index + 1) : "0")))
+                    } else {
+                        Button(section.rawValue) { model.selectedSection = section }
+                    }
                 }
                 Divider()
                 #if DEBUG

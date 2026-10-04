@@ -15,12 +15,15 @@ struct SetupWizardView: View {
     @State private var portError: String?
     @State private var certificateError: String?
     @State private var startingStack = false
+    @State private var optionalRuntimes: Set<String> = []
+    @State private var runtimeError: String?
 
     enum Step: Int, CaseIterable {
-        case welcome, helper, certificate, ports, done
+        case welcome, runtimes, helper, certificate, ports, done
         var title: String {
             switch self {
             case .welcome: "Welcome"
+            case .runtimes: "Runtimes"
             case .helper: "Helper"
             case .certificate: "Certificate"
             case .ports: "Ports"
@@ -36,6 +39,7 @@ struct SetupWizardView: View {
             Group {
                 switch step {
                 case .welcome: welcomeStep
+                case .runtimes: runtimesStep
                 case .helper: helperStep
                 case .certificate: certificateStep
                 case .ports: portsStep
@@ -90,6 +94,11 @@ struct SetupWizardView: View {
                     .buttonStyle(DevStackGlassButtonStyle())
                     .disabled(model.isBusy || startingStack)
             }
+            if step == .runtimes, runtimeDownloadSize > 0 {
+                Button("Skip for Now") { step = .helper }
+                    .buttonStyle(DevStackGlassButtonStyle())
+                    .disabled(model.isBusy)
+            }
             if step == .helper, !model.helperInstalled, !helperIsImpossible {
                 Button("Continue Without Helper") {
                     model.cancelHelperSetup()
@@ -114,6 +123,8 @@ struct SetupWizardView: View {
     private var primaryTitle: String {
         switch step {
         case .welcome: "Get Started"
+        case .runtimes:
+            runtimeDownloadSize > 0 ? "Install (\(ByteCountFormatter.string(fromByteCount: runtimeDownloadSize, countStyle: .file)))" : "Continue"
         case .helper:
             if model.helperInstalled || helperIsImpossible { "Continue" } else { "Set Up Helper" }
         case .certificate: model.localCATrusted ? "Continue" : "Install Certificate"
@@ -134,6 +145,10 @@ struct SetupWizardView: View {
 
     private var welcomeStep: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if !model.runtimePackCatalog.packs.isEmpty {
+                bullet("shippingbox", "Download the runtimes",
+                       "Apache, PHP, MySQL and the other servers you choose, each checked against the signature and hash this version of DevStack expects.")
+            }
             bullet("lock.shield", "Install the privileged helper",
                    "Needed for ports 80/443, /etc/hosts entries and the local DNS responder. macOS asks you to approve it once in Login Items & Extensions — it no longer accepts an administrator password for background helpers.")
             bullet("checkmark.seal", "Create and trust the DevStack certificate authority",
@@ -142,6 +157,65 @@ struct SetupWizardView: View {
                    "Use 80 and 443 so site URLs have no port number, or keep 8080/8443 to run without the helper.")
             Text("Everything runs on this Mac. The helper only listens on loopback and your local network.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+    }
+
+    /// Optional runtimes offered on top of the ones the stack always uses.
+    private var optionalRuntimeIDs: [String] {
+        ["nginx-1.30", "php-8.4", "postgresql-18", "php-7.4", "mysql-5.7"]
+            .filter { model.runtimePackCatalog.pin(for: $0) != nil && !model.runtimePacksInUse.contains($0) }
+    }
+
+    private var runtimeDownloadSize: Int64 {
+        model.runtimePackDownloadSize(model.runtimePacksInUse + optionalRuntimes.sorted())
+    }
+
+    private var runtimesStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if model.runtimePackCatalog.packs.isEmpty {
+                statusRow(title: "Runtimes are included", detail: "This copy of DevStack bundles its runtimes; there is nothing to download.", ok: true)
+            } else {
+                statusRow(
+                    title: runtimeDownloadSize == 0 ? "Runtimes are ready" : "Download the runtimes",
+                    detail: "Each runtime is checked against the signature and hash this version of DevStack expects before it installs. You can add or remove runtimes later on the Runtimes page.",
+                    ok: runtimeDownloadSize == 0
+                )
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Always installed").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    Text(model.runtimePacksInUse.compactMap { model.runtimePackCatalog.pin(for: $0)?.displayName }.joined(separator: ", "))
+                        .font(.system(size: 11)).fixedSize(horizontal: false, vertical: true)
+                }
+                if !optionalRuntimeIDs.isEmpty {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Optional").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                        ForEach(optionalRuntimeIDs, id: \.self) { id in
+                            if let pin = model.runtimePackCatalog.pin(for: id) {
+                                let installed = model.runtimePackStatus(pin) != .notInstalled
+                                Toggle(isOn: Binding(
+                                    get: { installed || optionalRuntimes.contains(id) },
+                                    set: { selected in if selected { optionalRuntimes.insert(id) } else { optionalRuntimes.remove(id) } }
+                                )) {
+                                    HStack(spacing: 6) {
+                                        Text(pin.displayName).font(.system(size: 12))
+                                        if pin.isLegacy { StatusBadge(title: "LEGACY", color: .orange) }
+                                        Text(installed ? "installed" : ByteCountFormatter.string(fromByteCount: pin.size, countStyle: .file))
+                                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                                    }
+                                }
+                                .toggleStyle(.checkbox)
+                                .disabled(installed || model.isBusy)
+                            }
+                        }
+                    }
+                }
+                if let progress = model.runtimePackProgress {
+                    RuntimePackProgressPanel(progress: progress)
+                }
+                if let runtimeError {
+                    Label(runtimeError, systemImage: "exclamationmark.circle")
+                        .font(.system(size: 11)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 
@@ -319,7 +393,14 @@ struct SetupWizardView: View {
     private func primaryAction() async {
         switch step {
         case .welcome:
-            step = .helper
+            step = .runtimes
+        case .runtimes:
+            if runtimeDownloadSize > 0 {
+                runtimeError = await model.installRuntimePacks(model.runtimePacksInUse + optionalRuntimes.sorted())
+                if runtimeError == nil { step = .helper }
+            } else {
+                step = .helper
+            }
         case .helper:
             if model.helperInstalled || helperIsImpossible {
                 step = .certificate

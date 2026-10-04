@@ -122,6 +122,7 @@ struct RootView: View {
         case .ssl: SSLView()
         case .mailpit: MailpitView()
         case .localDNS: LocalDNSView()
+        case .runtimes: RuntimesView()
         case .logs: LogsView()
         case .doctor: DoctorView()
         case .settings: SettingsView()

@@ -463,12 +463,9 @@ struct SettingsView: View {
                 }
                 Divider()
                 HStack {
-                    Label("Runtime packs", systemImage: "shippingbox").fontWeight(.medium)
+                    Label("Runtimes", systemImage: "shippingbox").fontWeight(.medium)
                     Spacer()
-                    Button("Import Pack…", action: chooseRuntimePack).buttonStyle(DevStackGlassButtonStyle()).disabled(model.isBusy)
-                }
-                if !model.configuration.importedRuntimeIDs.isEmpty {
-                    Text("Imported: \(model.configuration.importedRuntimeIDs.joined(separator: ", "))").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Button("Manage Runtimes…") { model.selectedSection = .runtimes }.buttonStyle(.borderless)
                 }
                 DisclosureGroup("Installed runtimes and provenance") {
                     VStack(alignment: .leading, spacing: 8) {
@@ -477,7 +474,7 @@ struct SettingsView: View {
                 }.font(.system(size: 11))
                 Divider()
                 CopyValueRow(label: "App data", value: model.paths.applicationSupport.path)
-                CopyValueRow(label: "Runtimes", value: model.paths.builtInRuntimes.path)
+                CopyValueRow(label: "Runtimes", value: model.paths.importedRuntimes.path)
                 CopyValueRow(label: "Logs", value: model.paths.logs.path)
                 HStack {
                     Button("Show App Data", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([model.paths.applicationSupport]) }.buttonStyle(.borderless)
@@ -500,10 +497,6 @@ struct SettingsView: View {
             Button("Remove", role: .destructive) { Task { await model.removeHelper() } }
             Button("Cancel", role: .cancel) {}
         } message: { Text("DevStack will remove its local domain mappings, port forwarding, and certificate trust, then unregister the helper. Your projects and databases stay in place.") }
-    }
-    private func chooseRuntimePack() {
-        let panel = NSOpenPanel(); panel.allowedContentTypes = [.data]; panel.allowsMultipleSelection = false; panel.canChooseDirectories = false; panel.message = "Choose a signed .devstack-runtime archive."
-        if panel.runModal() == .OK, let url = panel.url { Task { await model.importRuntimePack(from: url) } }
     }
 }
 @MainActor private final class SettingsViewState: ObservableObject { @Published var confirmRemove = false }

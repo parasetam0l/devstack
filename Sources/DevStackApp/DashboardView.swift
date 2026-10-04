@@ -10,6 +10,13 @@ struct DashboardView: View {
                 PageHeading(title: "Dashboard", subtitle: "Services, sites and tools at a glance.")
                 Spacer()
             }
+            if !model.missingRuntimePacks.isEmpty {
+                HStack(alignment: .center) {
+                    InfoNotice(symbol: "shippingbox", title: "Runtimes to install",
+                               message: "The stack needs \(model.missingRuntimePacks.map(\.displayName).joined(separator: ", ")) before it can start.", color: .orange)
+                    Button("Install…") { model.selectedSection = .runtimes }.buttonStyle(DevStackGlassButtonStyle())
+                }
+            }
 
             SurfacePanel(title: "Services") {
                 VStack(spacing: 0) {
