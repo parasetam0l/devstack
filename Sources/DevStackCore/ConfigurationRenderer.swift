@@ -175,6 +175,11 @@ public struct ConfigurationRenderer: Sendable {
             let directive = name == "xdebug" ? "zend_extension" : "extension"
             return "\(directive)=\(quote(extensionDirectory.appendingPathComponent("\(name).so").path))"
         }
+        // PHP 8.5 builds OPcache in; PHP 7.4 and 8.4 install it as a shared
+        // Zend extension that must be loaded, ahead of Xdebug.
+        if let opcache = sharedOPcache(in: extensionDirectory) {
+            settings.insert("zend_extension=\(quote(opcache.path))", at: 0)
+        }
         if enabledExtensions.contains("xdebug") {
             settings.append(contentsOf: [
                 "xdebug.mode=debug",
@@ -602,6 +607,15 @@ public struct ConfigurationRenderer: Sendable {
                 try requireSafe(value)
                 return "env[\(key)] = \(quote(value))"
             }.joined(separator: "\n")
+    }
+
+    /// `make install` puts a shared OPcache under the extension API's
+    /// folder, for example lib/php/extensions/no-debug-non-zts-20240924.
+    private func sharedOPcache(in extensionDirectory: URL) -> URL? {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: extensionDirectory.path)) ?? []
+        return names.filter { $0.hasPrefix("no-debug-non-zts-") }.sorted()
+            .map { extensionDirectory.appendingPathComponent($0).appendingPathComponent("opcache.so") }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     private func quote(_ value: String) -> String {
