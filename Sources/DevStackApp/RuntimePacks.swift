@@ -29,6 +29,41 @@ extension RuntimePackPin {
     ]
     var displayName: String { Self.names[id] ?? id }
     var isLegacy: Bool { id == "php-7.4" || id == "mysql-5.7" }
+
+    /// Where the Runtimes page lists the pack. IDs carry versions, so the
+    /// prefix decides ("phpmyadmin-" is not "php-").
+    var group: RuntimePackGroup {
+        let prefixes: [(String, RuntimePackGroup)] = [
+            ("apache-", .webServers), ("nginx-", .webServers), ("php-", .php),
+            ("mysql-", .databases), ("postgresql-", .databases),
+            ("phpmyadmin-", .databaseTools), ("adminer-", .databaseTools),
+            ("mailpit-", .tools), ("composer-", .tools)
+        ]
+        return prefixes.first { id.hasPrefix($0.0) }?.1 ?? .libraries
+    }
+}
+
+enum RuntimePackGroup: String, CaseIterable, Identifiable {
+    case webServers = "Web Servers"
+    case php = "PHP"
+    case databases = "Databases"
+    case databaseTools = "Database Tools"
+    case tools = "Tools"
+    case libraries = "Libraries"
+    var id: String { rawValue }
+}
+
+extension RuntimePackCatalog {
+    /// The packs of a group: by family, newest version first, legacy last.
+    func packs(in group: RuntimePackGroup) -> [RuntimePackPin] {
+        packs.filter { $0.group == group }.sorted { first, second in
+            if first.isLegacy != second.isLegacy { return !first.isLegacy }
+            let firstFamily = first.displayName.split(separator: " ").first ?? ""
+            let secondFamily = second.displayName.split(separator: " ").first ?? ""
+            if firstFamily != secondFamily { return firstFamily < secondFamily }
+            return first.version.compare(second.version, options: .numeric) == .orderedDescending
+        }
+    }
 }
 
 extension AppModel {
@@ -200,13 +235,18 @@ struct RuntimesView: View {
                 InfoNotice(symbol: "shippingbox", title: "This build bundles its runtimes",
                            message: "Runtimes come with this copy of DevStack. Later versions download them here instead.")
             } else {
-                SurfacePanel {
-                    VStack(spacing: 0) {
-                        ForEach(model.runtimePackCatalog.packs) { pin in
-                            RuntimePackRow(pin: pin, status: model.runtimePackStatus(pin), inUse: model.runtimePacksInUse.contains(pin.id),
-                                           install: { Task { message = await model.installRuntimePacks([pin.id]) } },
-                                           remove: { confirmingRemoval = pin })
-                            if pin.id != model.runtimePackCatalog.packs.last?.id { Divider() }
+                ForEach(RuntimePackGroup.allCases) { group in
+                    let packs = model.runtimePackCatalog.packs(in: group)
+                    if !packs.isEmpty {
+                        SurfacePanel(title: group.rawValue) {
+                            VStack(spacing: 0) {
+                                ForEach(packs) { pin in
+                                    RuntimePackRow(pin: pin, status: model.runtimePackStatus(pin), inUse: model.runtimePacksInUse.contains(pin.id),
+                                                   install: { Task { message = await model.installRuntimePacks([pin.id]) } },
+                                                   remove: { confirmingRemoval = pin })
+                                    if pin.id != packs.last?.id { Divider() }
+                                }
+                            }
                         }
                     }
                 }
