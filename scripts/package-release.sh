@@ -17,9 +17,26 @@ fi
 staging_root="$release_root/staging/$build_stamp"
 application="$staging_root/DevStack.app"
 
+# Releases bundle runtimes only until DevStack pins runtime packs. From then
+# on the app downloads them, and the image holds the app alone.
+pinned_packs="$(/usr/bin/python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))["packs"]))' "$repository_root/Sources/DevStackApp/Resources/runtime-packs.json")"
+bundle_runtimes=1
+[[ "$pinned_packs" == 0 ]] || bundle_runtimes=0
+
+# Notarization uses a notarytool keychain profile on a Mac, or an Apple ID
+# with an app-specific password (as in CI).
+notary_credentials=()
+if [[ -n "${DEVSTACK_NOTARY_PROFILE:-}" ]]; then
+    notary_credentials=(--keychain-profile "$DEVSTACK_NOTARY_PROFILE")
+elif [[ -n "${NOTARY_APPLE_ID:-}" ]]; then
+    team_id="${TEAM_ID:-$(printf '%s' "$identity" | /usr/bin/sed -n 's/.*(\([A-Z0-9]\{10\}\))$/\1/p')}"
+    [[ -n "$team_id" && -n "${NOTARY_PASSWORD:-}" ]] || { echo "Notarizing with an Apple ID needs NOTARY_PASSWORD and a Team ID." >&2; exit 64; }
+    notary_credentials=(--apple-id "$NOTARY_APPLE_ID" --password "$NOTARY_PASSWORD" --team-id "$team_id")
+fi
+
 [[ "$(uname -m)" == "arm64" ]] || { echo "Release packaging requires Apple Silicon." >&2; exit 69; }
-[[ -d "$runtime_root" ]] || { echo "Runtime payload is missing: $runtime_root" >&2; exit 66; }
-if [[ "$identity" == "-" && -n "${DEVSTACK_NOTARY_PROFILE:-}" ]]; then
+[[ "$bundle_runtimes" == 0 || -d "$runtime_root" ]] || { echo "Runtime payload is missing: $runtime_root" >&2; exit 66; }
+if [[ "$identity" == "-" && ${#notary_credentials[@]} -gt 0 ]]; then
     echo "Notarization needs a Developer ID identity; set DEVSTACK_SIGNING_IDENTITY." >&2
     exit 64
 fi
@@ -32,9 +49,10 @@ detach_layout_image() {
 }
 trap detach_layout_image EXIT
 
-runtime_ids=(apache-2.4 nginx-1.30 php-8.4 php-8.5 mysql-8.4 postgresql-18 openssl-3.5 mailpit-1.31.1 phpmyadmin-5.2.3 adminer-6.1.1 composer-2.10.3 imagemagick-7.1)
+runtime_ids=()
+[[ "$bundle_runtimes" == 0 ]] || runtime_ids=(apache-2.4 nginx-1.30 php-8.4 php-8.5 mysql-8.4 postgresql-18 openssl-3.5 mailpit-1.31.1 phpmyadmin-5.2.3 adminer-6.1.1 composer-2.10.3 imagemagick-7.1)
 # Optional legacy payloads enter the release only after their feasibility gates pass.
-if [[ "${DEVSTACK_INCLUDE_LEGACY:-0}" == "1" ]]; then
+if [[ "$bundle_runtimes" == 1 && "${DEVSTACK_INCLUDE_LEGACY:-0}" == "1" ]]; then
     for runtime_id in php-7.4 mysql-5.7; do
         gate=php74
         [[ "$runtime_id" != "mysql-5.7" ]] || gate=mysql57
@@ -50,7 +68,7 @@ swift build -c release --jobs "${DEVSTACK_BUILD_JOBS:-2}"
 products="$(swift build -c release --show-bin-path)"
 "$products/DevStackCoreChecks"
 mkdir -p "$application/Contents/MacOS" \
-    "$application/Contents/Resources/Runtimes" \
+    "$application/Contents/Resources" \
     "$application/Contents/Library/LaunchServices" \
     "$application/Contents/Library/LaunchDaemons"
 
@@ -60,14 +78,24 @@ cp "$products/DevStack" "$application/Contents/MacOS/DevStack"
 cp "$products/DevStackPrivilegedHelper" "$application/Contents/Library/LaunchServices/DevStackPrivilegedHelper"
 cp "$repository_root/Sources/DevStackApp/Resources/app.devstack.desktop.helper.plist" "$application/Contents/Library/LaunchDaemons/app.devstack.desktop.helper.plist"
 cp "$repository_root/Sources/DevStackApp/Resources/runtime-lock.json" "$application/Contents/Resources/runtime-lock.json"
+for resource_bundle in "$products"/*.bundle; do
+    [[ -d "$resource_bundle" ]] && cp -R "$resource_bundle" "$application/Contents/Resources/"
+done
+cp "$repository_root/LICENSE" "$application/Contents/Resources/LICENSE"
+
+signing_options=(--options runtime --timestamp)
+if [[ "$identity" == "-" ]]; then
+    signing_options=(--timestamp=none)
+    echo "No Developer ID identity configured: producing an ad-hoc development build." >&2
+fi
+
+if [[ "$bundle_runtimes" == 1 ]]; then
+mkdir -p "$application/Contents/Resources/Runtimes"
 for runtime_id in "${runtime_ids[@]}"; do
     [[ -d "$runtime_root/$runtime_id" ]] || { echo "Missing runtime: $runtime_id" >&2; exit 66; }
     cp -cR "$runtime_root/$runtime_id" "$application/Contents/Resources/Runtimes/$runtime_id"
 done
 "$repository_root/scripts/audit-runtime.sh" "$application/Contents/Resources/Runtimes" "$repository_root/.build/runtime-work"
-for resource_bundle in "$products"/*.bundle; do
-    [[ -d "$resource_bundle" ]] && cp -R "$resource_bundle" "$application/Contents/Resources/"
-done
 
 # Every shipped component needs its notices, and the copyleft ones (MySQL,
 # phpMyAdmin, gettext and others) need their exact sources. Developer ID
@@ -83,13 +111,7 @@ if [[ -d "$repository_root/ThirdPartyNotices" ]]; then cp -R "$repository_root/T
 /usr/bin/python3 "$repository_root/scripts/collect-licenses.py" sources "$application/Contents/Resources/CorrespondingSources" "${runtime_ids[@]}"
 mkdir -p "$application/Contents/Resources/CorrespondingSources/DevStackPatches"
 cp "$repository_root/scripts/prepare-imagemagick.py" "$repository_root/scripts/configure-phpmyadmin.py" "$application/Contents/Resources/CorrespondingSources/DevStackPatches/"
-cp "$repository_root/LICENSE" "$application/Contents/Resources/LICENSE"
 
-signing_options=(--options runtime --timestamp)
-if [[ "$identity" == "-" ]]; then
-    signing_options=(--timestamp=none)
-    echo "No Developer ID identity configured: producing an ad-hoc development build." >&2
-fi
 # Listed into a file first: a failing lister inside process substitution would
 # go unnoticed by set -e and leave the payload unsigned.
 mach_o_list="$staging_root/mach-o-files"
@@ -99,9 +121,26 @@ while IFS= read -r -d '' binary; do
         /usr/bin/codesign --force "${signing_options[@]}" --sign "$identity" "$binary"
     fi
 done < "$mach_o_list"
+# The app can run no older macOS than the newest any bundled runtime needs.
+minimum_macos="$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$application/Contents/Info.plist")"
+while IFS= read -r -d '' binary; do
+    minos="$(/usr/bin/vtool -show-build "$binary" 2>/dev/null | /usr/bin/awk '$1 == "minos" {print $2; exit}')"
+    [[ -n "$minos" ]] || continue
+    minimum_macos="$(printf '%s\n%s\n' "$minimum_macos" "$minos" | /usr/bin/sort -V | /usr/bin/tail -n 1)"
+done < "$mach_o_list"
+/usr/bin/plutil -replace LSMinimumSystemVersion -string "$minimum_macos" "$application/Contents/Info.plist"
+echo "Bundled runtimes require macOS $minimum_macos." >&2
 rm -f "$mach_o_list"
 # Signing rewrites every Mach-O, so the SBOM hashes the signed payload.
 "$repository_root/scripts/generate-sbom.py" "$application/Contents/Resources/Runtimes" "$application/Contents/Resources/SBOM/runtime-sbom.cdx.json"
+fi
+
+"$repository_root/scripts/embed-sparkle.sh" "$application" "$products" "$identity"
+if [[ "$identity" != "-" ]]; then
+    update_key="$(/usr/bin/plutil -extract SUPublicEDKey raw "$application/Contents/Info.plist" 2>/dev/null || true)"
+    [[ "$(printf '%s' "$update_key" | /usr/bin/base64 --decode 2>/dev/null | /usr/bin/wc -c | /usr/bin/tr -d ' ')" == 32 ]] \
+        || echo "warning: SUPublicEDKey is not set, so this build will not check for updates (docs/RELEASING.md)." >&2
+fi
 
 /usr/bin/codesign --force "${signing_options[@]}" --entitlements "$repository_root/Packaging/Helper.entitlements" --sign "$identity" "$application/Contents/Library/LaunchServices/DevStackPrivilegedHelper"
 /usr/bin/codesign --force "${signing_options[@]}" --entitlements "$repository_root/Packaging/DevStack.entitlements" --sign "$identity" "$application"
@@ -132,7 +171,7 @@ fi
 # losing the work.
 notarize() {
     local artifact="$1" submit_output submission_id submission_status=""
-    if submit_output="$(xcrun notarytool submit "$artifact" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" --wait 2>&1)"; then
+    if submit_output="$(xcrun notarytool submit "$artifact" "${notary_credentials[@]}" --wait 2>&1)"; then
         printf '%s\n' "$submit_output"
         submission_status="$(printf '%s\n' "$submit_output" | /usr/bin/sed -n 's/^[[:space:]]*status: //p' | /usr/bin/tail -n 1)"
     else
@@ -145,13 +184,13 @@ notarize() {
         case "$submission_status" in
             Accepted) return 0 ;;
             Invalid|Rejected)
-                xcrun notarytool log "$submission_id" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" >&2 || true
+                xcrun notarytool log "$submission_id" "${notary_credentials[@]}" >&2 || true
                 echo "Notarization rejected: $submission_id" >&2
                 exit 71
                 ;;
         esac
         sleep 15
-        submission_status="$(xcrun notarytool info "$submission_id" --keychain-profile "$DEVSTACK_NOTARY_PROFILE" 2>/dev/null | /usr/bin/awk '/status:/ {print $2}' | /usr/bin/head -n 1)"
+        submission_status="$(xcrun notarytool info "$submission_id" "${notary_credentials[@]}" 2>/dev/null | /usr/bin/awk '/status:/ {print $2}' | /usr/bin/head -n 1)"
     done
     echo "Notarization did not finish: $submission_id" >&2
     exit 71
@@ -159,7 +198,7 @@ notarize() {
 
 # Notarize and staple the app before it goes into the image, so the copy users
 # drag to Applications carries its own ticket and passes Gatekeeper offline.
-if [[ -n "${DEVSTACK_NOTARY_PROFILE:-}" ]]; then
+if [[ ${#notary_credentials[@]} -gt 0 ]]; then
     app_archive="$staging_root/DevStack-notarization.zip"
     /usr/bin/ditto -c -k --keepParent "$application" "$app_archive"
     notarize "$app_archive"
@@ -193,12 +232,12 @@ layout_mount=""
 rm -rf "$dmg_root" "$rw_dmg" "$mount_point"
 /usr/bin/codesign --force "${signing_options[@]}" --sign "$identity" "$dmg"
 
-if [[ -n "${DEVSTACK_NOTARY_PROFILE:-}" ]]; then
+if [[ ${#notary_credentials[@]} -gt 0 ]]; then
     notarize "$dmg"
     xcrun stapler staple "$dmg"
     /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 else
-    echo "DEVSTACK_NOTARY_PROFILE is unset; DMG was signed but not notarized or stapled." >&2
+    echo "No notarization credentials (DEVSTACK_NOTARY_PROFILE or NOTARY_APPLE_ID); the DMG was signed but not notarized or stapled." >&2
 fi
 
 mkdir -p "$release_root/previous/$build_stamp"
