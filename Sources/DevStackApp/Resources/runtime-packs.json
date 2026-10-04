@@ -1,6 +1,22 @@
 {
   "packs": [
     {
+      "contents": [
+        "openssl-3.5"
+      ],
+      "id": "apache-2.4",
+      "minimumMacOS": "15.0",
+      "name": "apache-2.4-2.4.68-r1",
+      "packRevision": 1,
+      "requires": [
+        "openssl-3.5"
+      ],
+      "sha256": "faf3f41231c6871d6002f2fc564bc156b9c98e2763f39d1d861654a5020c1844",
+      "size": 13778962,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/apache-2.4-2.4.68-r1/apache-2.4-2.4.68-r1.devstack-runtime",
+      "version": "2.4.68"
+    },
+    {
       "contents": [],
       "id": "composer-2.10.3",
       "minimumMacOS": "15.0",
