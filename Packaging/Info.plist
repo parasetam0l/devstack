@@ -20,10 +20,10 @@
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSHighResolutionCapable</key><true/>
     <!-- Updates (Sparkle): the feed is appcast.xml on the latest published
-         release. SUPublicEDKey stays empty until the update signing key exists
-         (docs/RELEASING.md); builds without it don't check for updates. -->
+         release. An update installs only if it is signed with the private
+         half of SUPublicEDKey (docs/RELEASING.md). -->
     <key>SUFeedURL</key><string>https://github.com/parasetam0l/devstack/releases/latest/download/appcast.xml</string>
-    <key>SUPublicEDKey</key><string></string>
+    <key>SUPublicEDKey</key><string>lO62GBsqaJOhK38EWuoA6WvrrKMFdgil+jI1PSEzxF8=</string>
     <key>SUEnableAutomaticChecks</key><true/>
     <key>SUScheduledCheckInterval</key><integer>86400</integer>
 </dict>
