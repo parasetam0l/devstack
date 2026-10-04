@@ -110,6 +110,9 @@ struct RuntimeChecks {
 
         try AtomicFileWriter.write(try renderer.phpMyAdminConfiguration(cookieSecret: "0123456789abcdefghijklmnopqrstuv"),
             to: paths.phpMyAdmin.appendingPathComponent("config.inc.php"), permissions: 0o600)
+        // Adminer is served from the generated sign-in wrapper, as in the app.
+        try AtomicFileWriter.write(renderer.adminerWrapperPHP(adminerIndex: root.appendingPathComponent("adminer-6.1.1/index.php")),
+            to: paths.generatedAdminer.appendingPathComponent("index.php"), permissions: 0o644)
         try await supervisor.start(ServiceSpecification(kind: .mailpit, executable: root.appendingPathComponent("mailpit-1.31.1/mailpit"), arguments: renderer.mailpitArguments(), logFile: paths.logs.appendingPathComponent("mailpit.log"), readinessProbe: .tcpLoopback(port: 8025)))
         for site in sites {
             let id = site.phpRuntimeID
