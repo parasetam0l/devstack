@@ -558,6 +558,51 @@ enum DevStackCoreChecks {
                 // Expected.
             }
         }
+        // Pinned packs: dependency order, then download, hash check and install.
+        func pin(_ id: String, requires: [String] = []) -> RuntimePackPin {
+            RuntimePackPin(id: id, version: "1", packRevision: 1, name: "\(id)-1-r1", url: URL(string: "https://example.test/\(id)")!, sha256: "", size: 0, requires: requires)
+        }
+        let orderCatalog = RuntimePackCatalog(packs: [pin("php", requires: ["openssl", "imagemagick"]), pin("openssl"), pin("imagemagick"), pin("adminer", requires: ["php"])])
+        try expect(try orderCatalog.installationOrder(for: ["adminer"]).map(\.id) == ["imagemagick", "openssl", "php", "adminer"], "Packs were not ordered after their requirements")
+        for (catalog, expected) in [(RuntimePackCatalog(packs: [pin("a", requires: ["b"]), pin("b", requires: ["a"])]), RuntimePackInstallError.dependencyCycle("a")),
+                                    (orderCatalog, RuntimePackInstallError.unknownPack("missing"))] {
+            do {
+                _ = try catalog.installationOrder(for: [expected == .unknownPack("missing") ? "missing" : "a"])
+                throw CheckFailure(description: "Pack ordering accepted \(expected)")
+            } catch let error as RuntimePackInstallError {
+                try expect(error == expected, "Pack ordering reported \(error) instead of \(expected)")
+            }
+        }
+        try AtomicFileWriter.write(try JSONEncoder().encode(linkedManifest), to: payloadRoot.appendingPathComponent("manifest.json"), permissions: 0o644)
+        let installArchive = try packArchive("install.devstack-runtime")
+        try FileManager.default.removeItem(at: payloadRoot.appendingPathComponent("manifest.json"))
+        let installSize = (try FileManager.default.attributesOfItem(atPath: installArchive.path)[.size] as? NSNumber)?.int64Value ?? 0
+        let installHash = try RuntimePackVerifier(trustedPublicKeys: [:], requireSignature: false).sha256(installArchive)
+        let installPin = RuntimePackPin(id: "php-test", version: "8.5.11", packRevision: 1, name: "php-test-8.5.11-r1", url: installArchive, sha256: installHash, size: installSize)
+        let installRoot = temporary.appendingPathComponent("pack-installs", isDirectory: true)
+        do {
+            try await RuntimePackInstaller(verifier: verifier, runtimes: installRoot).install(installPin)
+            throw CheckFailure(description: "A pack was downloaded from a non-HTTPS URL")
+        } catch RuntimePackInstallError.insecureURL {
+            // Expected.
+        }
+        let installer = RuntimePackInstaller(verifier: verifier, runtimes: installRoot, allowsFileURLs: true)
+        let downloaded = ProgressTotal()
+        try await installer.install(installPin) { bytes in downloaded.set(bytes) }
+        try expect(installer.isInstalled(installPin) && FileManager.default.fileExists(atPath: installRoot.appendingPathComponent("php-test/bin/php-cli").path),
+                   "A pinned pack was not installed with its links")
+        try await installer.install(installPin)
+        try expect(installer.isInstalled(installPin), "Reinstalling a pack over its installed copy failed")
+        var tamperedPin = installPin
+        tamperedPin.sha256 = String(repeating: "0", count: 64)
+        tamperedPin.packRevision = 2
+        do {
+            try await installer.install(tamperedPin)
+            throw CheckFailure(description: "A download that did not match its pinned hash was installed")
+        } catch RuntimePackInstallError.checksumMismatch {
+            try expect(installer.installedPin("php-test") == installPin, "A failed install replaced the installed pack")
+        }
+
         var traversalManifest = runtimeManifest
         traversalManifest.runtime.id = "../php-test"
         traversalManifest.signature = RuntimePackSignature(keyID: "test", value: try privateKey.signature(for: unsignedVerifier.canonicalManifestData(traversalManifest)).base64EncodedString())
@@ -845,4 +890,10 @@ private func readLoopback(_ descriptor: Int32, until marker: Data, timeout: Time
         received.append(contentsOf: buffer[0..<count])
     }
     return (received, false)
+}
+
+private final class ProgressTotal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bytes: Int64 = 0
+    func set(_ value: Int64) { lock.lock(); bytes = value; lock.unlock() }
 }
