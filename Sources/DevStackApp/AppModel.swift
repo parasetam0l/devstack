@@ -456,6 +456,10 @@ final class AppModel: ObservableObject {
 
     func startAll() async {
         guard !isBusy else { return }
+        if !missingRuntimePacks.isEmpty {
+            errorMessage = "Install the runtimes the stack needs first: \(missingRuntimePacks.map(\.displayName).joined(separator: ", "))."
+            return
+        }
         isBusy = true
         defer { isBusy = false }
         await refreshHelperStatus()

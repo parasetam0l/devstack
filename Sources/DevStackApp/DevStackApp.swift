@@ -47,7 +47,8 @@ struct DevStackApp: App {
                 Button("Default Review Window") { NSApp.keyWindow?.setContentSize(NSSize(width: 920, height: 620)) }
                 Divider()
                 #endif
-                Button("Start Stack") { Task { await model.startAll() } }.disabled(model.isBusy || model.stackIsRunning)
+                Button("Start Stack") { Task { await model.startAll() } }
+                    .disabled(model.isBusy || model.stackIsRunning || !model.missingRuntimePacks.isEmpty)
                 Button("Stop Stack") { Task { await model.stopAll() } }.disabled(model.isBusy || !model.hasRunningServices)
             }
         }
@@ -199,7 +200,7 @@ private struct MenuBarView: View {
             model.showMainWindow()
         }
         Button("Start All") { Task { await model.startAll() } }
-            .disabled(model.isBusy || model.stackIsRunning)
+            .disabled(model.isBusy || model.stackIsRunning || !model.missingRuntimePacks.isEmpty)
         Button("Stop All") { Task { await model.stopAll() } }
             .disabled(model.isBusy || !model.hasRunningServices)
         Divider()

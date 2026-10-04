@@ -58,13 +58,14 @@ struct RootView: View {
                     Button(action: stackAction) {
                         HStack(spacing: 6) {
                             if model.isBusy { ProgressView().controlSize(.mini) }
-                            else { Image(systemName: model.stackIsRunning ? "stop.fill" : "play.fill").font(.system(size: 10)) }
-                            Text(model.isBusy ? "Working…" : model.stackIsRunning ? "Stop Stack" : "Start Stack")
+                            else { Image(systemName: needsRuntimes ? "arrow.down.circle" : model.stackIsRunning ? "stop.fill" : "play.fill").font(.system(size: 10)) }
+                            Text(stackActionTitle)
                         }
                     }
                     .buttonStyle(DevStackProminentButtonStyle())
                     .disabled(model.isBusy)
-                    .help(model.stackIsRunning ? "Stop all services" : "Start with current ports; 8080/8443 work without the helper")
+                    .help(needsRuntimes ? "Install the runtimes the stack needs first"
+                          : model.stackIsRunning ? "Stop all services" : "Start with current ports; 8080/8443 work without the helper")
                     if model.hasRunningServices && !model.stackIsRunning {
                         Button("Stop All", systemImage: "stop.fill") { Task { await model.stopAll() } }
                             .buttonStyle(DevStackGlassButtonStyle())
@@ -145,8 +146,20 @@ struct RootView: View {
         .overlay(alignment: .top) { Divider() }
     }
 
+    /// The stack cannot start before its runtimes are installed; the button
+    /// leads to them instead.
+    private var needsRuntimes: Bool { !model.stackIsRunning && !model.missingRuntimePacks.isEmpty }
+
+    private var stackActionTitle: String {
+        if model.runtimePackProgress != nil { return "Installing…" }
+        if model.isBusy { return "Working…" }
+        if needsRuntimes { return "Install Runtimes" }
+        return model.stackIsRunning ? "Stop Stack" : "Start Stack"
+    }
+
     private func stackAction() {
         if model.stackIsRunning { Task { await model.stopAll() } }
+        else if needsRuntimes { model.selectedSection = .runtimes }
         else { Task { await model.startAll() } }
     }
 
