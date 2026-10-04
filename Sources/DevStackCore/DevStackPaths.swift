@@ -34,6 +34,12 @@ public struct DevStackPaths: Sendable {
     public var generatedPHP: URL { generated.appendingPathComponent("PHP", isDirectory: true) }
     public var phpMyAdmin: URL { applicationSupport.appendingPathComponent("phpMyAdmin", isDirectory: true) }
     public var importedRuntimes: URL { applicationSupport.appendingPathComponent("Runtimes", isDirectory: true) }
+
+    /// An installed runtime pack, or the copy bundled with the app.
+    public func runtimeDirectory(_ id: String) -> URL {
+        let installed = importedRuntimes.appendingPathComponent(id, isDirectory: true)
+        return FileManager.default.fileExists(atPath: installed.path) ? installed : builtInRuntimes.appendingPathComponent(id, isDirectory: true)
+    }
     public var databases: URL { applicationSupport.appendingPathComponent("Databases", isDirectory: true) }
     public var mysql57Data: URL { databases.appendingPathComponent("mysql-5.7", isDirectory: true) }
     public var mysql84Data: URL { databases.appendingPathComponent("mysql-8.4", isDirectory: true) }
