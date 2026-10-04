@@ -535,6 +535,29 @@ enum DevStackCoreChecks {
         }
         try FileManager.default.removeItem(at: payloadRoot.appendingPathComponent("bin/extra.so"))
         try FileManager.default.removeItem(at: payloadRoot.appendingPathComponent("manifest.json"))
+        // Links travel in the signed manifest; the importer recreates the safe ones.
+        var linkedManifest = runtimeManifest
+        linkedManifest.links = [RuntimePackLink(path: "bin/php-cli", target: "php")]
+        linkedManifest.signature = RuntimePackSignature(keyID: "test", value: try privateKey.signature(for: unsignedVerifier.canonicalManifestData(linkedManifest)).base64EncodedString())
+        try AtomicFileWriter.write(try JSONEncoder().encode(linkedManifest), to: payloadRoot.appendingPathComponent("manifest.json"), permissions: 0o644)
+        let linkedRoot = temporary.appendingPathComponent("linked-runtimes", isDirectory: true)
+        _ = try importer.importArchive(try packArchive("linked.devstack-runtime"), into: linkedRoot)
+        let importedLink = linkedRoot.appendingPathComponent("php-test/bin/php-cli")
+        try expect((try? FileManager.default.destinationOfSymbolicLink(atPath: importedLink.path)) == "php"
+                   && (try? String(contentsOf: importedLink, encoding: .utf8)) == "php-runtime", "A verified pack link was not recreated")
+        try FileManager.default.removeItem(at: payloadRoot.appendingPathComponent("manifest.json"))
+        for unsafe in [RuntimePackLink(path: "bin/escape", target: "../../../etc/passwd"), RuntimePackLink(path: "bin/absolute", target: "/etc/passwd"),
+                       RuntimePackLink(path: "bin/dangling", target: "missing"), RuntimePackLink(path: "bin/php", target: "php"),
+                       RuntimePackLink(path: "bin", target: "sbom.json")] {
+            var unsafeManifest = runtimeManifest
+            unsafeManifest.links = [unsafe]
+            do {
+                try RuntimePackVerifier(trustedPublicKeys: [:], requireSignature: false).verify(manifest: unsafeManifest, root: payloadRoot, verifyCodeSignatures: false)
+                throw CheckFailure(description: "An unsafe pack link was accepted: \(unsafe.path) -> \(unsafe.target)")
+            } catch RuntimePackVerificationError.unsafeLink {
+                // Expected.
+            }
+        }
         var traversalManifest = runtimeManifest
         traversalManifest.runtime.id = "../php-test"
         traversalManifest.signature = RuntimePackSignature(keyID: "test", value: try privateKey.signature(for: unsignedVerifier.canonicalManifestData(traversalManifest)).base64EncodedString())

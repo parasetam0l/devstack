@@ -7,11 +7,18 @@ private enum PackagerError: LocalizedError {
     case usage
     case invalidPrivateKey
     case unsafePayload(String)
+    case invalidTrustedKeys
 
     var errorDescription: String? {
         switch self {
         case .usage:
-            "Usage: DevStackRuntimePackager PAYLOAD RUNTIME_MANIFEST SBOM LICENSES KEY_ID RAW_ED25519_KEY OUTPUT.devstack-runtime"
+            """
+            Usage: DevStackRuntimePackager PAYLOAD RUNTIME_MANIFEST SBOM LICENSES KEY_ID RAW_ED25519_KEY OUTPUT.devstack-runtime
+                   DevStackRuntimePackager verify PACK.devstack-runtime TRUSTED_KEYS.json [TEAM_ID]
+                   DevStackRuntimePackager generate-key KEY_ID PRIVATE_KEY_OUTPUT PUBLIC_KEYS_OUTPUT.json
+            """
+        case .invalidTrustedKeys:
+            "The trusted keys file must map key IDs to 32-byte base64 Ed25519 public keys under \"keys\"."
         case .invalidPrivateKey:
             "The signing key must contain exactly 32 raw Ed25519 private-key bytes."
         case .unsafePayload(let path):
@@ -23,6 +30,14 @@ private enum PackagerError: LocalizedError {
 @main
 enum DevStackRuntimePackager {
     static func main() throws {
+        if (4...5).contains(CommandLine.arguments.count), CommandLine.arguments[1] == "verify" {
+            try verify(
+                pack: URL(fileURLWithPath: CommandLine.arguments[2]),
+                trustedKeys: URL(fileURLWithPath: CommandLine.arguments[3]),
+                teamID: CommandLine.arguments.count == 5 ? CommandLine.arguments[4] : nil
+            )
+            return
+        }
         if CommandLine.arguments.count == 5, CommandLine.arguments[1] == "generate-key" {
             try generateKey(
                 keyID: CommandLine.arguments[2],
@@ -48,11 +63,12 @@ enum DevStackRuntimePackager {
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: staging) }
 
-        try copyDirectoryContents(payload, to: staging)
+        // Links travel in the signed manifest; the importer recreates them.
+        let links = try copyPayload(payload, to: staging)
         try FileManager.default.copyItem(at: sbom, to: staging.appendingPathComponent("sbom.cdx.json"))
         let licenseDestination = staging.appendingPathComponent("licenses", isDirectory: true)
         try FileManager.default.createDirectory(at: licenseDestination, withIntermediateDirectories: true)
-        try copyDirectoryContents(licenses, to: licenseDestination)
+        guard try copyPayload(licenses, to: licenseDestination).isEmpty else { throw PackagerError.unsafePayload(licenses.path) }
 
         let unsignedVerifier = RuntimePackVerifier(trustedPublicKeys: [:], requireSignature: false)
         var files: [RuntimePackFile] = []
@@ -74,9 +90,14 @@ enum DevStackRuntimePackager {
         var manifest = RuntimePackManifest(
             runtime: runtime,
             payload: files,
+            links: links,
+            compatibility: RuntimePackCompatibility(minimumMacOS: runtime.minimumMacOS),
             signingIdentity: keyID,
             sbomPath: "sbom.cdx.json"
         )
+        // The same checks the app runs on import, minus Apple code signatures,
+        // which the release workflow verifies separately.
+        try RuntimePackVerifier(trustedPublicKeys: [:], requireSignature: false).verifyLinks(manifest)
         let signature = try privateKey.signature(for: unsignedVerifier.canonicalManifestData(manifest))
         manifest.signature = RuntimePackSignature(keyID: keyID, value: signature.base64EncodedString())
         let encoder = JSONEncoder()
@@ -102,12 +123,41 @@ enum DevStackRuntimePackager {
         print(publicKeyURL.path)
     }
 
-    private static func copyDirectoryContents(_ source: URL, to destination: URL) throws {
-        for item in try FileManager.default.contentsOfDirectory(at: source, includingPropertiesForKeys: [.isSymbolicLinkKey]) {
-            let values = try item.resourceValues(forKeys: [.isSymbolicLinkKey])
-            guard values.isSymbolicLink != true else { throw PackagerError.unsafePayload(item.path) }
-            try FileManager.default.copyItem(at: item, to: destination.appendingPathComponent(item.lastPathComponent))
+    /// Copies regular files and folders; returns the links instead of copying
+    /// them. Anything else (sockets, devices) is refused.
+    private static func copyPayload(_ source: URL, to destination: URL) throws -> [RuntimePackLink] {
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(atPath: source.path) else { throw PackagerError.unsafePayload(source.path) }
+        var links: [RuntimePackLink] = []
+        while let relative = enumerator.nextObject() as? String {
+            let item = source.appendingPathComponent(relative)
+            let target = destination.appendingPathComponent(relative)
+            switch enumerator.fileAttributes?[.type] as? FileAttributeType {
+            case .typeDirectory?:
+                try fileManager.createDirectory(at: target, withIntermediateDirectories: true)
+            case .typeRegular?:
+                try fileManager.copyItem(at: item, to: target)
+            case .typeSymbolicLink?:
+                links.append(RuntimePackLink(path: relative, target: try fileManager.destinationOfSymbolicLink(atPath: item.path)))
+            default:
+                throw PackagerError.unsafePayload(item.path)
+            }
         }
+        return links.sorted { $0.path < $1.path }
+    }
+
+    private static func verify(pack: URL, trustedKeys: URL, teamID: String?) throws {
+        struct TrustedKeys: Decodable { var keys: [String: String] }
+        let document = try JSONDecoder().decode(TrustedKeys.self, from: Data(contentsOf: trustedKeys))
+        let keys = try document.keys.mapValues { encoded -> Data in
+            guard let data = Data(base64Encoded: encoded), data.count == 32 else { throw PackagerError.invalidTrustedKeys }
+            return data
+        }
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("devstack-verify-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let verifier = RuntimePackVerifier(trustedPublicKeys: keys, requiredTeamID: teamID)
+        let runtime = try RuntimePackImporter(verifier: verifier).importArchive(pack, into: destination)
+        print("Verified \(runtime.id) \(runtime.version) for macOS \(runtime.minimumMacOS)+\(teamID.map { ", Team \($0)" } ?? "")")
     }
 
     private static func isMachO(_ file: URL) throws -> Bool {

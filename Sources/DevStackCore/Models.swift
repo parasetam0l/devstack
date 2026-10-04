@@ -161,10 +161,24 @@ public struct RuntimePackSignature: Codable, Hashable, Sendable {
     }
 }
 
+/// A symbolic link the importer creates after verification. The archive holds
+/// no links, so nothing in it can point outside the runtime while it is being
+/// unpacked; each link must resolve to a verified file of the same pack.
+public struct RuntimePackLink: Codable, Hashable, Sendable {
+    public var path: String
+    public var target: String
+
+    public init(path: String, target: String) {
+        self.path = path
+        self.target = target
+    }
+}
+
 public struct RuntimePackManifest: Codable, Hashable, Sendable {
     public var schemaVersion: Int
     public var runtime: RuntimeManifest
     public var payload: [RuntimePackFile]
+    public var links: [RuntimePackLink]
     public var compatibility: RuntimePackCompatibility
     public var signingIdentity: String
     public var sbomPath: String
@@ -174,6 +188,7 @@ public struct RuntimePackManifest: Codable, Hashable, Sendable {
         schemaVersion: Int = 1,
         runtime: RuntimeManifest,
         payload: [RuntimePackFile],
+        links: [RuntimePackLink] = [],
         compatibility: RuntimePackCompatibility = .init(),
         signingIdentity: String,
         sbomPath: String,
@@ -182,10 +197,27 @@ public struct RuntimePackManifest: Codable, Hashable, Sendable {
         self.schemaVersion = schemaVersion
         self.runtime = runtime
         self.payload = payload
+        self.links = links
         self.compatibility = compatibility
         self.signingIdentity = signingIdentity
         self.sbomPath = sbomPath
         self.signature = signature
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, runtime, payload, links, compatibility, signingIdentity, sbomPath, signature
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        runtime = try container.decode(RuntimeManifest.self, forKey: .runtime)
+        payload = try container.decode([RuntimePackFile].self, forKey: .payload)
+        links = try container.decodeIfPresent([RuntimePackLink].self, forKey: .links) ?? []
+        compatibility = try container.decode(RuntimePackCompatibility.self, forKey: .compatibility)
+        signingIdentity = try container.decode(String.self, forKey: .signingIdentity)
+        sbomPath = try container.decode(String.self, forKey: .sbomPath)
+        signature = try container.decodeIfPresent(RuntimePackSignature.self, forKey: .signature)
     }
 }
 

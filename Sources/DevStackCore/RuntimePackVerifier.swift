@@ -17,6 +17,7 @@ public enum RuntimePackVerificationError: LocalizedError, Equatable, Sendable {
     case invalidCodeSignature(String)
     case unexpectedFile(String)
     case invalidRuntimeID(String)
+    case unsafeLink(String)
 
     public var errorDescription: String? {
         switch self {
@@ -35,6 +36,7 @@ public enum RuntimePackVerificationError: LocalizedError, Equatable, Sendable {
         case .invalidCodeSignature(let path): "Executable code signature is invalid: \(path)."
         case .unexpectedFile(let path): "Runtime pack contains a file its signed manifest does not list: \(path)."
         case .invalidRuntimeID(let id): "Runtime pack has an invalid runtime identifier: \(id)."
+        case .unsafeLink(let path): "Runtime pack link does not resolve to one of its files: \(path)."
         }
     }
 }
@@ -105,7 +107,58 @@ public struct RuntimePackVerifier: Sendable {
         guard manifest.payload.contains(where: { $0.path == manifest.sbomPath }) else {
             throw RuntimePackVerificationError.missingFile(manifest.sbomPath)
         }
+        try verifyLinks(manifest)
         try verifyInventory(manifest: manifest, root: root)
+    }
+
+    /// Every link must sit at an unused relative path and resolve, following
+    /// other links of the pack, to one of its verified files. Links to
+    /// folders, absolute paths and anything outside the pack are rejected.
+    public func verifyLinks(_ manifest: RuntimePackManifest) throws {
+        let files = Set(manifest.payload.map(\.path))
+        var targets: [String: String] = [:]
+        for link in manifest.links {
+            let path = try validateRelativePath(link.path)
+            guard !files.contains(path), targets[path] == nil,
+                  !link.target.isEmpty, !link.target.hasPrefix("/"), !link.target.contains("\0") else {
+                throw RuntimePackVerificationError.unsafeLink(link.path)
+            }
+            targets[path] = link.target
+        }
+        for path in files.union(targets.keys) {
+            // A link may not stand in for a folder that holds other entries.
+            var parent = (path as NSString).deletingLastPathComponent
+            while !parent.isEmpty {
+                guard targets[parent] == nil else { throw RuntimePackVerificationError.unsafeLink(parent) }
+                parent = (parent as NSString).deletingLastPathComponent
+            }
+        }
+        for path in targets.keys {
+            var current = path
+            for _ in 0..<8 {
+                guard let target = targets[current] else { break }
+                guard let next = Self.resolve(target, from: (current as NSString).deletingLastPathComponent) else {
+                    throw RuntimePackVerificationError.unsafeLink(path)
+                }
+                current = next
+            }
+            guard files.contains(current) else { throw RuntimePackVerificationError.unsafeLink(path) }
+        }
+    }
+
+    /// Joins a relative link target to its folder; nil when it climbs out of the pack.
+    private static func resolve(_ target: String, from folder: String) -> String? {
+        var parts = folder.isEmpty ? [] : folder.split(separator: "/").map(String.init)
+        for part in target.split(separator: "/", omittingEmptySubsequences: true) {
+            switch part {
+            case ".": continue
+            case "..":
+                guard !parts.isEmpty else { return nil }
+                parts.removeLast()
+            default: parts.append(String(part))
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "/")
     }
 
     /// The signature covers only the files the manifest lists, so the pack may
@@ -295,6 +348,12 @@ public struct RuntimePackImporter: Sendable {
         let staging = runtimeDirectory.appendingPathComponent(".\(manifest.runtime.id).\(UUID().uuidString).staging", isDirectory: true)
         do {
             try FileManager.default.copyItem(at: temporary, to: staging)
+            // Links come only from the verified manifest, never from the archive.
+            for link in manifest.links {
+                let url = staging.appendingPathComponent(link.path)
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try FileManager.default.createSymbolicLink(atPath: url.path, withDestinationPath: link.target)
+            }
             try FileManager.default.moveItem(at: staging, to: destination)
         } catch {
             try? FileManager.default.removeItem(at: staging)
