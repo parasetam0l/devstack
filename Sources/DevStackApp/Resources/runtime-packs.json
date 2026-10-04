@@ -79,6 +79,22 @@
       "size": 17186607,
       "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/phpmyadmin-5.2.3-r1/phpmyadmin-5.2.3-r1.devstack-runtime",
       "version": "5.2.3"
+    },
+    {
+      "contents": [
+        "openssl-3.5"
+      ],
+      "id": "postgresql-18",
+      "minimumMacOS": "15.0",
+      "name": "postgresql-18-18.6-r2",
+      "packRevision": 2,
+      "requires": [
+        "openssl-3.5"
+      ],
+      "sha256": "c44b736aeca621a00ff4470ff9db70aa2929a672dd147d054c246eaeaf80d591",
+      "size": 29845613,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/postgresql-18-18.6-r2/postgresql-18-18.6-r2.devstack-runtime",
+      "version": "18.6"
     }
   ],
   "schemaVersion": 1
