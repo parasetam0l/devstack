@@ -2,7 +2,6 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "$0")/.." && pwd)"
-runtime_root="${DEVSTACK_RUNTIME_OUTPUT:-$repository_root/.build/Runtimes}"
 release_root="${DEVSTACK_RELEASE_ROOT:-$repository_root/.build/release}"
 build_stamp="$(date +%Y%m%d-%H%M%S)-$$"
 identity="${DEVSTACK_SIGNING_IDENTITY:--}"
@@ -17,11 +16,10 @@ fi
 staging_root="$release_root/staging/$build_stamp"
 application="$staging_root/DevStack.app"
 
-# Releases bundle runtimes only until DevStack pins runtime packs. From then
-# on the app downloads them, and the image holds the app alone.
+# The image holds the app alone: DevStack downloads the runtime packs pinned
+# in runtime-packs.json (published by devstack-runtimes).
 pinned_packs="$(/usr/bin/python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))["packs"]))' "$repository_root/Sources/DevStackApp/Resources/runtime-packs.json")"
-bundle_runtimes=1
-[[ "$pinned_packs" == 0 ]] || bundle_runtimes=0
+[[ "$pinned_packs" != 0 ]] || { echo "No runtime packs are pinned; see scripts/pin-runtime.sh." >&2; exit 66; }
 
 # Notarization uses a notarytool keychain profile on a Mac, or an Apple ID
 # with an app-specific password (as in CI).
@@ -35,7 +33,6 @@ elif [[ -n "${NOTARY_APPLE_ID:-}" ]]; then
 fi
 
 [[ "$(uname -m)" == "arm64" ]] || { echo "Release packaging requires Apple Silicon." >&2; exit 69; }
-[[ "$bundle_runtimes" == 0 || -d "$runtime_root" ]] || { echo "Runtime payload is missing: $runtime_root" >&2; exit 66; }
 if [[ "$identity" == "-" && ${#notary_credentials[@]} -gt 0 ]]; then
     echo "Notarization needs a Developer ID identity; set DEVSTACK_SIGNING_IDENTITY." >&2
     exit 64
@@ -49,20 +46,6 @@ detach_layout_image() {
 }
 trap detach_layout_image EXIT
 
-runtime_ids=()
-[[ "$bundle_runtimes" == 0 ]] || runtime_ids=(apache-2.4 nginx-1.30 php-8.4 php-8.5 mysql-8.4 postgresql-18 openssl-3.5 mailpit-1.31.1 phpmyadmin-5.2.3 adminer-6.1.1 composer-2.10.3 imagemagick-7.1)
-# Optional legacy payloads enter the release only after their feasibility gates pass.
-if [[ "$bundle_runtimes" == 1 && "${DEVSTACK_INCLUDE_LEGACY:-0}" == "1" ]]; then
-    for runtime_id in php-7.4 mysql-5.7; do
-        gate=php74
-        [[ "$runtime_id" != "mysql-5.7" ]] || gate=mysql57
-        if [[ -d "$runtime_root/$runtime_id" ]] && "$repository_root/scripts/gates/$gate.sh"; then
-            runtime_ids+=("$runtime_id")
-        else
-            echo "Omitting unverified legacy payload: $runtime_id" >&2
-        fi
-    done
-fi
 cd "$repository_root"
 swift build -c release --jobs "${DEVSTACK_BUILD_JOBS:-2}"
 products="$(swift build -c release --show-bin-path)"
@@ -82,57 +65,15 @@ for resource_bundle in "$products"/*.bundle; do
     [[ -d "$resource_bundle" ]] && cp -R "$resource_bundle" "$application/Contents/Resources/"
 done
 cp "$repository_root/LICENSE" "$application/Contents/Resources/LICENSE"
+# The only third-party code in the app is Sparkle; each runtime pack carries
+# its own notices, sources and SBOM.
+mkdir -p "$application/Contents/Resources/ThirdPartyNotices/Sparkle"
+cp "$repository_root/.build/artifacts/sparkle/Sparkle/LICENSE" "$application/Contents/Resources/ThirdPartyNotices/Sparkle/LICENSE"
 
 signing_options=(--options runtime --timestamp)
 if [[ "$identity" == "-" ]]; then
     signing_options=(--timestamp=none)
     echo "No Developer ID identity configured: producing an ad-hoc development build." >&2
-fi
-
-if [[ "$bundle_runtimes" == 1 ]]; then
-mkdir -p "$application/Contents/Resources/Runtimes"
-for runtime_id in "${runtime_ids[@]}"; do
-    [[ -d "$runtime_root/$runtime_id" ]] || { echo "Missing runtime: $runtime_id" >&2; exit 66; }
-    cp -cR "$runtime_root/$runtime_id" "$application/Contents/Resources/Runtimes/$runtime_id"
-done
-"$repository_root/scripts/audit-runtime.sh" "$application/Contents/Resources/Runtimes" "$repository_root/.build/runtime-work"
-
-# Every shipped component needs its notices, and the copyleft ones (MySQL,
-# phpMyAdmin, gettext and others) need their exact sources. Developer ID
-# releases stop when either is missing; ad-hoc development builds only warn.
-if ! /usr/bin/python3 "$repository_root/scripts/collect-licenses.py" check "$repository_root/ThirdPartyNotices" "${runtime_ids[@]}"; then
-    if [[ "$identity" != "-" ]]; then
-        echo "Run scripts/verify-sources.sh, then scripts/collect-licenses.py notices ThirdPartyNotices." >&2
-        exit 72
-    fi
-    echo "warning: this ad-hoc build ships incomplete licence notices or sources." >&2
-fi
-if [[ -d "$repository_root/ThirdPartyNotices" ]]; then cp -R "$repository_root/ThirdPartyNotices" "$application/Contents/Resources/ThirdPartyNotices"; fi
-/usr/bin/python3 "$repository_root/scripts/collect-licenses.py" sources "$application/Contents/Resources/CorrespondingSources" "${runtime_ids[@]}"
-mkdir -p "$application/Contents/Resources/CorrespondingSources/DevStackPatches"
-cp "$repository_root/scripts/prepare-imagemagick.py" "$repository_root/scripts/configure-phpmyadmin.py" "$application/Contents/Resources/CorrespondingSources/DevStackPatches/"
-
-# Listed into a file first: a failing lister inside process substitution would
-# go unnoticed by set -e and leave the payload unsigned.
-mach_o_list="$staging_root/mach-o-files"
-/usr/bin/python3 "$repository_root/scripts/mach-o-files.py" "$application/Contents/Resources/Runtimes" > "$mach_o_list"
-while IFS= read -r -d '' binary; do
-    if /usr/bin/file "$binary" | /usr/bin/grep -q 'Mach-O'; then
-        /usr/bin/codesign --force "${signing_options[@]}" --sign "$identity" "$binary"
-    fi
-done < "$mach_o_list"
-# The app can run no older macOS than the newest any bundled runtime needs.
-minimum_macos="$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$application/Contents/Info.plist")"
-while IFS= read -r -d '' binary; do
-    minos="$(/usr/bin/vtool -show-build "$binary" 2>/dev/null | /usr/bin/awk '$1 == "minos" {print $2; exit}')"
-    [[ -n "$minos" ]] || continue
-    minimum_macos="$(printf '%s\n%s\n' "$minimum_macos" "$minos" | /usr/bin/sort -V | /usr/bin/tail -n 1)"
-done < "$mach_o_list"
-/usr/bin/plutil -replace LSMinimumSystemVersion -string "$minimum_macos" "$application/Contents/Info.plist"
-echo "Bundled runtimes require macOS $minimum_macos." >&2
-rm -f "$mach_o_list"
-# Signing rewrites every Mach-O, so the SBOM hashes the signed payload.
-"$repository_root/scripts/generate-sbom.py" "$application/Contents/Resources/Runtimes" "$application/Contents/Resources/SBOM/runtime-sbom.cdx.json"
 fi
 
 "$repository_root/scripts/embed-sparkle.sh" "$application" "$products" "$identity"
