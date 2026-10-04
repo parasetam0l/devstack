@@ -34,12 +34,12 @@
       "contents": [],
       "id": "imagemagick-7.1",
       "minimumMacOS": "15.0",
-      "name": "imagemagick-7.1-7.1.2-32-r1",
-      "packRevision": 1,
+      "name": "imagemagick-7.1-7.1.2-32-r2",
+      "packRevision": 2,
       "requires": [],
-      "sha256": "c8ac41936e157895c0278d74af56db60180b8456de22b9040db1e4752d40480b",
-      "size": 3780818,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/imagemagick-7.1-7.1.2-32-r1/imagemagick-7.1-7.1.2-32-r1.devstack-runtime",
+      "sha256": "e028ac5f3a844aedc5103784acb48bcde701ad556db9a59e67d7c1d304ea173b",
+      "size": 3781577,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/imagemagick-7.1-7.1.2-32-r2/imagemagick-7.1-7.1.2-32-r2.devstack-runtime",
       "version": "7.1.2-32"
     },
     {
