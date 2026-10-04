@@ -2,6 +2,20 @@
   "packs": [
     {
       "contents": [],
+      "id": "composer-2.10.3",
+      "minimumMacOS": "15.0",
+      "name": "composer-2.10.3-r1",
+      "packRevision": 1,
+      "requires": [
+        "php-8.5"
+      ],
+      "sha256": "9417e475c3b4a2c261efe2b74a68419cbf43f9bb18b8763b5fb48ef2240efe14",
+      "size": 832555,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/composer-2.10.3-r1/composer-2.10.3-r1.devstack-runtime",
+      "version": "2.10.3"
+    },
+    {
+      "contents": [],
       "id": "mailpit-1.31.1",
       "minimumMacOS": "15.0",
       "name": "mailpit-1.31.1-r1",
@@ -11,6 +25,20 @@
       "size": 9929731,
       "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/mailpit-1.31.1-r1/mailpit-1.31.1-r1.devstack-runtime",
       "version": "1.31.1"
+    },
+    {
+      "contents": [],
+      "id": "phpmyadmin-5.2.3",
+      "minimumMacOS": "15.0",
+      "name": "phpmyadmin-5.2.3-r1",
+      "packRevision": 1,
+      "requires": [
+        "php-8.5"
+      ],
+      "sha256": "23a48fc6754703e4c8731b10066ef556bc3744708c9d97355f6e5a00154a49b1",
+      "size": 17186607,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/phpmyadmin-5.2.3-r1/phpmyadmin-5.2.3-r1.devstack-runtime",
+      "version": "5.2.3"
     }
   ],
   "schemaVersion": 1
