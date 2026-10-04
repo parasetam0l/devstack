@@ -24,7 +24,8 @@ struct DashboardView: View {
                         detail: "HTTP \(model.configuration.ports.webHTTP) · HTTPS \(model.configuration.ports.webHTTPS)") {
                         Picker("Web server", selection: Binding(get: { model.configuration.selectedWebServer }, set: { server in Task { await model.selectWebServer(server) } })) {
                             ForEach(WebServer.allCases) { server in
-                                Text(server.displayName).tag(server).disabled(!model.runtimeIsAvailable(server.service.runtimeID))
+                                Text(model.runtimeOptionTitle(server.displayName, id: server.service.runtimeID)).tag(server)
+                                    .disabled(!model.runtimeIsAvailable(server.service.runtimeID))
                             }
                         }
                     }
@@ -109,7 +110,7 @@ private struct ServiceControl<Selector: View>: View {
                 .tint(.primary)
                 .disabled(model.isBusy || state.phase == .running)
                 .help(state.phase == .running ? "Stop the service before changing its version." : "Change \(title.lowercased())")
-                .frame(width: 140, alignment: .leading)
+                .frame(width: 180, alignment: .leading)
             Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                 .layoutPriority(-1)
             Spacer(minLength: 4)
@@ -154,7 +155,7 @@ private struct LocalDNSServiceControl: View {
             Text("Local DNS").font(.system(size: 12, weight: .medium)).lineLimit(1).frame(width: 80, alignment: .leading)
             Text(model.localNetworkAddress ?? "No network")
                 .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                .lineLimit(1).padding(.leading, 10).frame(width: 140, alignment: .leading)
+                .lineLimit(1).padding(.leading, 10).frame(width: 180, alignment: .leading)
             Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                 .layoutPriority(-1)
             Spacer(minLength: 4)
@@ -197,8 +198,9 @@ struct PHPVersionPicker: View {
     @EnvironmentObject private var model: AppModel
     var body: some View {
         Picker("PHP version", selection: Binding(get: { model.configuration.defaultPHPRuntimeID }, set: { id in Task { await model.selectPHP(id) } })) {
-            ForEach(model.availablePHPRuntimes) { runtime in
-                Text("PHP \(runtime.version)").tag(runtime.id)
+            ForEach(model.phpRuntimes) { runtime in
+                Text(model.runtimeOptionTitle("PHP \(runtime.version)", id: runtime.id)).tag(runtime.id)
+                    .disabled(!model.runtimeIsAvailable(runtime.id))
             }
         }.pickerStyle(.menu)
             .tint(.primary)

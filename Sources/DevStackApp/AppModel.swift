@@ -209,6 +209,17 @@ final class AppModel: ObservableObject {
         runtimeManifests.filter { $0.kind == .php && runtimeIsAvailable($0.id) }.sorted { $0.version > $1.version }
     }
 
+    /// Every PHP runtime DevStack knows, newest first. Pickers list them all,
+    /// so a selected runtime that isn't installed never shows as a blank.
+    var phpRuntimes: [RuntimeManifest] {
+        runtimeManifests.filter { $0.kind == .php }.sorted { $0.version > $1.version }
+    }
+
+    /// A runtime's name in a picker, marked when it isn't installed.
+    func runtimeOptionTitle(_ name: String, id: String) -> String {
+        runtimeIsAvailable(id) ? name : "\(name) – not installed"
+    }
+
     func serviceState(_ service: ServiceKind) -> ServiceState {
         serviceStates.first { $0.service == service } ?? ServiceState(service: service)
     }

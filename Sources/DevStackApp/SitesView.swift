@@ -161,8 +161,11 @@ struct SiteEditor: View {
                 GridRow {
                     Text("PHP version").foregroundStyle(.secondary)
                     Picker("PHP version", selection: phpRuntimeBinding) {
-                        ForEach(model.availablePHPRuntimes) { runtime in Text("PHP \(runtime.version)").tag(runtime.id) }
-                    }.labelsHidden().tint(.primary).frame(maxWidth: 180, alignment: .leading)
+                        ForEach(model.phpRuntimes) { runtime in
+                            Text(model.runtimeOptionTitle("PHP \(runtime.version)", id: runtime.id)).tag(runtime.id)
+                                .disabled(!model.runtimeIsAvailable(runtime.id))
+                        }
+                    }.labelsHidden().tint(.primary).frame(maxWidth: 220, alignment: .leading)
                 }
                 GridRow {
                     Text("SSL").foregroundStyle(.secondary)

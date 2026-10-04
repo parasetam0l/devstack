@@ -17,7 +17,11 @@ struct DatabaseServiceControl: View {
             databaseRow(title: "MySQL", service: model.configuration.selectedDatabase.service, endpoint: "127.0.0.1:\(model.configuration.ports.mysqlListen)") {
                 Picker("MySQL version", selection: Binding(get: { model.configuration.selectedDatabase }, set: { model.selectedDatabaseBinding = $0 })) {
                     ForEach(DatabaseEngine.allCases, id: \.self) { engine in
-                        if engine == .none || model.runtimeIsAvailable(engine.rawValue) { Text(engine.displayName).tag(engine) }
+                        if engine == .none { Text(engine.displayName).tag(engine) }
+                        else {
+                            Text(model.runtimeOptionTitle(engine.displayName, id: engine.rawValue)).tag(engine)
+                                .disabled(!model.runtimeIsAvailable(engine.rawValue))
+                        }
                     }
                 }
             }
@@ -25,7 +29,11 @@ struct DatabaseServiceControl: View {
             databaseRow(title: "PostgreSQL", service: model.configuration.selectedPostgreSQL.service, endpoint: "127.0.0.1:\(model.configuration.ports.postgresqlListen)") {
                 Picker("PostgreSQL version", selection: Binding(get: { model.configuration.selectedPostgreSQL }, set: { engine in Task { await model.selectPostgreSQL(engine) } })) {
                     ForEach(PostgreSQLEngine.allCases, id: \.self) { engine in
-                        Text(engine.displayName).tag(engine).disabled(engine != .none && !model.runtimeIsAvailable(engine.rawValue))
+                        if engine == .none { Text(engine.displayName).tag(engine) }
+                        else {
+                            Text(model.runtimeOptionTitle(engine.displayName, id: engine.rawValue)).tag(engine)
+                                .disabled(!model.runtimeIsAvailable(engine.rawValue))
+                        }
                     }
                 }
             }
@@ -40,7 +48,7 @@ struct DatabaseServiceControl: View {
             selector().pickerStyle(.menu).labelsHidden().controlSize(.small).tint(.primary)
                 .disabled(model.isBusy || active)
                 .help(active ? "Stop the service before changing its version." : "Change the \(title.lowercased()) version.")
-                .frame(width: 140, alignment: .leading)
+                .frame(width: 180, alignment: .leading)
             Text(service == nil ? "Excluded from stack" : endpoint).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                 .layoutPriority(-1)
             Spacer(minLength: 4)
