@@ -27,6 +27,22 @@
       "version": "1.31.1"
     },
     {
+      "contents": [
+        "openssl-3.5"
+      ],
+      "id": "mysql-5.7",
+      "minimumMacOS": "15.0",
+      "name": "mysql-5.7-5.7.44-r1",
+      "packRevision": 1,
+      "requires": [
+        "openssl-3.5"
+      ],
+      "sha256": "3ad09a5d8af85b0d4e0a7c54fce1536b25f55ebf4fdf2ad3967188357f1b27af",
+      "size": 122425607,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/mysql-5.7-5.7.44-r1/mysql-5.7-5.7.44-r1.devstack-runtime",
+      "version": "5.7.44"
+    },
+    {
       "contents": [],
       "id": "openssl-3.5",
       "minimumMacOS": "15.0",
