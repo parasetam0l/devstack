@@ -6,7 +6,7 @@ signed, notarized DMG. The bundled runtime payload has its own pipeline; see
 
 ## Requirements
 
-- Apple Silicon Mac running macOS 27, with full Xcode 26 selected
+- Apple Silicon Mac running macOS 27, with full Xcode 27 selected
   (`xcode-select -p` should print the Xcode developer directory).
 - The runtime payload at `.build/Runtimes` (see
   [Building the runtime payload](#building-the-runtime-payload)).

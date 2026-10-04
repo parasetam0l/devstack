@@ -27,7 +27,7 @@ struct SitesView: View {
                         if !state.search.isEmpty {
                             Button { state.search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }.buttonStyle(.plain).accessibilityLabel("Clear search")
                         }
-                    }.padding(7).glassEffect(.regular, in: .rect(cornerRadius: 8)).frame(maxWidth: 350)
+                    }.padding(7).devStackGlass(.rect(cornerRadius: 8)).frame(maxWidth: 350)
                     Spacer()
                     Text("\(filteredSites.count) \(filteredSites.count == 1 ? "site" : "sites")").font(.system(size: 12)).foregroundStyle(.secondary)
                 }

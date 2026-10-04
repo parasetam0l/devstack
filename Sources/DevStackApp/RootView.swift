@@ -31,7 +31,7 @@ struct RootView: View {
                 .scrollContentBackground(.hidden)
             }
             .padding(4)
-            .glassEffect(.regular, in: .rect(cornerRadius: 12))
+            .devStackGlass(.rect(cornerRadius: 12))
             .padding(6)
             .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 250)
             .toolbar(removing: .sidebarToggle)
@@ -50,7 +50,7 @@ struct RootView: View {
                         .buttonStyle(DevStackGlassButtonStyle())
                         .help(navigation.visibility == .detailOnly ? "Show Sidebar" : "Hide Sidebar")
                         .accessibilityLabel(navigation.visibility == .detailOnly ? "Show Sidebar" : "Hide Sidebar")
-                }.sharedBackgroundVisibility(.hidden)
+                }.devStackHidingSharedBackground()
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button { model.openManagedShell() } label: { Image(systemName: "terminal") }
                         .buttonStyle(DevStackGlassButtonStyle())
@@ -70,7 +70,7 @@ struct RootView: View {
                             .buttonStyle(DevStackGlassButtonStyle())
                             .disabled(model.isBusy)
                     }
-                }.sharedBackgroundVisibility(.hidden)
+                }.devStackHidingSharedBackground()
             }
         }
         .toolbar(removing: .sidebarToggle)

@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 // A native behind-window backdrop gives Liquid Glass the desktop to sample.
-// The controls still use SwiftUI's glassEffect; this view supplies the window surface.
+// The controls use devStackGlass (Liquid Glass on macOS 26 and later); this
+// view supplies the window surface.
 struct WindowBackdrop: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 

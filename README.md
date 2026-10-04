@@ -8,7 +8,9 @@ bundled in the app; nothing is downloaded on the user's Mac.
 
 ## Build
 
-Requires an Apple Silicon Mac running macOS 27 with Xcode 26.
+Requires an Apple Silicon Mac with Xcode 27. The app targets macOS 15 and later; the
+runtimes it bundles today are still built for macOS 27, until they ship as
+packs from [devstack-runtimes](https://github.com/parasetam0l/devstack-runtimes).
 
 ```sh
 swift build --jobs 2

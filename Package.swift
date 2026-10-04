@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "DevStack",
     platforms: [
-        .macOS("27.0")
+        .macOS(.v15)
     ],
     products: [
         .library(name: "DevStackCore", targets: ["DevStackCore"]),

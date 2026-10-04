@@ -74,11 +74,71 @@ struct WorkspaceBackground: View {
     }
 }
 
+// MARK: - Glass surfaces
+
+extension View {
+    /// Liquid Glass on macOS 26 and later. Earlier versions have no glass
+    /// effect, so they get a translucent material with a hairline border in
+    /// the same shape.
+    @ViewBuilder
+    func devStackGlass<S: Shape>(_ shape: S, interactive: Bool = false, tint: Color? = nil) -> some View {
+        if #available(macOS 26, *) {
+            glassEffect(DevStackGlass.style(interactive: interactive, tint: tint), in: shape)
+        } else {
+            background {
+                ZStack {
+                    shape.fill(.regularMaterial)
+                    if let tint { shape.fill(tint) }
+                }
+            }
+            .overlay(shape.stroke(Color.primary.opacity(0.1), lineWidth: 1))
+        }
+    }
+}
+
+private enum DevStackGlass {
+    @available(macOS 26, *)
+    static func style(interactive: Bool, tint: Color?) -> Glass {
+        var glass = Glass.regular
+        if let tint { glass = glass.tint(tint) }
+        if interactive { glass = glass.interactive() }
+        return glass
+    }
+}
+
+extension ToolbarContent {
+    /// Drops the shared glass background macOS 26 draws behind toolbar items;
+    /// earlier versions draw none.
+    @ToolbarContentBuilder
+    func devStackHidingSharedBackground() -> some ToolbarContent {
+        if #available(macOS 26, *) {
+            sharedBackgroundVisibility(.hidden)
+        } else {
+            self
+        }
+    }
+}
+
+/// Groups glass surfaces so they blend on macOS 26 and later; a plain
+/// container on earlier versions.
+struct DevStackGlassGroup<Content: View>: View {
+    var spacing: CGFloat
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        if #available(macOS 26, *) {
+            GlassEffectContainer(spacing: spacing) { content }
+        } else {
+            content
+        }
+    }
+}
+
 struct WorkspacePage<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
         ScrollView {
-            GlassEffectContainer(spacing: 8) {
+            DevStackGlassGroup(spacing: 8) {
                 VStack(alignment: .leading, spacing: 10) { content }
             }
                 .frame(maxWidth: 1040, alignment: .leading)
@@ -118,7 +178,7 @@ struct SurfacePanel<Content: View>: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 12))
+        .devStackGlass(.rect(cornerRadius: 12))
     }
 }
 
@@ -267,7 +327,7 @@ struct DevStackGlassButtonStyle: ButtonStyle {
         return configuration.label.font(.system(size: 12, weight: .medium))
             .foregroundStyle(enabled ? Color.primary : Color.secondary)
             .padding(.horizontal, 11).padding(.vertical, 5)
-            .glassEffect(.regular.interactive(), in: .capsule)
+            .devStackGlass(.capsule, interactive: true)
             .overlay(Capsule().strokeBorder(.white.opacity(isDefaultAction ? 0.4 : 0), lineWidth: 1))
             .focusEffectDisabled()
             .opacity(enabled ? 1 : 0.5)
@@ -282,7 +342,7 @@ struct DevStackProminentButtonStyle: ButtonStyle {
         let isDefaultAction = shortcut == .defaultAction
         return configuration.label.font(.system(size: 12, weight: .semibold))
             .padding(.horizontal, 13).padding(.vertical, 5)
-            .glassEffect(.regular.tint(DevStackDesign.accent.opacity(isDefaultAction ? 0.5 : 0.35)).interactive(), in: .capsule)
+            .devStackGlass(.capsule, interactive: true, tint: DevStackDesign.accent.opacity(isDefaultAction ? 0.5 : 0.35))
             .focusEffectDisabled()
             .opacity(enabled ? 1 : 0.5)
             .scaleEffect(configuration.isPressed ? 0.97 : 1)

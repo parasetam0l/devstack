@@ -73,7 +73,7 @@ public struct RuntimeManifest: Codable, Hashable, Identifiable, Sendable {
         version: String,
         abi: String? = nil,
         architecture: String = "arm64",
-        minimumMacOS: String = "27.0",
+        minimumMacOS: String = "15.0",
         entryPoints: [String: String],
         extensions: [RuntimeExtension] = [],
         hashes: [String: String] = [:],
@@ -130,7 +130,7 @@ public struct RuntimePackCompatibility: Codable, Hashable, Sendable {
     public var architectures: [String]
     public var devStackSchema: Int
 
-    public init(minimumMacOS: String = "27.0", architectures: [String] = ["arm64"], devStackSchema: Int = 1) {
+    public init(minimumMacOS: String = "15.0", architectures: [String] = ["arm64"], devStackSchema: Int = 1) {
         self.minimumMacOS = minimumMacOS
         self.architectures = architectures
         self.devStackSchema = devStackSchema

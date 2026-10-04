@@ -73,7 +73,7 @@ struct DashboardView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Tools").font(.system(size: 13, weight: .semibold))
-                GlassEffectContainer(spacing: 8) {
+                DevStackGlassGroup(spacing: 8) {
                     HStack(spacing: 8) {
                         QuickAccessTile(symbol: "externaldrive", title: "Database", subtitle: "Connections and backups") { model.selectedSection = .database }
                         QuickAccessTile(symbol: "tray", title: "Mail Inbox", subtitle: "Open mail tools") { model.selectedSection = .mailpit }
@@ -220,6 +220,6 @@ private struct QuickAccessTile: View {
                 Spacer(minLength: 0)
                 Image(systemName: "arrow.up.right").font(.system(size: 9)).foregroundStyle(.tertiary)
             }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
-        }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
+        }.buttonStyle(.plain).devStackGlass(.rect(cornerRadius: 12), interactive: true)
     }
 }

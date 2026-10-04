@@ -264,7 +264,7 @@ struct LogsView: View {
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .glassEffect(.regular, in: .rect(cornerRadius: 12))
+            .devStackGlass(.rect(cornerRadius: 12))
             VStack(spacing: 0) {
                 HStack(spacing: 7) {
                     Circle().fill(currentPhase.color).frame(width: 6, height: 6)
