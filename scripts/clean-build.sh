@@ -1,12 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-# Prunes generated state under .build. The default mode keeps sources, runtimes
-# and the newest release image, so cleaning is safe at any time: the next build
-# recreates whatever it needs.
+# Prunes generated state under .build. The default mode keeps the newest
+# release image, so cleaning is safe at any time: the next build recreates
+# whatever it needs.
 #
 #   scripts/clean-build.sh          release history, staging, scratch trees, stale logs
-#   scripts/clean-build.sh --deep   also drop runtime rebuild caches and SwiftPM caches
+#   scripts/clean-build.sh --deep   also drop SwiftPM caches and old runtime builds
 #   scripts/clean-build.sh --all    delete the whole .build directory (full rebuild)
 
 repository_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -41,7 +41,7 @@ remove() {
 }
 
 if [[ "$mode" == "all" ]]; then
-    echo "Removing the entire build directory; runtimes must be rebuilt." >&2
+    echo "Removing the entire build directory." >&2
     /bin/rm -rf "$build_root"
 else
     release_root="$build_root/out/Products/Release"
@@ -55,9 +55,7 @@ else
         done < <(/bin/ls -1t "$release_root"/DevStack-*-arm64.dmg 2>/dev/null | /usr/bin/tail -n +2)
     fi
 
-    # Scratch trees, recreated by the next runtime build. runtime-work is kept:
-    # the legacy PHP 7.4 feasibility gate needs its source tree at packaging
-    # time, and dropping it silently omits the runtime from the release.
+    # Scratch trees.
     remove "$build_root/runtime-test-fixtures" \
         "$build_root/build-tools-work" "$build_root/backups"
 
@@ -73,10 +71,8 @@ else
     fi
 
     if [[ "$mode" == "deep" ]]; then
-        # Rebuild caches and host toolchains. Re-fetch sources and run
-        # scripts/verify-sources.sh before packaging so the image can include
-        # its CorrespondingSources payload again.
-        remove "$build_root/runtime-dependencies" "$build_root/runtime-cache" \
+        # Runtime builds from before runtimes moved to devstack-runtimes.
+        remove "$build_root/Runtimes" "$build_root/runtime-dependencies" "$build_root/runtime-cache" \
             "$build_root/build-tools" "$build_root/build-tools-cache" "$build_root/runtime-work"
         /bin/rm -rf "$build_root/out/Intermediates.noindex" "$build_root/out/ModuleCache.noindex" \
             "$build_root/out/CompilationCache.noindex" "$build_root/out/SDKExplicitPrecompiledModules" \

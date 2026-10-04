@@ -4,9 +4,8 @@ repository_root="$(cd "$(dirname "$0")/.." && pwd)"
 preview_root="$repository_root/.build/preview"
 build_stamp="$(date +%Y%m%d-%H%M%S)-$$"
 application="$preview_root/staging/$build_stamp/DevStack.app"
-# UI previews use the existing default runtime payloads. Legacy gates belong to release packaging.
-runtime_root="${DEVSTACK_PREVIEW_RUNTIME_ROOT:-$repository_root/.build/Runtimes}"
-[[ -d "$runtime_root" ]] || runtime_root="$repository_root/.build/Runtimes"
+# Like a release, a preview holds no runtimes: it uses the packs installed
+# from its Runtimes page.
 cd "$repository_root"
 if [[ "${DEVSTACK_INSTALL_PREVIEW:-0}" == "1" ]] && /usr/bin/pgrep -x DevStack >/dev/null; then
     echo "Quit DevStack before replacing the installed app." >&2
@@ -14,7 +13,7 @@ if [[ "${DEVSTACK_INSTALL_PREVIEW:-0}" == "1" ]] && /usr/bin/pgrep -x DevStack >
 fi
 swift build --jobs "${DEVSTACK_BUILD_JOBS:-2}"
 products="$(swift build --show-bin-path)"
-mkdir -p "$application/Contents/MacOS" "$application/Contents/Resources/Runtimes" "$application/Contents/Library/LaunchServices" "$application/Contents/Library/LaunchDaemons"
+mkdir -p "$application/Contents/MacOS" "$application/Contents/Resources" "$application/Contents/Library/LaunchServices" "$application/Contents/Library/LaunchDaemons"
 cp "$repository_root/Packaging/Info.plist" "$application/Contents/Info.plist"
 cp "$products/DevStack" "$application/Contents/MacOS/DevStack"
 cp "$products/DevStackPrivilegedHelper" "$application/Contents/Library/LaunchServices/DevStackPrivilegedHelper"
@@ -22,11 +21,6 @@ cp "$repository_root/Sources/DevStackApp/Resources/app.devstack.desktop.helper.p
 cp "$repository_root/Sources/DevStackApp/Resources/DevStack.icns" "$application/Contents/Resources/"
 for resource_bundle in "$products"/*.bundle; do
     [[ ! -d "$resource_bundle" ]] || ditto "$resource_bundle" "$application/Contents/Resources/$(basename "$resource_bundle")"
-done
-for id in nginx-1.30 adminer-6.1.1 php-8.4 apache-2.4 php-8.5 mysql-8.4 postgresql-18 openssl-3.5 mailpit-1.31.1 phpmyadmin-5.2.3 composer-2.10.3 imagemagick-7.1; do
-    if [[ -d "$runtime_root/$id" ]]; then
-        cp -cR "$runtime_root/$id" "$application/Contents/Resources/Runtimes/$id"
-    fi
 done
 "$repository_root/scripts/embed-sparkle.sh" "$application" "$products" -
 /usr/bin/codesign --force --entitlements "$repository_root/Packaging/Helper.entitlements" --sign - "$application/Contents/Library/LaunchServices/DevStackPrivilegedHelper"

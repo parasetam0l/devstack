@@ -1,15 +1,16 @@
 # Building and releasing DevStack
 
-This is the current, end-to-end guide for compiling the app and producing the
-signed, notarized DMG. The bundled runtime payload has its own pipeline; see
-[RuntimeBuild.md](RuntimeBuild.md) for the details referenced below.
+This is the end-to-end guide for compiling the app and producing the signed,
+notarized DMG on a Mac. Releases are normally made by GitHub Actions instead
+(see [docs/RELEASING.md](../docs/RELEASING.md)). The runtimes are built,
+signed and published separately by
+[devstack-runtimes](https://github.com/parasetam0l/devstack-runtimes); this
+repository only pins them.
 
 ## Requirements
 
-- Apple Silicon Mac running macOS 27, with full Xcode 27 selected
-  (`xcode-select -p` should print the Xcode developer directory).
-- The runtime payload at `.build/Runtimes` (see
-  [Building the runtime payload](#building-the-runtime-payload)).
+- Apple Silicon Mac with full Xcode 27 selected (`xcode-select -p` should
+  print the Xcode developer directory). The app runs on macOS 15 and later.
 - For a distributable image: a **Developer ID Application** certificate in the
   login keychain and a `notarytool` keychain profile.
 
@@ -46,16 +47,22 @@ Run the checks:
 
 ```sh
 "$(swift build --show-bin-path)/DevStackCoreChecks"
-# Stop the stack first: the runtime check uses ports 3306, 5432, 8080, 8443, 8025.
-/usr/bin/python3 scripts/run-bounded-check.py --seconds 300 \
-    -- "$(swift build --show-bin-path)/DevStackRuntimeChecks" .build/Runtimes
+```
+
+`DevStackRuntimeChecks` starts every service from a folder of installed
+runtimes, with its own scratch data, and exercises them end to end. Stop your
+stack first: it uses ports 3306, 5432, 8080, 8443 and 8025.
+
+```sh
+"$(swift build --show-bin-path)/DevStackRuntimeChecks" ~/Library/Application\ Support/DevStack/Runtimes
 ```
 
 ## Local preview app
 
 `scripts/build-preview.sh` assembles a runnable `DevStack.app` from the debug
-build and the `.build/Runtimes` payload. It is ad-hoc signed, so the privileged
-helper stays unavailable by design.
+build. Like a release, it holds no runtimes: it uses the packs installed from
+its Runtimes page. It is ad-hoc signed, so the privileged helper stays
+unavailable by design.
 
 ```sh
 scripts/build-preview.sh
@@ -68,7 +75,6 @@ replace a running app.
 ## Signed and notarized DMG
 
 ```sh
-DEVSTACK_INCLUDE_LEGACY=1 \
 DEVSTACK_SIGNING_IDENTITY="Developer ID Application: Serkan KAYA (P7V7795SS9)" \
 DEVSTACK_NOTARY_PROFILE=DevStack \
 scripts/package-release.sh
@@ -80,7 +86,6 @@ Long runs are easier to follow through a log file:
 mkdir -p .build/logs
 LOG=".build/logs/package-$(date +%Y%m%d-%H%M%S).log"
 set -o pipefail
-DEVSTACK_INCLUDE_LEGACY=1 \
 DEVSTACK_SIGNING_IDENTITY="Developer ID Application: Serkan KAYA (P7V7795SS9)" \
 DEVSTACK_NOTARY_PROFILE=DevStack \
     scripts/package-release.sh 2>&1 | tee "$LOG"
@@ -96,39 +101,31 @@ ad-hoc development image, `DevStack-<version>-arm64-adhoc.dmg`, under
 
 ### What the script does
 
-1. Validates Apple Silicon and that `.build/Runtimes` exists, then builds the
+1. Validates Apple Silicon and that runtime packs are pinned, then builds the
    release binaries and runs `DevStackCoreChecks`.
-2. Stages `DevStack.app`: Info.plist, icon, privileged helper and the selected
-   runtimes.
-3. Audits the payload (`scripts/audit-runtime.sh`): ARM64 only, signed Mach-O,
-   no package-manager paths, no build-machine paths, no forbidden RPATHs.
-4. Checks licence compliance (`scripts/collect-licenses.py check`): every
-   shipped component needs its notices and a verified source archive. A
-   Developer ID release stops here when anything is missing; an ad-hoc build
-   warns. The notices and only the shipped sources are copied into the app.
-5. Signs every bundled Mach-O, then writes the SBOM so it hashes the signed
-   files, then signs the helper and the app with the hardened runtime and a
-   secure timestamp; verifies the app and helper Team IDs match.
-6. With a notary profile: notarizes and staples the app and assesses it with
+2. Stages `DevStack.app`: Info.plist, icon, privileged helper, resources, the
+   licence and Sparkle's notice. Runtimes are not bundled; each pack carries
+   its own notices, sources and SBOM.
+3. Embeds and signs Sparkle (`scripts/embed-sparkle.sh`), then signs the helper
+   and the app with the hardened runtime and a secure timestamp, and verifies
+   that the app and helper Team IDs match.
+4. With a notary profile: notarizes and staples the app and assesses it with
    Gatekeeper, so the copy inside the image carries its own ticket.
-7. Builds the branded DMG layout (background plus a `.DS_Store` written directly,
+5. Builds the branded DMG layout (background plus a `.DS_Store` written directly,
    no Finder automation) and signs the image.
-8. With a notary profile: notarizes and staples the DMG and assesses it. Every
+6. With a notary profile: notarizes and staples the DMG and assesses it. Every
    submission must come back Accepted.
-9. Moves the previous same-named artifacts into
-   `.build/out/Products/Release/previous/<stamp>/`.
+7. Moves the previous same-named artifacts into `<release root>/previous/<stamp>/`.
 
 ### Environment variables
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DEVSTACK_SIGNING_IDENTITY` | `-` (ad-hoc) | Developer ID identity used for nested code, app and DMG. |
+| `DEVSTACK_SIGNING_IDENTITY` | `-` (ad-hoc) | Developer ID identity used for the helper, the app and the DMG. |
 | `DEVSTACK_NOTARY_PROFILE` | unset | `notarytool` keychain profile. Unset signs but does not notarize. |
-| `DEVSTACK_INCLUDE_LEGACY` | `0` | Include PHP 7.4 and MySQL 5.7 when their gates pass. |
-| `DEVSTACK_BUILD_JOBS` | `2` | Swift build jobs; also limits the dependency and build-tool compiles (all cores when unset there). |
-| `DEVSTACK_RUNTIME_OUTPUT` | `.build/Runtimes` | Runtime payload directory. |
+| `NOTARY_APPLE_ID`, `NOTARY_PASSWORD`, `TEAM_ID` | unset | Notarize with an Apple ID and app-specific password instead (as CI does). |
+| `DEVSTACK_BUILD_JOBS` | `2` | Swift build jobs. |
 | `DEVSTACK_RELEASE_ROOT` | `.build/release` | Output directory for the DMG and app. |
-| `DEVSTACK_SOURCE_CACHE` | `.build/runtime-cache` | Verified source archives; the shipped ones are copied into `CorrespondingSources`. |
 
 ### Outputs and verification
 
@@ -143,15 +140,17 @@ hdiutil detach /tmp/devstack-dmg
 open -a /Applications/DevStack.app
 ```
 
-The first launch needs the helper to be approved once in System Settings →
-General → Login Items & Extensions; the setup wizard walks through it.
+The first launch downloads the runtimes and needs the helper to be approved
+once in System Settings → General → Login Items & Extensions; the setup wizard
+walks through both.
 
 ## Runtime packs
 
 Runtimes are built and published by
 [devstack-runtimes](https://github.com/parasetam0l/devstack-runtimes), one
-signed, notarized pack per runtime. DevStack installs them during setup and
-from its Runtimes page into `~/Library/Application Support/DevStack/Runtimes`.
+signed, notarized pack per runtime; its `docs/BUILDING.md` covers building and
+changing them. DevStack installs them during setup and from its Runtimes page
+into `~/Library/Application Support/DevStack/Runtimes`.
 
 Each DevStack version pins the exact packs it installs in
 `Sources/DevStackApp/Resources/runtime-packs.json`. To pin a newly
@@ -161,8 +160,8 @@ published pack (it is downloaded and checked against its `pack.json` first):
 scripts/pin-runtime.sh php-8.5-8.5.11-r1
 ```
 
-Before a release, check that every pinned pack is still available and
-intact:
+Before a release, check that every runtime is pinned and every pinned pack is
+still available and intact:
 
 ```sh
 scripts/pin-runtime.sh --check
@@ -178,50 +177,12 @@ DEVSTACK_RUNTIME_CATALOG=/path/to/runtime-packs.json "$(swift build --show-bin-p
 A signed DevStack installs only packs whose binaries carry its own Team ID;
 a debug build accepts any valid signature.
 
-## Building the runtime payload
-
-Until the pinned catalog lists packs, release builds still bundle the
-payload below. The pipeline now lives in devstack-runtimes; the copies here
-go away once DevStack no longer bundles runtimes.
-
-The payload is the signed `Contents/Resources/Runtimes` tree copied into the
-app. It never downloads or builds anything on the user's Mac. On the release
-host:
-
-```sh
-scripts/fetch-build-tools.sh
-export PATH="$PWD/.build/build-tools/bin:$PATH"
-scripts/verify-sources.sh
-scripts/build-dependencies.sh all
-scripts/build-runtimes.sh all
-```
-
-`build-runtimes.sh` finishes by rebuilding `ThirdPartyNotices` from the verified
-source archives. To refresh only the notices, for example after a cleanup,
-run `scripts/verify-sources.sh` and then
-`scripts/collect-licenses.py notices ThirdPartyNotices`.
-
-The build tools live entirely under `.build/build-tools`. Each install records
-its prefix, so moving the checkout makes `fetch-build-tools.sh` reinstall them
-instead of keeping tools that point at the old location.
-
-`runtime-lock.json` is the source of truth: every artifact is HTTPS-only and
-SHA-256 checked, and every runtime is audited before packaging. PHP 7.4 and
-MySQL 5.7 enter a release only with `DEVSTACK_INCLUDE_LEGACY=1` and a passing
-gate (`scripts/gates/php74.sh`, `scripts/gates/mysql57.sh`). Read
-[RuntimeBuild.md](RuntimeBuild.md) before changing the payload.
-
 ## Build directory
 
 | Path | Contents | Default cleanup |
 | --- | --- | --- |
-| `.build/Runtimes` | Signed runtime payload; required by preview and release. | kept |
-| `.build/runtime-cache` | Pinned source archives; also shipped as `CorrespondingSources`. | kept |
-| `.build/runtime-dependencies` | Rebuilt dependency prefixes for runtime builds. | kept (`--deep` removes) |
-| `.build/build-tools`, `build-tools-cache` | Pinned host toolchain and its archives. | kept (`--deep` removes) |
-| `.build/runtime-work` | PHP 7.4 source/build tree for the legacy feasibility gate. | kept (`--deep` removes) |
-| `.build/runtime-test-fixtures`, `build-tools-work` | Scratch build trees. | removed |
 | `.build/out` | SwiftPM/Xcode build state and products; release DMGs live in `out/Products/Release`, ad-hoc images in `out/Products/Release/adhoc`. | newest release DMG kept; ad-hoc images removed (`--deep` also prunes caches) |
+| `.build/artifacts` | Binary packages SwiftPM downloaded, among them Sparkle and its tools. | kept |
 | `.build/logs` | Packaging history; `package-latest.log` points at the last run. | old logs removed |
 
 `scripts/clean-build.sh` prunes generated state without touching sources or
@@ -229,23 +190,19 @@ user data (it never goes near `~/Library/Application Support/DevStack`):
 
 ```sh
 scripts/clean-build.sh          # release history, staging, scratch trees, stale logs
-scripts/clean-build.sh --deep   # also drop rebuild caches; re-run verify-sources.sh before packaging
-scripts/clean-build.sh --all    # remove .build entirely; runtimes must be rebuilt
+scripts/clean-build.sh --deep   # also drop SwiftPM caches and runtime builds from before packs
+scripts/clean-build.sh --all    # remove .build entirely
 ```
-
-On the current development machine the default mode reduced `.build` from
-44.3 GiB to 3.7 GiB.
 
 ## Troubleshooting
 
 - `hdiutil` deprecation warnings during DMG creation are cosmetic; the layout
   still builds correctly.
-- `Runtime payload is missing: .../Runtimes` — build the payload first.
+- `No runtime packs are pinned` — pin the published packs first
+  (`scripts/pin-runtime.sh`).
 - Notarization rejected: check `xcrun notarytool history --keychain-profile DevStack`
   and the submission log; common causes are a missing secure timestamp,
   unsigned nested binaries, or a stale profile.
-- Exit 72, licence compliance: run `scripts/verify-sources.sh`, then
-  `scripts/collect-licenses.py notices ThirdPartyNotices`, and package again.
 - Helper reports unauthorized requests: the app and helper must share one Team
   ID. `package-release.sh` fails early on a mismatch; an ad-hoc preview build
   cannot use the helper by design.

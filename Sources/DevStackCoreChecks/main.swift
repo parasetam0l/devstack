@@ -12,33 +12,6 @@ private struct RuntimeLockCheck: Decodable {
     var runtimes: [RuntimeManifest]
 }
 
-private struct DependencyLockCheck: Decodable {
-    var schemaVersion: Int
-    var sources: [DependencySourceCheck]
-}
-
-private struct BuildToolsLockCheck: Decodable {
-    var schemaVersion: Int
-    var tools: [BuildToolCheck]
-}
-
-private struct BuildToolCheck: Decodable {
-    var id: String
-    var version: String
-    var kind: String
-    var url: URL
-    var sha256: String
-}
-
-private struct DependencySourceCheck: Decodable {
-    var id: String
-    var version: String
-    var url: URL
-    var sha256: String
-    var license: String
-    var targets: [String]
-}
-
 private func expect(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
     guard try condition() else { throw CheckFailure(description: message) }
 }
@@ -68,22 +41,6 @@ enum DevStackCoreChecks {
         try expect(runtimeLock.schemaVersion == 1, "Unsupported runtime lock schema")
         try expect(Set(runtimeLock.runtimes.map(\.id)).count == runtimeLock.runtimes.count, "Runtime lock contains duplicate IDs")
         try expect(runtimeLock.runtimes.allSatisfy { $0.source.sha256.count == 64 }, "Runtime source checksum is malformed")
-
-        let dependencyLockURL = repositoryRoot.appendingPathComponent("Dependencies/dependency-lock.json")
-        let dependencyLock = try JSONDecoder().decode(DependencyLockCheck.self, from: Data(contentsOf: dependencyLockURL))
-        try expect(dependencyLock.schemaVersion == 1, "Unsupported dependency lock schema")
-        try expect(Set(dependencyLock.sources.map(\.id)).count == dependencyLock.sources.count, "Dependency lock contains duplicate IDs")
-        try expect(dependencyLock.sources.allSatisfy { $0.sha256.count == 64 }, "Dependency source checksum is malformed")
-        try expect(dependencyLock.sources.allSatisfy { $0.url.scheme == "https" }, "Dependency source is not HTTPS")
-        try expect(dependencyLock.sources.allSatisfy { !$0.version.isEmpty && !$0.license.isEmpty && !$0.targets.isEmpty }, "Dependency source metadata is incomplete")
-
-        let buildToolsLockURL = repositoryRoot.appendingPathComponent("Dependencies/build-tools-lock.json")
-        let buildToolsLock = try JSONDecoder().decode(BuildToolsLockCheck.self, from: Data(contentsOf: buildToolsLockURL))
-        try expect(buildToolsLock.schemaVersion == 1, "Unsupported build-tools lock schema")
-        try expect(Set(buildToolsLock.tools.map(\.id)).count == buildToolsLock.tools.count, "Build-tools lock contains duplicate IDs")
-        try expect(buildToolsLock.tools.allSatisfy { $0.sha256.count == 64 }, "Build-tool checksum is malformed")
-        try expect(buildToolsLock.tools.allSatisfy { $0.url.scheme == "https" }, "Build-tool source is not HTTPS")
-        try expect(buildToolsLock.tools.allSatisfy { !$0.version.isEmpty && !$0.kind.isEmpty }, "Build-tool metadata is incomplete")
 
         try expect(
             HostnameValidator.validate(" Example.TEST. ") == "example.test",
