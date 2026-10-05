@@ -49,7 +49,7 @@ updates. A file still being written must have its size read with
 `bin/mysql` and `bin/mysqldump` point at Homebrew's MariaDB:
 
 ```sh
-.build/debug/DevStack --ui-review sites --migration-e2e /path/to/fake/Applications [--twice]
+scripts/ui-review.sh --ui-review sites --migration-e2e /path/to/fake/Applications [--twice]
 ```
 
 That imports into a throwaway DevStack: its own folders, high ports, the
@@ -66,10 +66,11 @@ To reproduce an XAMPP updated without `mysql_upgrade`, make the fixture's
 data look like 10.1's: in `mysql.event` and `mysql.proc`, give `sql_mode`
 the older SET without `EMPTY_STRING_IS_NULL`, `SIMULTANEOUS_ASSIGNMENT` and
 `TIME_ROUND_FRACTIONAL`; drop `mysql.proc.aggregate`; and write
-`10.1.8-MariaDB` into the upgrade info file. Screenshots of each wizard step:
+`10.1.8-MariaDB` into the upgrade info file. Screenshots of each wizard step
+(the script builds with the SDK version that gives the Liquid Glass look):
 
 ```sh
-.build/debug/DevStack --ui-review sites --pages sites --installed --migration source|check|choose|settings|importing|results --snapshot DIR
+scripts/ui-review.sh --ui-review sites --pages sites --installed --migration source|check|choose|settings|importing|results --snapshot DIR
 ```
 
 ## Adding a source
