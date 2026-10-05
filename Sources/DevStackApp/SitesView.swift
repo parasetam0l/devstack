@@ -16,6 +16,7 @@ struct SitesView: View {
                     Text("Add a project folder to serve it at its own local domain, with its own PHP version and HTTPS.")
                 } actions: {
                     Button("New Site…") { state.editingSite = newSite() }
+                    Button("Import from Another App…") { model.presentMigrationWizard() }
                 }
             } else if filteredSites.isEmpty {
                 ContentUnavailableView.search(text: state.search)
@@ -34,6 +35,10 @@ struct SitesView: View {
         .toolbar {
             // Its own glass capsule, apart from the stack controls.
             if #available(macOS 26, *) { ToolbarSpacer(.fixed) }
+            ToolbarItem {
+                Button { model.presentMigrationWizard() } label: { Label("Import", systemImage: "square.and.arrow.down") }
+                    .help("Import projects and databases from XAMPP")
+            }
             ToolbarItem {
                 Button { state.editingSite = newSite() } label: { Label("New Site", systemImage: "plus") }
                     .help("Add a site (⌘N)")

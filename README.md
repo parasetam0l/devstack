@@ -37,6 +37,8 @@ DEVSTACK_NOTARY_PROFILE=DevStack \
 
 - [Documentation/Building.md](Documentation/Building.md) — compile, preview,
   signed DMG, runtime pack pinning, build directory layout and cleanup.
+- [Documentation/Importing.md](Documentation/Importing.md) — importing
+  projects and databases from XAMPP, and adding other sources.
 - [devstack-runtimes](https://github.com/parasetam0l/devstack-runtimes) —
   how the runtime packs are built, tested and published.
 - [docs/RELEASING.md](docs/RELEASING.md) — signed releases from GitHub

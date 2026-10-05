@@ -19,6 +19,8 @@ public struct DiagnosticContext: Sendable {
     public var startAtLogin: Bool
     /// macOS waits for the user to approve the login item.
     public var loginItemNeedsApproval: Bool
+    /// The selected MySQL version's root password.
+    public var mysqlRootPassword: String
 
     public init(
         paths: DevStackPaths,
@@ -36,7 +38,8 @@ public struct DiagnosticContext: Sendable {
         ports: ServicePorts = ServicePorts(),
         localNetworkAccess: Bool = false,
         startAtLogin: Bool = false,
-        loginItemNeedsApproval: Bool = false
+        loginItemNeedsApproval: Bool = false,
+        mysqlRootPassword: String = "root"
     ) {
         self.paths = paths
         self.runtimeManifests = runtimeManifests
@@ -54,6 +57,7 @@ public struct DiagnosticContext: Sendable {
         self.startAtLogin = startAtLogin
         self.loginItemNeedsApproval = loginItemNeedsApproval
         self.requiredRuntimeIDs = requiredRuntimeIDs
+        self.mysqlRootPassword = mysqlRootPassword
     }
 }
 
@@ -560,7 +564,8 @@ public struct DevStackDoctor: Sendable {
         }
         let initialized = FileManager.default.fileExists(atPath: selectedDirectory.appendingPathComponent("mysql").path)
         let manager = DatabaseManager(paths: context.paths, runtimeRoot: context.paths.runtimeDirectory(context.selectedDatabase.rawValue).deletingLastPathComponent(), runner: runner,
-                                      opensslRuntime: context.paths.runtimeDirectory("openssl-3.5"), port: context.ports.mysqlListen)
+                                      opensslRuntime: context.paths.runtimeDirectory("openssl-3.5"), port: context.ports.mysqlListen,
+                                      rootPassword: context.mysqlRootPassword)
         let selectedService: ServiceKind = context.selectedDatabase == .mysql57 ? .mysql57 : .mysql84
         let running = context.serviceStates.first(where: { $0.service == selectedService })?.phase == .running
         let reachable = running ? manager.ping(context.selectedDatabase) : false

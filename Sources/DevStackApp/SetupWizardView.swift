@@ -17,6 +17,7 @@ struct SetupWizardView: View {
     @State private var startingStack = false
     @State private var optionalRuntimes: Set<String> = []
     @State private var runtimeError: String?
+    @State private var xamppFound = false
 
     enum Step: Int, CaseIterable {
         case welcome, runtimes, helper, certificate, ports, done
@@ -348,8 +349,28 @@ struct SetupWizardView: View {
                     Text("Or any time from the toolbar.")
                 }
             }
+            if xamppFound {
+                Section {
+                    LabeledContent {
+                        Button("Import…") {
+                            Task {
+                                await model.completeSetupWizard()
+                                dismiss()
+                                // One sheet closes before the next opens.
+                                try? await Task.sleep(for: .milliseconds(500))
+                                model.presentMigrationWizard()
+                            }
+                        }
+                        .disabled(model.isBusy || startingStack)
+                    } label: {
+                        Text("Import from XAMPP")
+                        Text("Bring its projects and databases into DevStack. XAMPP itself is not changed.")
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
+        .task { xamppFound = !XAMPPInstallation.find().isEmpty }
     }
 
     // MARK: - Pieces

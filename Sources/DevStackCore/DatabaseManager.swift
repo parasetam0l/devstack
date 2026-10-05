@@ -6,6 +6,7 @@ public enum DatabaseManagerError: LocalizedError, Sendable {
     case unsafeDatabaseName(String)
     case sourceFileMissing(String)
     case dataDirectoryMissing(String)
+    case unusablePassword
 
     public var errorDescription: String? {
         switch self {
@@ -13,6 +14,7 @@ public enum DatabaseManagerError: LocalizedError, Sendable {
         case .unsafeDatabaseName(let name): "Invalid database name: \(name)"
         case .sourceFileMissing(let path): "SQL source file does not exist: \(path)"
         case .dataDirectoryMissing(let path): "Database data directory does not exist: \(path)"
+        case .unusablePassword: "The MySQL root password may only use printable characters without quotes, backslashes, backticks or $."
         }
     }
 }
@@ -21,14 +23,18 @@ public struct DatabaseManager: Sendable {
     public let paths: DevStackPaths
     public let runtimeRoot: URL
     public let port: UInt16
+    /// The development root password; empty for none.
+    public let rootPassword: String
     private let runner: ProcessRunner
     private let environment: [String: String]
 
-    public init(paths: DevStackPaths, runtimeRoot: URL, runner: ProcessRunner = ProcessRunner(), opensslRuntime: URL? = nil, port: UInt16 = ServicePorts.mysqlFallback) {
+    public init(paths: DevStackPaths, runtimeRoot: URL, runner: ProcessRunner = ProcessRunner(), opensslRuntime: URL? = nil,
+                port: UInt16 = ServicePorts.mysqlFallback, rootPassword: String = "root") {
         self.paths = paths
         self.runtimeRoot = runtimeRoot
         self.runner = runner
         self.port = port
+        self.rootPassword = rootPassword
         self.environment = RuntimeEnvironment.openssl(at: opensslRuntime ?? runtimeRoot.appendingPathComponent("openssl-3.5"))
     }
 
@@ -56,9 +62,10 @@ public struct DatabaseManager: Sendable {
         guard engine != .none else { throw DatabaseManagerError.engineNotSelected }
         let marker = dataDirectory(for: engine).appendingPathComponent(".devstack-root-configured")
         if ping(engine) { try AtomicFileWriter.write("configured\n", to: marker, permissions: 0o600); return }
+        guard MySQLSettings.isUsablePassword(rootPassword) || rootPassword.isEmpty else { throw DatabaseManagerError.unusablePassword }
         let sql = engine == .mysql84
-            ? "ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY 'root'; FLUSH PRIVILEGES;"
-            : "ALTER USER 'root'@'localhost' IDENTIFIED BY 'root'; FLUSH PRIVILEGES;"
+            ? "ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '\(rootPassword)'; FLUSH PRIVILEGES;"
+            : "ALTER USER 'root'@'localhost' IDENTIFIED BY '\(rootPassword)'; FLUSH PRIVILEGES;"
         _ = try runner.runChecked(
             executable: client(engine, name: "mysql"),
             arguments: connectionArguments(engine, passwordConfigured: false) + ["--execute", sql],
@@ -72,7 +79,7 @@ public struct DatabaseManager: Sendable {
         guard let result = try? runner.run(
             executable: client(engine, name: "mysql"),
             arguments: connectionArguments(engine, passwordConfigured: true) + ["--batch", "--skip-column-names", "--execute", "SELECT 1"],
-            environment: environment.merging(["MYSQL_PWD": "root"]) { _, new in new },
+            environment: passwordEnvironment,
             timeout: 5
         ) else { return false }
         return result.exitCode == 0 && result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
@@ -92,7 +99,7 @@ public struct DatabaseManager: Sendable {
             executable: client(engine, name: "mysqldump"),
             arguments: arguments,
             standardOutputFile: staged,
-            environment: environment.merging(["MYSQL_PWD": "root"]) { _, new in new },
+            environment: passwordEnvironment,
             timeout: 3_600
         )
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staged.path)
@@ -110,7 +117,7 @@ public struct DatabaseManager: Sendable {
             executable: client(engine, name: "mysql"),
             arguments: arguments,
             standardInputFile: source,
-            environment: environment.merging(["MYSQL_PWD": "root"]) { _, new in new },
+            environment: passwordEnvironment,
             timeout: 3_600
         )
     }
@@ -151,6 +158,26 @@ public struct DatabaseManager: Sendable {
         return formatter.string(from: date)
     }
 
+    /// Runs `sql` as root and returns the rows, tab-separated as the
+    /// client prints them in batch mode.
+    public func query(_ engine: DatabaseEngine, _ sql: String, database: String? = nil, timeout: TimeInterval = 600) throws -> [[String]] {
+        guard engine != .none else { throw DatabaseManagerError.engineNotSelected }
+        var arguments = connectionArguments(engine, passwordConfigured: true) + ["--batch", "--skip-column-names", "--default-character-set=utf8mb4", "--execute", sql]
+        if let database { arguments.append(database) }
+        let result = try runner.runChecked(executable: client(engine, name: "mysql"), arguments: arguments, environment: passwordEnvironment, timeout: timeout)
+        return MySQLBatchOutput.rows(result.standardOutput)
+    }
+
+    /// The client and the arguments that connect it as root, for callers that
+    /// stream SQL themselves.
+    public func clientInvocation(_ engine: DatabaseEngine) -> (executable: URL, arguments: [String], environment: [String: String]) {
+        (client(engine, name: "mysql"), connectionArguments(engine, passwordConfigured: true), passwordEnvironment)
+    }
+
+    private var passwordEnvironment: [String: String] {
+        rootPassword.isEmpty ? environment : environment.merging(["MYSQL_PWD": rootPassword]) { _, new in new }
+    }
+
     private func client(_ engine: DatabaseEngine, name: String) -> URL {
         runtimeRoot.appendingPathComponent("\(engine.rawValue)/bin/\(name)")
     }
@@ -164,7 +191,7 @@ public struct DatabaseManager: Sendable {
             "--character-sets-dir=\(runtimeRoot.appendingPathComponent("\(engine.rawValue)/share/charsets").path)",
             "--plugin-dir=\(runtimeRoot.appendingPathComponent("\(engine.rawValue)/lib/plugin").path)",
             "--protocol=TCP", "--host=127.0.0.1", "--port=\(port)", "--user=root"]
-        if !passwordConfigured { result.append("--skip-password") }
+        if !passwordConfigured || rootPassword.isEmpty { result.append("--skip-password") }
         return result
     }
 
@@ -173,5 +200,37 @@ public struct DatabaseManager: Sendable {
         guard !name.isEmpty, name.unicodeScalars.allSatisfy(allowed.contains) else {
             throw DatabaseManagerError.unsafeDatabaseName(name)
         }
+    }
+}
+
+/// Rows of the mysql client's batch output: one line per row, tab-separated,
+/// with tabs, newlines and backslashes in values escaped.
+public enum MySQLBatchOutput {
+    public static func rows(_ output: String) -> [[String]] {
+        output.split(separator: "\n", omittingEmptySubsequences: true).map { line in
+            line.split(separator: "\t", omittingEmptySubsequences: false).map { unescape(String($0)) }
+        }
+    }
+
+    static func unescape(_ value: String) -> String {
+        guard value.contains("\\") else { return value }
+        var result = ""
+        var escaping = false
+        for character in value {
+            if escaping {
+                switch character {
+                case "n": result.append("\n")
+                case "t": result.append("\t")
+                case "0": result.append("\0")
+                default: result.append(character)
+                }
+                escaping = false
+            } else if character == "\\" {
+                escaping = true
+            } else {
+                result.append(character)
+            }
+        }
+        return result
     }
 }

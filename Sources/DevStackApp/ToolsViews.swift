@@ -105,7 +105,9 @@ struct DatabaseView: View {
     private var engineName: String { state.postgreSQL ? "PostgreSQL" : "MySQL" }
     private var port: UInt16 { state.postgreSQL ? model.configuration.ports.postgresqlListen : model.configuration.ports.mysqlListen }
     private var user: String { state.postgreSQL ? "devstack" : "root" }
-    private var password: String { state.postgreSQL ? "devstack" : "root" }
+    private var password: String { state.postgreSQL ? "devstack" : model.configuration.mysql(model.configuration.selectedDatabase).rootPassword }
+    /// user:password@ for URLs, without the colon when there is no password.
+    private var credentials: String { password.isEmpty ? user : "\(user):\(password)" }
 
     var body: some View {
         PanelPage {
@@ -116,10 +118,10 @@ struct DatabaseView: View {
                 ValueRow(label: "Port", value: String(port))
                 if state.postgreSQL { ValueRow(label: "Database", value: "postgres") }
                 ValueRow(label: "Username", value: user)
-                ValueRow(label: "Password", value: password)
+                ValueRow(label: "Password", value: password, placeholder: "None")
                 ValueRow(label: "Socket", value: state.postgreSQL ? model.paths.sockets.path : model.paths.sockets.appendingPathComponent("mysql.sock").path)
-                ValueRow(label: "URL", value: state.postgreSQL ? "postgresql://\(user):\(password)@127.0.0.1:\(port)/postgres" : "mysql://\(user):\(password)@127.0.0.1:\(port)")
-                ValueRow(label: "Shell", value: state.postgreSQL ? "psql postgresql://\(user):\(password)@127.0.0.1:\(port)/postgres" : "mysql -h 127.0.0.1 -P \(port) -u \(user) -p\(password)")
+                ValueRow(label: "URL", value: state.postgreSQL ? "postgresql://\(credentials)@127.0.0.1:\(port)/postgres" : "mysql://\(credentials)@127.0.0.1:\(port)")
+                ValueRow(label: "Shell", value: state.postgreSQL ? "psql postgresql://\(credentials)@127.0.0.1:\(port)/postgres" : "mysql -h 127.0.0.1 -P \(port) -u \(user)\(password.isEmpty ? "" : " -p\(password)")")
             } accessory: {
                 Button { Pasteboard.copy(dotEnv) } label: { Label("Copy .env", systemImage: "doc.on.doc") }
                     .buttonStyle(.borderless)
@@ -180,7 +182,7 @@ struct DatabaseView: View {
             Button("Back Up and Reset", role: .destructive) { Task { await model.resetDatabase() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("DevStack backs up MySQL, archives its data folder, and creates a clean database with root/root credentials.")
+            Text("DevStack backs up MySQL, archives its data folder, and creates a clean database where root signs in \(password.isEmpty ? "without a password" : "with the password \(password)").")
         }
     }
 

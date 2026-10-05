@@ -117,16 +117,22 @@ struct ValueRow: View {
     let label: String
     let value: String
     var revealsFile = false
+    /// Shown instead of an empty value; copying still copies the empty value.
+    var placeholder: String?
 
     var body: some View {
         PanelRow {
             Text(label).foregroundStyle(.secondary).frame(width: 96, alignment: .leading)
-            Text(value)
-                .font(.callout.monospaced())
-                .textSelection(.enabled)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .help(value)
+            if value.isEmpty, let placeholder {
+                Text(placeholder).foregroundStyle(.tertiary)
+            } else {
+                Text(value)
+                    .font(.callout.monospaced())
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(value)
+            }
             Spacer(minLength: 8)
             if revealsFile {
                 IconButton(title: "Show in Finder", symbol: "folder") {

@@ -27,6 +27,7 @@ struct DevStackApp: App {
             }
             CommandGroup(replacing: .newItem) {
                 Button("New Site…") { model.requestNewSite() }.keyboardShortcut("n")
+                Button("Import from Another App…") { model.presentMigrationWizard() }
             }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.selectedSection = .settings }.keyboardShortcut(",")

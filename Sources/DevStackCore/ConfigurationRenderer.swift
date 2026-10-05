@@ -25,6 +25,10 @@ public struct ConfigurationRenderer: Sendable {
     /// IANA zone for PHP's date.timezone; defaults to the Mac's zone so dates
     /// in pages and logs match the clock the developer reads.
     public let timeZone: String
+    /// Settings per MySQL version, keyed by the engine's raw value.
+    public let mysqlSettings: [String: MySQLSettings]
+    /// The MySQL version the web tools sign in to.
+    public let selectedDatabase: DatabaseEngine
 
     public init(
         paths: DevStackPaths,
@@ -34,7 +38,9 @@ public struct ConfigurationRenderer: Sendable {
         localNetworkAccess: Bool = false,
         userName: String = NSUserName(),
         groupName: String = "staff",
-        timeZone: String = TimeZone.current.identifier
+        timeZone: String = TimeZone.current.identifier,
+        mysqlSettings: [String: MySQLSettings] = [:],
+        selectedDatabase: DatabaseEngine = .mysql84
     ) {
         self.paths = paths
         self.runtimeRoot = runtimeRoot
@@ -44,6 +50,17 @@ public struct ConfigurationRenderer: Sendable {
         self.userName = userName
         self.groupName = groupName
         self.timeZone = timeZone
+        self.mysqlSettings = mysqlSettings
+        self.selectedDatabase = selectedDatabase
+    }
+
+    private func mysql(_ engine: DatabaseEngine) -> MySQLSettings { mysqlSettings[engine.rawValue] ?? MySQLSettings() }
+
+    /// The root password of the MySQL version the web tools use, safe to
+    /// place in a single-quoted PHP string.
+    private var toolPassword: String {
+        let password = mysql(selectedDatabase).rootPassword
+        return MySQLSettings.isUsablePassword(password) ? password : "root"
     }
 
     private var listenDirectives: String {
@@ -247,8 +264,22 @@ public struct ConfigurationRenderer: Sendable {
         symbolic-links=0
         secure-file-priv=NULL
         max_allowed_packet=64M
+        # Imported dumps and framework migrations create stored functions;
+        # with binary logging on, MySQL refuses most of them otherwise.
+        log_bin_trust_function_creators=1
         \(engine == .mysql84 ? "mysqlx=0" : "")
+        \(mysqlExtraOptions(engine))
         """
+    }
+
+    private func mysqlExtraOptions(_ engine: DatabaseEngine) -> String {
+        let settings = mysql(engine)
+        var lines: [String] = []
+        if let mode = settings.sqlMode {
+            lines.append("sql-mode=\"\(MySQLSettings.sqlMode(mode, for: engine))\"")
+        }
+        if engine == .mysql84, settings.nativePassword { lines.append("mysql-native-password=ON") }
+        return lines.joined(separator: "\n")
     }
 
     public func mailpitArguments() -> [String] {
@@ -539,8 +570,8 @@ public struct ConfigurationRenderer: Sendable {
         $cfg['Servers'][1]['host'] = '127.0.0.1';
         $cfg['Servers'][1]['port'] = '\(ports.mysqlListen)';
         $cfg['Servers'][1]['user'] = 'root';
-        $cfg['Servers'][1]['password'] = 'root';
-        $cfg['Servers'][1]['AllowNoPassword'] = false;
+        $cfg['Servers'][1]['password'] = '\(toolPassword)';
+        $cfg['Servers'][1]['AllowNoPassword'] = \(toolPassword.isEmpty ? "true" : "false");
         $cfg['VersionCheck'] = false;
         """
     }
@@ -558,7 +589,7 @@ public struct ConfigurationRenderer: Sendable {
                 function credentials() {
                     return isset($_GET['pgsql'])
                         ? ['127.0.0.1:\(ports.postgresqlListen)', 'devstack', 'devstack']
-                        : ['127.0.0.1:\(ports.mysqlListen)', 'root', 'root'];
+                        : ['127.0.0.1:\(ports.mysqlListen)', 'root', '\(toolPassword)'];
                 }
                 function login($login, $password) {
                     return true;
@@ -573,7 +604,7 @@ public struct ConfigurationRenderer: Sendable {
         $driver = isset($_GET['pgsql']) ? 'pgsql' : 'server';
         $server = (string) ($_GET[$driver] ?? '');
         $username = (string) ($_GET['username'] ?? '');
-        $_SESSION['pwds'][$driver][$server][$username] = isset($_GET['pgsql']) ? 'devstack' : 'root';
+        $_SESSION['pwds'][$driver][$server][$username] = isset($_GET['pgsql']) ? 'devstack' : '\(toolPassword)';
         session_write_close();
 
         include '\(indexPath)';

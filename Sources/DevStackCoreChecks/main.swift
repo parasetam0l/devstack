@@ -779,6 +779,7 @@ enum DevStackCoreChecks {
         let logEntries = LogFiles.entries(fileNames: ["php-8.5-fpm.log", "site-localhost-error.log", "apache-error.log", "notes.txt", "site-gone-access.log"], sites: [defaultSite])
         try expect(logEntries.map(\.title) == ["Apache — errors", "PHP 8.5 — FPM", "localhost — errors", "site-gone-access.log"], "Log files were not named and grouped")
         try expect(logEntries.first?.service == .apache && LogFiles.primaryLog(for: .php85) == "php-8.5-fpm.log", "Log services were not resolved")
+        try migrationChecks()
         print("DevStackCoreChecks: all checks passed")
     }
 }
@@ -894,4 +895,196 @@ private final class ProgressTotal: @unchecked Sendable {
     private let lock = NSLock()
     private var bytes: Int64 = 0
     func set(_ value: Int64) { lock.lock(); bytes = value; lock.unlock() }
+}
+
+// MARK: - Importing from other apps
+
+private func migrationChecks() throws {
+    let old = try JSONDecoder().decode(AppConfiguration.self, from: Data(#"{"schemaVersion":5}"#.utf8))
+    try expect(old.mysql(.mysql84).rootPassword == "root" && old.mysql(.mysql84).sqlMode == nil, "Existing installations lost root/root")
+    var configured = AppConfiguration()
+    configured.mysqlSettings["mysql-8.4"] = MySQLSettings(rootPassword: "", sqlMode: "STRICT_TRANS_TABLES,NO_AUTO_CREATE_USER", nativePassword: true)
+    try expect(try JSONDecoder().decode(AppConfiguration.self, from: JSONEncoder().encode(configured)) == configured, "MySQL settings do not survive relaunch")
+    try expect(MySQLSettings.sqlMode("STRICT_TRANS_TABLES,NO_AUTO_CREATE_USER,SIMULTANEOUS_ASSIGNMENT", for: .mysql84) == "STRICT_TRANS_TABLES", "MariaDB-only SQL modes reached MySQL 8.4")
+    try expect(MySQLSettings.sqlMode("NO_AUTO_CREATE_USER", for: .mysql57) == "NO_AUTO_CREATE_USER", "MySQL 5.7 lost a mode it knows")
+    try expect(MySQLSettings.isUsablePassword("") && MySQLSettings.isUsablePassword("root") && !MySQLSettings.isUsablePassword("a'b") && !MySQLSettings.isUsablePassword("a$b"),
+               "Root password character rules are wrong")
+
+    let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("devstack-migration-checks-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: scratch) }
+    let paths = DevStackPaths(applicationSupport: scratch.appendingPathComponent("support"), logs: scratch.appendingPathComponent("logs"), defaultSiteRoot: scratch.appendingPathComponent("localhost"))
+    let renderer = ConfigurationRenderer(paths: paths, runtimeRoot: scratch, mysqlSettings: configured.mysqlSettings, selectedDatabase: .mysql84)
+    let mysqlConfiguration = renderer.mysqlConfiguration(engine: .mysql84, baseDirectory: scratch)
+    try expect(mysqlConfiguration.contains("sql-mode=\"STRICT_TRANS_TABLES\"") && mysqlConfiguration.contains("mysql-native-password=ON"), "MySQL settings were not rendered")
+    try expect(!renderer.mysqlConfiguration(engine: .mysql57, baseDirectory: scratch).contains("sql-mode"), "MySQL 5.7 took 8.4's settings")
+    let phpMyAdmin = try renderer.phpMyAdminConfiguration(cookieSecret: String(repeating: "a", count: 32))
+    try expect(phpMyAdmin.contains("['password'] = '';") && phpMyAdmin.contains("['AllowNoPassword'] = true;"), "phpMyAdmin does not sign in without a password")
+
+    // php.ini, my.cnf and Apache files.
+    let ini = INIFile.settings("[client]\nport=3306\n[mysqld]\n; comment\nuser=mysql\ndatadir = \"/data dir\"\nskip-networking\nport=3306 # trailing\n", section: "mysqld")
+    try expect(ini.map(\.key) == ["user", "datadir", "skip-networking", "port"] && ini[1].value == "/data dir" && ini[3].value == "3306", "my.cnf was misread")
+    try expect(ApacheConfiguration.includesVirtualHosts("#Include etc/extra/httpd-vhosts.conf\n") == false
+               && ApacheConfiguration.includesVirtualHosts("Include etc/extra/httpd-vhosts.conf\n"), "The virtual hosts include was misread")
+    let hosts = ApacheConfiguration.virtualHosts("""
+        <VirtualHost *:80>
+            ServerName dummy-host.example.com
+            DocumentRoot "/docs/dummy"
+        </VirtualHost>
+        <VirtualHost *:80>
+            ServerName Shop.Local:80
+            ServerAlias www.shop.local
+            DocumentRoot "/htdocs/shop/public"
+        </VirtualHost>
+        # <VirtualHost *:80>
+        <VirtualHost *:443>
+            ServerName shop.local
+            DocumentRoot "/htdocs/shop/public"
+        </VirtualHost>
+        """)
+    try expect(hosts == [ApacheVirtualHost(serverName: "shop.local", aliases: ["www.shop.local"], documentRoot: "/htdocs/shop/public")], "Virtual hosts were misread")
+
+    // A small XAMPP installation.
+    let applications = scratch.appendingPathComponent("Applications")
+    let root = applications.appendingPathComponent("XAMPP/xamppfiles")
+    let htdocs = root.appendingPathComponent("htdocs")
+    let files: [String: String] = [
+        "xampp": "", "properties.ini": "[General]\nbase_stack_version=8.2.4-0\n",
+        "etc/httpd.conf": "Include etc/extra/httpd-vhosts.conf\n",
+        "etc/extra/httpd-vhosts.conf": "<VirtualHost *:80>\nServerName crm.local\nDocumentRoot \"\(htdocs.path)/crm/public\"\n</VirtualHost>\n<VirtualHost *:80>\nServerName api.dev\nDocumentRoot \"\(scratch.path)/api/public\"\n</VirtualHost>\n",
+        "etc/my.cnf": "[mysqld]\ndatadir=\(root.path)/var/mysql\n",
+        "etc/php.ini": "memory_limit=1G\nupload_max_filesize=8M\nmax_execution_time=0\n",
+        "htdocs/index.php": "<?php header('Location: '.$uri.'/dashboard/');",
+        "htdocs/dashboard/index.html": "", "htdocs/favicon.ico": "", "htdocs/notes.php": "<?php",
+        "htdocs/crm/index.php": "<?php", "htdocs/crm/public/index.php": "<?php",
+        "htdocs/shop kopyası 2/index.php": "<?php", "htdocs/blog/wp-config.php": "<?php define( 'DB_NAME', 'blog' );",
+        "htdocs/app/artisan": "", "htdocs/app/public/index.php": "<?php", "htdocs/static/index.html": "<html>",
+        "var/mysql/ibdata1": "data", "var/mysql/shop/products.ibd": "", "var/mysql/my@002ddb/t.frm": "",
+        "var/mysql/mysql/user.MAD": "", "var/mysql/phpmyadmin/pma.frm": "", "var/mysql/test/db.opt": "",
+        "../../../api/public/index.php": "<?php"
+    ]
+    for (path, contents) in files {
+        let url = root.appendingPathComponent(path)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(contents.utf8).write(to: url)
+    }
+    let installations = XAMPPInstallation.find(applications: applications)
+    try expect(installations.count == 1 && installations[0].version == "8.2.4" && installations[0].phpVersion == "8.2", "XAMPP was not found")
+    let inventory = XAMPPScanner.scan(installations[0])
+    func project(_ name: String) -> MigrationProject? { inventory.projects.first { $0.name == name } }
+    try expect(Set(inventory.skippedDefaults) == ["dashboard", "favicon.ico", "index.php"], "XAMPP's own pages were imported: \(inventory.skippedDefaults)")
+    try expect(project("app")?.framework == .laravel && project("app")?.webRoot == "public", "Laravel's web root was missed")
+    try expect(project("blog")?.framework == .wordpress && project("static")?.framework == .staticSite, "Frameworks were misread")
+    try expect(project("crm")?.virtualHost == "crm.local" && project("crm")?.webRoot == "public", "A virtual host in htdocs was not attached to its folder")
+    try expect(project("api")?.kind == .external && project("api")?.webRoot == "public" && project("api")?.virtualHost == "api.dev", "A virtual host outside htdocs was missed")
+    try expect(inventory.projects.contains { $0.kind == .looseFiles(["notes.php"]) }, "Loose files in htdocs were missed")
+    try expect(inventory.databases.map(\.name) == ["my-db", "shop", "test"] && inventory.databases.last?.isSample == true, "Databases were misread: \(inventory.databases.map(\.name))")
+    try expect(project("shop kopyası 2")?.originalURLs.first == "http://localhost/shop%20kopyas%C4%B1%202", "A folder's XAMPP address was misread")
+
+    try expect(MigrationNaming.slug("atasarim-v2 kopyası 10") == "atasarim-v2-kopyasi-10" && MigrationNaming.slug("Çağrı Ödeme!") == "cagri-odeme", "Folder names were not turned into hostnames")
+    try expect(MigrationNaming.hostname(for: project("crm")!, taken: []) == "crm.localhost", ".local hosts did not become .localhost")
+    try expect(MigrationNaming.hostname(for: project("app")!, taken: ["app.localhost"]) == "app-2.localhost", "Hostnames were not made unique")
+    var tested = project("crm")!
+    tested.virtualHost = "www.crm.test"
+    try expect(MigrationNaming.hostname(for: tested, taken: []) == "www.crm.test", ".test hosts were renamed")
+    try expect(MigrationNaming.databaseName("shop", taken: ["shop", "shop_xampp"]) == "shop_xampp2", "Database names clashed")
+    try expect(MigrationNaming.folder(named: "crm", in: htdocs).lastPathComponent == "crm-xampp", "Folder names clashed")
+    try expect(DatabaseFolderName.decode("my@002ddb") == "my-db" && DatabaseFolderName.encode("my-db") == "my@002ddb", "Database folder names were misread")
+    let available = ["php-7.4", "php-8.4", "php-8.5"]
+    try expect(PHPVersionMapping.runtimeID(for: "8.2", available: available) == "php-8.4" && PHPVersionMapping.runtimeID(for: "5.6", available: available) == "php-7.4"
+               && PHPVersionMapping.runtimeID(for: "8.5", available: available) == "php-8.5" && PHPVersionMapping.runtimeID(for: "9.1", available: available) == "php-8.5",
+               "PHP versions were mapped wrongly")
+    let limits = PHPSettingsImport.overrides(fromPHPINI: "memory_limit=1G\nupload_max_filesize=8M\nmax_execution_time=0\npost_max_size=-1\n")
+    try expect(limits.memoryLimit == "1G" && limits.uploadMaxFilesize == "64M" && limits.maxExecutionTime == 0 && limits.postMaxSize == "-1", "XAMPP's PHP limits were not carried over: \(limits)")
+    try expect(MachO.architectures(of: URL(fileURLWithPath: "/usr/bin/true")).contains("arm64"), "Executable architectures were misread")
+
+    // Copying.
+    let copy = scratch.appendingPathComponent("copy")
+    try FileManager.default.createSymbolicLink(at: htdocs.appendingPathComponent("app/link"), withDestinationURL: htdocs.appendingPathComponent("app/artisan"))
+    let failures = try ProjectCopier.copyFolder(htdocs.appendingPathComponent("app"), to: copy, totals: (3, 0), isCancelled: { false }, progress: { _ in })
+    try expect(failures.isEmpty && FileManager.default.fileExists(atPath: copy.appendingPathComponent("public/index.php").path)
+               && (try? FileManager.default.destinationOfSymbolicLink(atPath: copy.appendingPathComponent("link").path)) != nil, "A project was not copied whole")
+    do {
+        _ = try ProjectCopier.copyFolder(htdocs.appendingPathComponent("crm"), to: scratch.appendingPathComponent("cancelled"), totals: (2, 0), isCancelled: { true }, progress: { _ in })
+        throw CheckFailure(description: "A cancelled copy finished")
+    } catch is CancellationError {
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: scratch.path).filter { $0.hasPrefix(".devstack-import") || $0 == "cancelled" }
+        try expect(leftovers.isEmpty, "A cancelled copy left files behind")
+    }
+
+    // Converting MariaDB exports.
+    func converted(_ lines: [String], _ target: DatabaseEngine = .mysql84) -> [String] {
+        var state = MariaDBDumpConverter.State()
+        return lines.compactMap { MariaDBDumpConverter.convert(line: $0, state: &state, target: target) }
+    }
+    try expect(converted(["/*M!999999\\- enable the sandbox mode */ "]).isEmpty, "MariaDB's sandbox line reached MySQL")
+    let table = [
+        "CREATE TABLE `products` (",
+        "  `id` int(11) NOT NULL AUTO_INCREMENT,",
+        "  `description` text DEFAULT 'it''s none',",
+        "  `notes` text DEFAULT NULL,",
+        "  `sku` char(36) DEFAULT uuid(),",
+        "  `updated` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),",
+        "  `tax` decimal(10,2) GENERATED ALWAYS AS (`price` * 1.2) PERSISTENT,",
+        "  `id2` uuid DEFAULT NULL,",
+        "  `title` varchar(50) COLLATE utf8mb4_unicode_nopad_ci DEFAULT NULL,",
+        "  KEY `t` (`title`) IGNORED,",
+        "  CONSTRAINT `1` FOREIGN KEY (`id`) REFERENCES `x` (`id`),",
+        "  CONSTRAINT `CONSTRAINT_1` CHECK (`id` >= 0)",
+        ") ENGINE=Aria AUTO_INCREMENT=4 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci PAGE_CHECKSUM=1 TRANSACTIONAL=1;"
+    ]
+    let mysql84 = converted(table)
+    try expect(mysql84[2] == "  `description` text DEFAULT ('it''s none')," && mysql84[3] == table[3], "TEXT defaults were not made expressions: \(mysql84[2])")
+    try expect(mysql84[4] == "  `sku` char(36) DEFAULT (uuid()),", "Function defaults were not made expressions: \(mysql84[4])")
+    try expect(mysql84[5] == table[5], "CURRENT_TIMESTAMP defaults changed")
+    try expect(mysql84[6].hasSuffix("STORED,") && mysql84[7] == "  `id2` char(36) DEFAULT NULL,", "MariaDB column types survived")
+    try expect(mysql84[8].contains("utf8mb4_unicode_ci") && mysql84[9] == "  KEY `t` (`title`),", "MariaDB collations or index options survived")
+    try expect(mysql84[10] == "  FOREIGN KEY (`id`) REFERENCES `x` (`id`)," && mysql84[11] == "  CHECK (`id` >= 0)", "Constraint names that clash in MySQL survived")
+    try expect(mysql84[12] == ") ENGINE=InnoDB AUTO_INCREMENT=4 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;", "Aria table options survived: \(mysql84[12])")
+    let mysql57 = converted(table, .mysql57)
+    try expect(mysql57[2] == "  `description` text," && mysql57[4] == "  `sku` char(36),", "MySQL 5.7 kept defaults it cannot hold")
+    try expect(mysql57[12].contains("utf8mb4_unicode_520_ci"), "MySQL 5.7 got an 8.0 collation")
+    try expect(converted(["/*!50013 DEFINER=`app`@`%` SQL SECURITY DEFINER */"]) == ["/*!50013 DEFINER=CURRENT_USER SQL SECURITY DEFINER */"], "Definers were kept")
+    try expect(converted(["/*!50003 SET sql_mode = 'STRICT_TRANS_TABLES,NO_AUTO_CREATE_USER' */ ;"]) == ["/*!50003 SET sql_mode = 'STRICT_TRANS_TABLES' */ ;"], "Routine SQL modes were not filtered")
+    try expect(converted(["DROP SEQUENCE IF EXISTS `s`;", "CREATE SEQUENCE `s` start with 1", "  cache 1000;", "DO SETVAL(`s`, 1, 0);", "SELECT 1;"]) == ["SELECT 1;"], "Sequences reached MySQL")
+    try expect(converted(["/*!100101 SET x=1 */;"]) == ["/*M!100101 SET x=1 */;"], "MariaDB version comments would run in MySQL")
+    try expect(converted(["SET NAMES utf8mb3;"], .mysql57) == ["SET NAMES utf8;"], "MySQL 5.7 got utf8mb3")
+
+    // Rows pass through, except values of generated columns.
+    var state = MariaDBDumpConverter.State()
+    for line in table { _ = MariaDBDumpConverter.convert(line: line, state: &state, target: .mysql84) }
+    let rows = ["INSERT INTO `products` VALUES", "(1,'a, (b)','it''s',NULL,NOW(),3.60,NULL,'DEFINER=`x`@`y`'),", "(2,'\\\\',0x00,'y','2024',1.20,NULL,NULL);", "INSERT INTO `other` VALUES (1,'DEFINER=`x`@`y` ENGINE=Aria');"]
+    let output = rows.map { String(decoding: MariaDBDumpConverter.convert(lineData: Data($0.utf8), state: &state, target: .mysql84, renamed: nil) ?? Data(), as: UTF8.self) }
+    try expect(output[0] == rows[0] && output[1] == "(1,'a, (b)','it''s',NULL,NOW(),DEFAULT,NULL,'DEFINER=`x`@`y`'),"
+               && output[2] == "(2,'\\\\',0x00,'y','2024',DEFAULT,NULL,NULL);" && output[3] == rows[3], "Rows were changed: \(output)")
+
+    let dumpFile = scratch.appendingPathComponent("dump.sql")
+    try Data("SELECT 1;\nCREATE TABLE `x` (\n  `a` int\n);\n".utf8).write(to: dumpFile)
+    if case .statementFailed(let message, let line, let statement) = DatabaseImporter.failure("mysql: [Warning] x\nERROR 1064 (42000) at line 2: You have an error", file: dumpFile) {
+        try expect(message == "You have an error" && line == 2 && statement == "CREATE TABLE `x` (", "An import error was misread")
+    } else { throw CheckFailure(description: "An import error was misread") }
+
+    let before = DatabaseSnapshot(tables: ["a": 2, "b": 1], views: 1, routines: 2)
+    try expect(before.differences(from: DatabaseSnapshot(tables: ["a": 2, "b": 1], views: 1, routines: 2)).isEmpty
+               && before.differences(from: DatabaseSnapshot(tables: ["a": 1], views: 1, routines: 1)) == ["Table a has 1 of 2 rows", "Table b is missing", "1 of 2 procedures and functions are missing"],
+               "Database differences were misreported")
+    let account = MariaDBAccount(user: "app", host: "localhost", passwordHash: "*ABC", globalPrivileges: [], databasePrivileges: ["shop": ["SELECT", "INSERT"], "gone": ["ALL PRIVILEGES"]])
+    try expect(MariaDBAccounts.statements(for: account, renamed: ["shop": "shop_xampp"]) == [
+        "CREATE USER IF NOT EXISTS 'app'@'localhost' IDENTIFIED WITH mysql_native_password AS '*ABC'",
+        "GRANT SELECT, INSERT ON `shop_xampp`.* TO 'app'@'localhost'"
+    ], "Accounts were recreated wrongly")
+    try expect(MariaDBAccounts.statements(for: MariaDBAccount(user: "s", host: "%", passwordHash: nil), renamed: [:]).isEmpty, "An account with an unknown sign-in was recreated")
+
+    // Project settings and WordPress addresses.
+    let wordpress = scratch.appendingPathComponent("wp")
+    try FileManager.default.createDirectory(at: wordpress, withIntermediateDirectories: true)
+    try Data("<?php\ndefine( 'DB_NAME', 'blog' );\ndefine('DB_HOST', '127.0.0.1:3306');\ndefine('WP_HOME', 'http://localhost/wp');\n$table_prefix = 'site_';\n".utf8).write(to: wordpress.appendingPathComponent("wp-config.php"))
+    let settings = ProjectSettingsUpdater.wordPressSettings(in: wordpress)
+    try expect(settings?.database == "blog" && settings?.tablePrefix == "site_", "wp-config.php was misread")
+    let changes = try ProjectSettingsUpdater.update(project: wordpress, renamedDatabases: ["blog": "blog_xampp"], mysqlPort: 3307, newURL: "https://wp.localhost", oldURLs: ["http://localhost/wp"])
+    let updated = try String(contentsOf: wordpress.appendingPathComponent("wp-config.php"), encoding: .utf8)
+    try expect(changes.count == 1 && updated.contains("'DB_NAME', 'blog_xampp'") && updated.contains("'DB_HOST', '127.0.0.1:3307'") && updated.contains("'WP_HOME', 'https://wp.localhost'")
+               && FileManager.default.fileExists(atPath: wordpress.appendingPathComponent("wp-config.php.xampp-backup").path), "wp-config.php was not updated: \(updated)")
+    try expect(try ProjectSettingsUpdater.update(project: wordpress, renamedDatabases: [:], mysqlPort: 3307, newURL: "https://wp.localhost", oldURLs: []).isEmpty, "An up-to-date project was changed")
+    let pairs = WordPressAddressUpdate.pairs(oldURLs: ["http://localhost/wp/", "http://localhost/wp"], newURL: "https://wp.localhost")
+    try expect(pairs.count == 2 && pairs[0] == ["http:\\/\\/localhost\\/wp", "https:\\/\\/wp.localhost"], "WordPress address pairs are wrong: \(pairs)")
 }

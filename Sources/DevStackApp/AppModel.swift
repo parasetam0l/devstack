@@ -110,6 +110,8 @@ final class AppModel: ObservableObject {
     @Published var lastDatabaseBackup: URL?
     @Published var isPresentingNewSite = false
     @Published var isPresentingSetupWizard = false
+    @Published var isPresentingMigrationWizard = false
+    var preparedMigrationController: MigrationController?
     @Published var runtimePackProgress: RuntimePackProgress?
     /// Fix All: running, the step under way, and what it did.
     @Published var isRepairing = false
@@ -619,7 +621,8 @@ final class AppModel: ObservableObject {
             selectedWebServer: configuration.selectedWebServer,
             ports: configuration.ports, localNetworkAccess: configuration.localNetworkAccess,
             startAtLogin: configuration.startAtLogin,
-            loginItemNeedsApproval: SMAppService.mainApp.status == .requiresApproval
+            loginItemNeedsApproval: SMAppService.mainApp.status == .requiresApproval,
+            mysqlRootPassword: configuration.mysql(configuration.selectedDatabase).rootPassword
         )
         let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
         let progressModel = self
@@ -907,6 +910,21 @@ final class AppModel: ObservableObject {
         configuration.setupWizardCompleted = true
         try? await store.save(configuration)
         isPresentingSetupWizard = false
+    }
+
+    func presentMigrationWizard() {
+        showMainWindow()
+        isPresentingMigrationWizard = true
+    }
+
+    /// The controller a newly presented migration wizard starts from; the
+    /// UI review hands in a prepared one.
+    func makeMigrationController() -> MigrationController {
+        if let prepared = preparedMigrationController {
+            preparedMigrationController = nil
+            return prepared
+        }
+        return MigrationController(model: self)
     }
 
     func presentSetupWizard() {
@@ -1384,7 +1402,8 @@ final class AppModel: ObservableObject {
 
     private var databaseManager: DatabaseManager {
         DatabaseManager(paths: paths, runtimeRoot: configuration.importedRuntimeIDs.contains(configuration.selectedDatabase.rawValue) ? paths.importedRuntimes : paths.builtInRuntimes,
-            opensslRuntime: runtimeDirectory("openssl-3.5"), port: configuration.ports.mysqlListen)
+            opensslRuntime: runtimeDirectory("openssl-3.5"), port: configuration.ports.mysqlListen,
+            rootPassword: configuration.mysql(configuration.selectedDatabase).rootPassword)
     }
 
     private var managedPath: String {
@@ -1544,7 +1563,9 @@ final class AppModel: ObservableObject {
         guard configuration.selectedDatabase == .mysql84,
               configuration.sites.contains(where: { $0.phpRuntimeID == "php-7.4" }) else { return }
         let php = runtimeDirectory("php-7.4").appendingPathComponent("bin/php")
-        let code = #"mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT); $db = new mysqli('127.0.0.1', 'root', 'root', '', \#(configuration.ports.mysqlListen)); $db->query('SELECT 1');"#
+        // The password is limited to characters that need no escaping here.
+        let password = configuration.mysql(.mysql84).rootPassword
+        let code = #"mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT); $db = new mysqli('127.0.0.1', 'root', '\#(password)', '', \#(configuration.ports.mysqlListen)); $db->query('SELECT 1');"#
         try await runDetached(php, ["-c", paths.generatedPHP.appendingPathComponent("php-7.4.ini").path, "-r", code], timeout: 30)
     }
 
@@ -1613,7 +1634,9 @@ final class AppModel: ObservableObject {
         ConfigurationRenderer(paths: paths, runtimeRoot: paths.builtInRuntimes,
             runtimeDirectories: Dictionary(uniqueKeysWithValues: configuration.importedRuntimeIDs.map { ($0, runtimeDirectory($0)) }),
             ports: configuration.ports,
-            localNetworkAccess: configuration.localNetworkAccess)
+            localNetworkAccess: configuration.localNetworkAccess,
+            mysqlSettings: configuration.mysqlSettings,
+            selectedDatabase: configuration.selectedDatabase)
     }
 
     func siteURL(_ site: SiteDefinition) -> String {
@@ -1880,6 +1903,126 @@ final class AppModel: ObservableObject {
     private func shellQuote(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
+}
+
+// MARK: - Importing from other apps
+
+extension AppModel {
+    /// The MySQL version imported databases go to: the stack's, or 8.4 when
+    /// the stack has none.
+    var importDatabaseEngine: DatabaseEngine {
+        configuration.selectedDatabase == .none ? .mysql84 : configuration.selectedDatabase
+    }
+
+    /// Databases in `engine`'s data folder, read from its folder names so
+    /// name clashes show before MySQL runs.
+    func existingDatabaseNames(_ engine: DatabaseEngine) -> Set<String> {
+        let directory = engine == .mysql57 ? paths.mysql57Data : paths.mysql84Data
+        let entries = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        return Set(entries
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true && !$0.lastPathComponent.hasPrefix("#") }
+            .map { DatabaseFolderName.decode($0.lastPathComponent) })
+            .subtracting(["mysql", "performance_schema", "sys"])
+    }
+
+    /// Starts `engine` with `settings`, restarting it when its SQL mode or
+    /// sign-in plugins change, and switches root's password when asked.
+    /// Returns a manager that signs in with the new password.
+    func prepareDatabaseForImport(_ engine: DatabaseEngine, settings: MySQLSettings) async throws -> DatabaseManager {
+        guard let service = engine.service else { throw DatabaseManagerError.engineNotSelected }
+        let previous = configuration
+        let current = configuration.mysql(engine)
+        let restart = current.sqlMode != settings.sqlMode || current.nativePassword != settings.nativePassword
+        configuration.selectedDatabase = engine
+        configuration.mysqlSettings[engine.rawValue] = MySQLSettings(rootPassword: current.rootPassword, sqlMode: settings.sqlMode, nativePassword: settings.nativePassword)
+        do {
+            let other: ServiceKind = engine == .mysql57 ? .mysql84 : .mysql57
+            if serviceIsRunning(other) { await supervisor.stop(other) }
+            try generateConfiguration()
+            let manager = databaseManager
+            let initialized = try await Task.detached { try manager.initializeIfNeeded(engine) }.value
+            if restart, await supervisor.state(for: service).phase == .running { await supervisor.stop(service) }
+            if await supervisor.state(for: service).phase != .running { try await startDatabase(engine) }
+            if initialized { try await Task.detached { try manager.configureDevelopmentRootPassword(engine) }.value }
+            if settings.rootPassword != current.rootPassword {
+                let importer = DatabaseImporter(manager: manager, engine: engine)
+                let password = settings.rootPassword
+                try await Task.detached { try importer.setRootPassword(password) }.value
+                configuration.mysqlSettings[engine.rawValue]?.rootPassword = password
+                // phpMyAdmin and Adminer sign in with the new password.
+                try generateConfiguration()
+            }
+            try await store.save(configuration)
+        } catch {
+            configuration = previous
+            try? generateConfiguration()
+            await refreshServiceStates()
+            throw error
+        }
+        await refreshServiceStates()
+        return databaseManager
+    }
+
+    /// The manager of the stack's MySQL as configured now.
+    var currentDatabaseManager: DatabaseManager { databaseManager }
+
+    /// Adds imported sites in one configuration change; the localhost site
+    /// takes the imported PHP version and limits when projects moved into it.
+    func addImportedSites(_ sites: [SiteDefinition], localhostPHP: String?, localhostOverrides: PHPSiteOverrides?) async throws {
+        var all = configuration.sites
+        for var site in sites {
+            site.hostname = try HostnameValidator.validateSite(site.hostname, existing: all.map(\.hostname))
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: site.documentRoot, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: site.documentRoot])
+            }
+            all.append(site)
+        }
+        if let index = all.firstIndex(where: { $0.hostname == "localhost" }) {
+            if let localhostPHP { all[index].phpRuntimeID = localhostPHP }
+            if let localhostOverrides { all[index].phpOverrides = localhostOverrides }
+        }
+        try await applySites(all)
+    }
+
+    /// Starts the whole stack and returns what went wrong, if anything,
+    /// instead of showing it in the main window.
+    func startStackForImport() async -> String? {
+        errorMessage = nil
+        helperNotice = nil
+        await startAll()
+        let message = errorMessage
+        errorMessage = nil
+        if helperNotice == .startBlocked {
+            helperNotice = nil
+            return "The stack needs the helper for its ports or hostnames. Set it up in Settings, then start the stack."
+        }
+        return message
+    }
+
+    func phpBinary(_ runtimeID: String) -> URL { runtimeDirectory(runtimeID).appendingPathComponent("bin/php") }
+    func phpConfiguration(_ runtimeID: String) -> URL { paths.generatedPHP.appendingPathComponent("\(runtimeID).ini") }
+    var managedEnvironment: [String: String] { runtimeEnvironment }
+
+    /// Runs `command` as an administrator; macOS asks for the password and
+    /// shows `prompt` in its dialog.
+    func runAsAdministrator(_ command: String, prompt: String) async throws {
+        func quoted(_ text: String) -> String {
+            "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        let script = "do shell script \(quoted(command)) with prompt \(quoted(prompt)) with administrator privileges"
+        try await Task.detached {
+            do {
+                _ = try ProcessRunner().runChecked(executable: URL(fileURLWithPath: "/usr/bin/osascript"), arguments: ["-e", script], timeout: 7_200)
+            } catch CommandExecutionError.nonZeroExit(_, let result) where result.standardError.contains("-128") {
+                throw CocoaError(.userCancelled, userInfo: [NSLocalizedDescriptionKey: "The administrator prompt was cancelled."])
+            } catch CommandExecutionError.nonZeroExit(_, let result) {
+                throw CocoaError(.executableLoad, userInfo: [NSLocalizedDescriptionKey: result.standardError.trimmingCharacters(in: .whitespacesAndNewlines)])
+            }
+        }.value
+    }
+
+    func quoteForShell(_ value: String) -> String { shellQuote(value) }
 }
 
 /// What Fix All did, and what still needs the user.

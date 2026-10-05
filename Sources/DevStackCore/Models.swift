@@ -332,6 +332,65 @@ public enum DatabaseEngine: String, Codable, CaseIterable, Sendable {
     public var service: ServiceKind? { self == .none ? nil : ServiceKind(rawValue: rawValue) }
 }
 
+/// Server settings of one MySQL version beyond DevStack's defaults. Each
+/// version keeps its own data folder, so each keeps its own settings.
+public struct MySQLSettings: Codable, Hashable, Sendable {
+    /// The development root password. DevStack uses "root"; an import from
+    /// XAMPP may switch to its empty password so projects connect unchanged.
+    public var rootPassword: String
+    /// The server's sql_mode; nil keeps the version's default.
+    public var sqlMode: String?
+    /// Loads mysql_native_password on MySQL 8.4, for accounts carried over
+    /// from MariaDB with their password hash.
+    public var nativePassword: Bool
+
+    public init(rootPassword: String = "root", sqlMode: String? = nil, nativePassword: Bool = false) {
+        self.rootPassword = rootPassword
+        self.sqlMode = sqlMode
+        self.nativePassword = nativePassword
+    }
+
+    private enum CodingKeys: String, CodingKey { case rootPassword, sqlMode, nativePassword }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            rootPassword: try values.decodeIfPresent(String.self, forKey: .rootPassword) ?? "root",
+            sqlMode: try values.decodeIfPresent(String.self, forKey: .sqlMode),
+            nativePassword: try values.decodeIfPresent(Bool.self, forKey: .nativePassword) ?? false
+        )
+    }
+
+    /// Passwords DevStack writes into PHP, shell and server configuration
+    /// files: printable ASCII without quotes, backslashes or shell syntax.
+    public static func isUsablePassword(_ value: String) -> Bool {
+        value.count <= 64 && value.unicodeScalars.allSatisfy { $0.value > 0x20 && $0.value < 0x7F && !"'\"\\`$".unicodeScalars.contains($0) }
+    }
+
+    /// SQL mode names a MySQL version accepts, to drop MariaDB-only ones.
+    public static func supportedSQLModes(_ engine: DatabaseEngine) -> Set<String> {
+        var modes: Set<String> = [
+            "ALLOW_INVALID_DATES", "ANSI_QUOTES", "ERROR_FOR_DIVISION_BY_ZERO", "HIGH_NOT_PRECEDENCE", "IGNORE_SPACE",
+            "NO_AUTO_VALUE_ON_ZERO", "NO_BACKSLASH_ESCAPES", "NO_DIR_IN_CREATE", "NO_ENGINE_SUBSTITUTION",
+            "NO_UNSIGNED_SUBTRACTION", "NO_ZERO_DATE", "NO_ZERO_IN_DATE", "ONLY_FULL_GROUP_BY", "PAD_CHAR_TO_FULL_LENGTH",
+            "PIPES_AS_CONCAT", "REAL_AS_FLOAT", "STRICT_ALL_TABLES", "STRICT_TRANS_TABLES", "ANSI", "TRADITIONAL"
+        ]
+        if engine == .mysql57 {
+            modes.formUnion(["NO_AUTO_CREATE_USER", "NO_FIELD_OPTIONS", "NO_KEY_OPTIONS", "NO_TABLE_OPTIONS"])
+        } else {
+            modes.insert("TIME_TRUNCATE_FRACTIONAL")
+        }
+        return modes
+    }
+
+    /// `mode` with the names `engine` does not know removed.
+    public static func sqlMode(_ mode: String, for engine: DatabaseEngine) -> String {
+        let supported = supportedSQLModes(engine)
+        return mode.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).uppercased() }
+            .filter { supported.contains($0) }.joined(separator: ",")
+    }
+}
+
 public enum PostgreSQLEngine: String, Codable, CaseIterable, Sendable {
     case none = "none"
     case postgresql18 = "postgresql-18"
@@ -363,6 +422,8 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
     public var localNetworkAccess: Bool
     /// Set once the first-run setup wizard has been completed or skipped.
     public var setupWizardCompleted: Bool
+    /// Settings per MySQL version, keyed by the engine's raw value.
+    public var mysqlSettings: [String: MySQLSettings]
 
     public init(
         schemaVersion: Int = currentSchemaVersion,
@@ -381,7 +442,8 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
         ports: ServicePorts = ServicePorts(),
         helperNoticeDismissed: Bool = false,
         localNetworkAccess: Bool = false,
-        setupWizardCompleted: Bool = false
+        setupWizardCompleted: Bool = false,
+        mysqlSettings: [String: MySQLSettings] = [:]
     ) {
         self.schemaVersion = schemaVersion
         self.sites = sites
@@ -396,6 +458,11 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
         self.helperNoticeDismissed = helperNoticeDismissed
         self.localNetworkAccess = localNetworkAccess
         self.setupWizardCompleted = setupWizardCompleted
+        self.mysqlSettings = mysqlSettings
+    }
+
+    public func mysql(_ engine: DatabaseEngine) -> MySQLSettings {
+        mysqlSettings[engine.rawValue] ?? MySQLSettings()
     }
 
     public var selectedDatabaseServices: [ServiceKind] {
@@ -403,7 +470,7 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, sites, selectedDatabase, selectedPostgreSQL, enabledExtensions, startAtLogin, importedRuntimeIDs, selectedWebServer, defaultPHPRuntimeID, ports, helperNoticeDismissed, localNetworkAccess, setupWizardCompleted
+        case schemaVersion, sites, selectedDatabase, selectedPostgreSQL, enabledExtensions, startAtLogin, importedRuntimeIDs, selectedWebServer, defaultPHPRuntimeID, ports, helperNoticeDismissed, localNetworkAccess, setupWizardCompleted, mysqlSettings
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -420,7 +487,8 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
             ports: try values.decodeIfPresent(ServicePorts.self, forKey: .ports) ?? ServicePorts(),
             helperNoticeDismissed: try values.decodeIfPresent(Bool.self, forKey: .helperNoticeDismissed) ?? false,
             localNetworkAccess: try values.decodeIfPresent(Bool.self, forKey: .localNetworkAccess) ?? false,
-            setupWizardCompleted: try values.decodeIfPresent(Bool.self, forKey: .setupWizardCompleted) ?? false
+            setupWizardCompleted: try values.decodeIfPresent(Bool.self, forKey: .setupWizardCompleted) ?? false,
+            mysqlSettings: try values.decodeIfPresent([String: MySQLSettings].self, forKey: .mysqlSettings) ?? [:]
         )
         if schemaVersion < 2 {
             for id in ["php-8.4", "php-8.5"] { enabledExtensions[id, default: []].formUnion(["pgsql", "pdo_pgsql"]) }

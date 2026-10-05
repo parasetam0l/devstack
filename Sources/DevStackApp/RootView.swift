@@ -68,6 +68,9 @@ struct RootView: View {
         } message: { Text(model.errorMessage ?? "Unknown error") }
         .sheet(isPresented: helperNoticeIsPresented) { HelperNoticeSheet().environmentObject(model) }
         .sheet(isPresented: $model.isPresentingSetupWizard) { SetupWizardView().environmentObject(model) }
+        .sheet(isPresented: $model.isPresentingMigrationWizard) {
+            MigrationWizardView(controller: model.makeMigrationController()).environmentObject(model)
+        }
     }
 
     @ViewBuilder private func sidebarRow(_ section: NavigationSection) -> some View {
