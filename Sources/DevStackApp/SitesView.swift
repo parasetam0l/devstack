@@ -6,6 +6,8 @@ import SwiftUI
 struct SitesView: View {
     @EnvironmentObject private var model: AppModel
     @StateObject private var state = SitesViewState()
+    /// Set when the import banner is closed or an import finished.
+    @AppStorage(MigrationController.importHintDismissedKey) private var importHintDismissed = false
 
     var body: some View {
         Group {
@@ -16,12 +18,19 @@ struct SitesView: View {
                     Text("Add a project folder to serve it at its own local domain, with its own PHP version and HTTPS.")
                 } actions: {
                     Button("New Site…") { state.editingSite = newSite() }
-                    Button("Import from Another App…") { model.presentMigrationWizard() }
+                    Button(state.xamppFound ? "Import from XAMPP…" : "Import from Another App…") { model.presentMigrationWizard() }
                 }
             } else if filteredSites.isEmpty {
                 ContentUnavailableView.search(text: state.search)
             } else {
                 PanelPage {
+                    if state.xamppFound, !importHintDismissed {
+                        Banner(symbol: "square.and.arrow.down", title: "XAMPP is on this Mac",
+                               detail: "Import its projects and databases into DevStack. XAMPP itself is not changed.", tint: .accentColor) {
+                            Button("Import…") { model.presentMigrationWizard() }
+                            IconButton(title: "Hide", symbol: "xmark") { importHintDismissed = true }
+                        }
+                    }
                     Panel {
                         ForEach(filteredSites) { site in
                             SiteRow(site: site, served: served(site), edit: { state.editingSite = site }, remove: { state.deletingSite = site })
@@ -36,11 +45,13 @@ struct SitesView: View {
             // Its own glass capsule, apart from the stack controls.
             if #available(macOS 26, *) { ToolbarSpacer(.fixed) }
             ToolbarItem {
-                Button { model.presentMigrationWizard() } label: { Label("Import", systemImage: "square.and.arrow.down") }
+                Button { model.presentMigrationWizard() } label: { Label("Import…", systemImage: "square.and.arrow.down") }
+                    .labelStyle(.titleAndIcon)
                     .help("Import projects and databases from XAMPP")
             }
             ToolbarItem {
                 Button { state.editingSite = newSite() } label: { Label("New Site", systemImage: "plus") }
+                    .labelStyle(.titleAndIcon)
                     .help("Add a site (⌘N)")
             }
         }
@@ -57,6 +68,7 @@ struct SitesView: View {
             Text("DevStack stops serving it. The project folder and its files stay where they are.")
         }
         .onAppear(perform: presentRequestedSite)
+        .task { state.xamppFound = !XAMPPInstallation.find().isEmpty }
         .onChange(of: model.isPresentingNewSite) { _, _ in presentRequestedSite() }
     }
 
@@ -104,8 +116,6 @@ private struct SiteRow: View {
         PanelRow {
             StatusDot(color: served ? .green : Color(nsColor: .tertiaryLabelColor))
                 .help(served ? "Served" : "Not served while the stack is stopped")
-            Image(systemName: site.tlsEnabled ? "lock" : "globe").foregroundStyle(.secondary).frame(width: 18)
-                .help(site.tlsEnabled ? "HTTPS" : "HTTP only")
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
                     Text(site.name).fontWeight(.medium).lineLimit(1)
@@ -116,23 +126,16 @@ private struct SiteRow: View {
                     .help(site.documentRoot)
             }
             .frame(width: 220, alignment: .leading)
-            Text(url).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
+            SiteLink(url: url)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .help(url)
             Tag(text: site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP "), tint: site.phpRuntimeID == "php-7.4" ? .orange : .secondary)
                 .help(site.phpRuntimeID == "php-7.4" ? "PHP 7.4 is end-of-life" : "")
             HStack(spacing: 6) {
-                IconButton(title: "Open \(site.name) in the browser", symbol: "arrow.up.forward.app") { model.openURL(url) }
-                IconButton(title: "Show the project folder in Finder", symbol: "folder") { NSWorkspace.shared.activateFileViewerSelecting([folder]) }
-                IconButton(title: "Edit \(site.name)", symbol: "pencil", action: edit)
-                Menu {
-                    menuItems(url: url, folder: folder)
-                } label: {
-                    Image(systemName: "ellipsis")
-                }
-                .menuStyle(.button).buttonStyle(.borderless).menuIndicator(.hidden).fixedSize()
-                .accessibilityLabel("More actions for \(site.name)")
+                Button("Edit", action: edit)
+                    .help("Change the hostname, folder, PHP version or HTTPS")
+                SiteActionsMenu(title: "More actions for \(site.name)") { menuItems(url: url, folder: folder) }
             }
+            .controlSize(.small)
             .frame(width: ServiceRowLayout.controls, alignment: .trailing)
         }
         .onTapGesture(count: 2, perform: edit)
@@ -140,22 +143,56 @@ private struct SiteRow: View {
     }
 
     @ViewBuilder private func menuItems(url: String, folder: URL) -> some View {
-        Button("Open in Browser") { model.openURL(url) }
-        Button("Edit Site…", action: edit)
+        Button { model.openURL(url) } label: { Label("Open in Browser", systemImage: "safari") }
+        Button(action: edit) { Label("Edit Site…", systemImage: "pencil") }
         Divider()
-        Button("Show Project Folder in Finder") { NSWorkspace.shared.activateFileViewerSelecting([folder]) }
-        Button("Copy URL") { Pasteboard.copy(url) }
-        Button("Copy Folder Path") { Pasteboard.copy(site.documentRoot) }
+        Button { NSWorkspace.shared.activateFileViewerSelecting([folder]) } label: { Label("Show in Finder", systemImage: "folder") }
+        Button { Pasteboard.copy(url) } label: { Label("Copy URL", systemImage: "link") }
+        Button { Pasteboard.copy(site.documentRoot) } label: { Label("Copy Folder Path", systemImage: "doc.on.doc") }
         if !site.logs.error.isEmpty {
-            Button("Show Error Log") {
+            Button {
                 model.selectedLogFile = URL(fileURLWithPath: site.logs.error).lastPathComponent
                 model.selectedSection = .logs
-            }
+            } label: { Label("Show Error Log", systemImage: "exclamationmark.triangle") }
         }
         if site.hostname != "localhost" {
             Divider()
-            Button("Remove Site…", role: .destructive, action: remove)
+            Button(role: .destructive, action: remove) { Label("Remove Site…", systemImage: "trash") }
         }
+    }
+}
+
+/// A site's address as a link that opens it.
+struct SiteLink: View {
+    @EnvironmentObject private var model: AppModel
+    let url: String
+
+    var body: some View {
+        Button { model.openURL(url) } label: {
+            HStack(spacing: 3) {
+                Text(url).lineLimit(1).truncationMode(.middle)
+                Image(systemName: "arrow.up.right").font(.caption2.weight(.semibold))
+            }
+        }
+        .buttonStyle(.link)
+        .font(.callout.monospaced())
+        .help("Open \(url) in the browser")
+    }
+}
+
+/// "⋯" with a site's actions, each named in the menu.
+struct SiteActionsMenu<Items: View>: View {
+    let title: String
+    @ViewBuilder var items: Items
+
+    var body: some View {
+        Menu { items } label: {
+            Image(systemName: "ellipsis").frame(width: 14)
+        }
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(title)
+        .accessibilityLabel(title)
     }
 }
 
@@ -163,6 +200,7 @@ private struct SiteRow: View {
     @Published var editingSite: SiteDefinition?
     @Published var deletingSite: SiteDefinition?
     @Published var search = ""
+    @Published var xamppFound = false
 }
 
 struct SiteEditor: View {

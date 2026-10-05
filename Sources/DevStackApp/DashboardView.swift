@@ -59,6 +59,9 @@ struct DashboardView: View {
                 }
             } accessory: {
                 Button("Show All") { model.selectedSection = .sites }.buttonStyle(.borderless)
+                Button { model.presentMigrationWizard() } label: { Label("Import…", systemImage: "square.and.arrow.down") }
+                    .buttonStyle(.borderless)
+                    .help("Import projects and databases from XAMPP")
                 Button { model.requestNewSite() } label: { Label("New Site", systemImage: "plus") }
                     .buttonStyle(.borderless)
                     .help("Add a site (⌘N)")
@@ -160,35 +163,24 @@ private struct DashboardSiteRow: View {
         PanelRow {
             StatusDot(color: served ? .green : Color(nsColor: .tertiaryLabelColor))
                 .help(served ? "Served" : "Not served while the stack is stopped")
-            Image(systemName: site.tlsEnabled ? "lock" : "globe").foregroundStyle(.secondary).frame(width: 18)
-                .help(site.tlsEnabled ? "HTTPS" : "HTTP only")
             Text(site.name).fontWeight(.medium).lineLimit(1).frame(width: ServiceRowLayout.title, alignment: .leading)
-            Text(url)
-                .font(.callout.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
+            SiteLink(url: url)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .help(url)
             Tag(text: site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP "), tint: site.phpRuntimeID == "php-7.4" ? .orange : .secondary)
                 .frame(width: ServiceRowLayout.state, alignment: .leading)
-            HStack(spacing: 6) {
-                IconButton(title: "Open \(site.name) in the browser", symbol: "arrow.up.forward.app") { model.openURL(url) }
-                IconButton(title: "Show the project folder in Finder", symbol: "folder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: site.documentRoot)])
-                }
-                IconButton(title: "Copy URL", symbol: "link") { Pasteboard.copy(url) }
-            }
-            .frame(width: ServiceRowLayout.controls, alignment: .trailing)
+            SiteActionsMenu(title: "More actions for \(site.name)") { menuItems(url: url) }
+                .controlSize(.small)
+                .frame(width: ServiceRowLayout.controls, alignment: .trailing)
         }
-        .contextMenu {
-            Button("Open in Browser") { model.openURL(url) }
-            Button("Show Project Folder in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: site.documentRoot)]) }
-            Button("Copy URL") { Pasteboard.copy(url) }
-            Divider()
-            Button("Show All Sites") { model.selectedSection = .sites }
-        }
+        .contextMenu { menuItems(url: url) }
+    }
+
+    @ViewBuilder private func menuItems(url: String) -> some View {
+        Button { model.openURL(url) } label: { Label("Open in Browser", systemImage: "safari") }
+        Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: site.documentRoot)]) } label: { Label("Show in Finder", systemImage: "folder") }
+        Button { Pasteboard.copy(url) } label: { Label("Copy URL", systemImage: "link") }
+        Divider()
+        Button { model.selectedSection = .sites } label: { Label("Show All Sites", systemImage: "globe") }
     }
 }
 

@@ -184,6 +184,10 @@ final class MigrationController: ObservableObject {
 
     var installation: XAMPPInstallation? { installations.first { $0.id == installationID } }
 
+    /// UserDefaults key for the Sites page's import banner, closed by hand
+    /// or after an import.
+    static let importHintDismissedKey = "DevStackImportHintDismissed"
+
     /// Where apps are looked for; the end-to-end review points it at a
     /// fixture.
     static var applicationsFolder = URL(fileURLWithPath: "/Applications")
@@ -494,6 +498,9 @@ final class MigrationController: ObservableObject {
                 for task in tasks where task.state == .pending || task.state == .running { update(task.id, .skipped, detail: "Cancelled") }
             }
             outcome.report = writeReport(outcome, installation: installation, folder: exportsFolder)
+            if !outcome.cancelled, outcome.failure == nil, !model.isReviewMode {
+                UserDefaults.standard.set(true, forKey: Self.importHintDismissedKey)
+            }
             outcome.exports = FileManager.default.fileExists(atPath: exportsFolder.path) ? exportsFolder : nil
             results = outcome
             step = .results
