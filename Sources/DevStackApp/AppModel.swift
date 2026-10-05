@@ -633,8 +633,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Installs the DevStack CA into the system trust store (one administrator
-    /// prompt). Returns nil on success or a message to show inline.
+    /// Trusts the DevStack CA in the administrator trust settings (one macOS
+    /// administrator dialog). Returns nil on success or a message to show inline.
     func installSystemCertificate() async -> String? {
         guard !isBusy else { return "Another setup step is still running." }
         isBusy = true

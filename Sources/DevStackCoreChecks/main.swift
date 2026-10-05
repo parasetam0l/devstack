@@ -354,15 +354,14 @@ enum DevStackCoreChecks {
         } catch ConfigurationRendererError.unsafeValue {
             // Expected.
         }
-        // The system trust install runs through an administrator prompt; the
-        // certificate path contains spaces, so the shell quoting must hold.
-        let trustCommand = CertificateManager.systemTrustCommand(caCertificatePath: "/Users/me/Library/Application Support/DevStack/Local CA/ca.crt")
-        try expect(trustCommand.contains("'/Users/me/Library/Application Support/DevStack/Local CA/ca.crt'"), "System trust command does not quote paths with spaces")
-        let trustScript = CertificateManager.appleScriptAdminScript(for: trustCommand)
-        try expect(trustScript.hasPrefix("do shell script \"") && trustScript.hasSuffix("\" with administrator privileges"), "Administrator trust script is malformed")
-        try expect(!trustScript.contains("\n"), "Administrator trust script contains a newline")
-        let apostropheCommand = CertificateManager.systemTrustCommand(caCertificatePath: "/tmp/O'Brien CA.crt")
-        try expect(apostropheCommand.hasSuffix("'/tmp/O'\\''Brien CA.crt'"), "System trust command does not escape apostrophes")
+        // Trust is added by running security as the user (root cannot show the
+        // dialog macOS requires); the path is one argument, spaces and all.
+        let caPath = "/Users/me/Library/Application Support/DevStack/Local CA/ca.crt"
+        let adminTrust = CertificateManager.trustArguments(caCertificatePath: caPath, keychainPath: "/Users/me/Library/Keychains/login.keychain-db", administrator: true)
+        try expect(adminTrust.contains("-d") && adminTrust.last == caPath, "Administrator trust arguments are wrong")
+        try expect(!adminTrust.contains("/Library/Keychains/System.keychain"), "Administrator trust must not write the system keychain")
+        let userTrust = CertificateManager.trustArguments(caCertificatePath: caPath, keychainPath: "/Users/me/Library/Keychains/login.keychain-db", administrator: false)
+        try expect(!userTrust.contains("-d") && userTrust.last == caPath, "User trust arguments are wrong")
 
         let store = AppConfigurationStore(url: paths.configurationFile)
         var configuration = AppConfiguration()

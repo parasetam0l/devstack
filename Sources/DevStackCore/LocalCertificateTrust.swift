@@ -13,69 +13,55 @@ extension CertificateManager {
         return SecTrustEvaluateWithError(trust, nil)
     }
 
-    // The user keychain is sufficient for browser HTTPS on this account. macOS
-    // owns the authorization dialog; credentials never pass through DevStack.
+    /// Trusts the CA in this user's trust settings. macOS asks for the user's
+    /// password in its own dialog; credentials never pass through DevStack.
     public func trustForCurrentUser() throws {
         try ensureCertificates(for: ["phpmyadmin.localhost", "adminer.localhost", "mailpit.localhost"])
         if isTrusted() { return }
-        let keychain = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Keychains/login.keychain-db")
-        _ = try ProcessRunner().runChecked(executable: URL(fileURLWithPath: "/usr/bin/security"), arguments: [
-            "add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", keychain.path, caCertificate.path
-        ], timeout: 120)
+        try addTrustedCertificate(administrator: false)
         guard isTrusted() else {
-            throw CertificateManagerError.certificateGenerationFailed("macOS did not authorize this CA for HTTPS. Approve the native certificate trust dialog and retry.")
+            throw CertificateManagerError.trustFailed("macOS did not authorize this CA for HTTPS. Approve the macOS dialog and retry.")
         }
     }
 
-    /// Adds the CA to the system trust store so every user and browser on this
-    /// Mac accepts DevStack certificates. macOS shows one administrator prompt;
-    /// credentials never pass through DevStack.
+    /// Trusts the CA in the administrator trust settings, which every app on
+    /// this Mac follows. macOS asks for an administrator's password in its own
+    /// dialog; credentials never pass through DevStack.
     public func trustForSystem() throws {
         try ensureCertificates(for: ["phpmyadmin.localhost", "adminer.localhost", "mailpit.localhost"])
         if isTrusted() { return }
-        // Running `security` directly as the user only produces a write
-        // permissions error: macOS needs root for the system trust store and
-        // does not authorize the process on its own. `do shell script ... with
-        // administrator privileges` is the supported way to show the standard
-        // administrator password prompt.
-        let script = Self.appleScriptAdminScript(for: Self.systemTrustCommand(caCertificatePath: caCertificate.path))
-        do {
-            _ = try ProcessRunner().runChecked(
-                executable: URL(fileURLWithPath: "/usr/bin/osascript"),
-                arguments: ["-e", script],
-                timeout: 300
-            )
-        } catch {
-            let text = error.localizedDescription
-            if text.contains("-128") {
-                throw CertificateManagerError.certificateGenerationFailed("The administrator prompt was cancelled. Try again, trust the CA for this user only, or skip.")
-            }
-            throw CertificateManagerError.certificateGenerationFailed("The administrator prompt was not completed: \(text)")
-        }
+        try addTrustedCertificate(administrator: true)
         guard isTrusted() else {
-            throw CertificateManagerError.certificateGenerationFailed("The CA was not added to the system trust store. Approve the administrator prompt and retry, or trust it for this user only.")
+            throw CertificateManagerError.trustFailed("The CA is still not trusted. Approve the macOS dialog and retry, or trust it for this user only.")
         }
     }
 
-    /// Adds the CA to the system trust store through an administrator prompt.
-    /// Exposed so the quoting of paths with spaces stays covered by checks.
-    public static func systemTrustCommand(caCertificatePath: String) -> String {
-        [
-            "/usr/bin/security",
-            "add-trusted-cert", "-d", "-r", "trustRoot", "-p", "ssl",
-            "-k", "/Library/Keychains/System.keychain",
-            singleQuoted(caCertificatePath)
-        ].joined(separator: " ")
+    /// Runs `security add-trusted-cert` as the user, from DevStack itself.
+    /// Since macOS 11 a trust change needs the authorization dialog even for
+    /// root, and only a process in the user's session can show it: run as root
+    /// through an osascript administrator prompt, the change is refused ("no
+    /// user interaction was possible").
+    private func addTrustedCertificate(administrator: Bool) throws {
+        let loginKeychain = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Keychains/login.keychain-db")
+        let arguments = Self.trustArguments(caCertificatePath: caCertificate.path, keychainPath: loginKeychain.path, administrator: administrator)
+        do {
+            _ = try ProcessRunner().runChecked(executable: URL(fileURLWithPath: "/usr/bin/security"), arguments: arguments, timeout: 300)
+        } catch CommandExecutionError.nonZeroExit(_, let result) {
+            let output = (result.standardError + result.standardOutput).trimmingCharacters(in: .whitespacesAndNewlines)
+            if output.localizedCaseInsensitiveContains("cancel") {
+                throw CertificateManagerError.trustFailed("The macOS dialog was cancelled. Try again, or skip this step.")
+            }
+            throw CertificateManagerError.trustFailed("macOS did not change the trust settings: \(output)")
+        } catch CommandExecutionError.timedOut {
+            throw CertificateManagerError.trustFailed("The macOS dialog was not answered in time. Try again.")
+        }
     }
 
-    public static func appleScriptAdminScript(for command: String) -> String {
-        let escaped = command
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        return "do shell script \"\(escaped)\" with administrator privileges"
-    }
-
-    private static func singleQuoted(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    /// The `security` arguments that trust the CA for HTTPS: in this user's
+    /// trust settings, or with `-d` in the administrator ones. The certificate
+    /// goes into the login keychain, which the user can write; the system
+    /// keychain would need root, and root cannot show the dialog.
+    public static func trustArguments(caCertificatePath: String, keychainPath: String, administrator: Bool) -> [String] {
+        ["add-trusted-cert"] + (administrator ? ["-d"] : []) + ["-r", "trustRoot", "-p", "ssl", "-k", keychainPath, caCertificatePath]
     }
 }

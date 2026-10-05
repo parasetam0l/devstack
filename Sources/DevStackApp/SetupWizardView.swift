@@ -269,15 +269,15 @@ struct SetupWizardView: View {
                         }
                         .disabled(model.isBusy)
                     } label: {
-                        Text("Without a password")
-                        Text("Trusts the CA for your account only.")
+                        Text("For your account only")
+                        Text("macOS asks for your login password instead of an administrator's.")
                     }
                 }
             } footer: {
                 SectionFooter {
                     Text(model.localCATrusted
-                         ? "Every user and browser on this Mac accepts DevStack's HTTPS certificates."
-                         : "Trust Certificate adds the DevStack CA to the system trust store. macOS asks for your administrator password; it never passes through DevStack.")
+                         ? "Browsers on this Mac accept DevStack's HTTPS certificates."
+                         : "Trust Certificate trusts the DevStack CA for every app on this Mac. macOS asks for an administrator's password in its own dialog; it never passes through DevStack.")
                 }
             }
             if let certificateError {

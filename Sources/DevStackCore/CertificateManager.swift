@@ -4,11 +4,13 @@ import Foundation
 public enum CertificateManagerError: LocalizedError, Sendable {
     case invalidHostname(String)
     case certificateGenerationFailed(String)
+    case trustFailed(String)
 
     public var errorDescription: String? {
         switch self {
         case .invalidHostname(let hostname): "Cannot issue a certificate for invalid hostname: \(hostname)"
         case .certificateGenerationFailed(let message): "Certificate generation failed: \(message)"
+        case .trustFailed(let message): message
         }
     }
 }
