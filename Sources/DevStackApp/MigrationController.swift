@@ -53,9 +53,30 @@ final class MigrationController: ObservableObject {
         var selected = true
         var address: Address
         var hostname: String
+        /// The folder inside the project its own host serves, such as
+        /// "public"; "" for the project folder itself.
+        var webRoot: String
+        /// Where its files go when it has a host of its own; nil for
+        /// ~/DevStack/<name>.
+        var folder: URL?
         var id: String { project.id }
 
+        init(project: MigrationProject, address: Address, hostname: String) {
+            self.project = project
+            self.address = address
+            self.hostname = hostname
+            self.webRoot = project.webRoot
+        }
+
         var canChooseAddress: Bool { project.kind == .folder }
+    }
+
+    /// An app found on this Mac that DevStack imports from.
+    struct Source: Identifiable {
+        var kind: MigrationSourceKind
+        /// The app, for its icon.
+        var application: URL?
+        var id: String { kind.id }
     }
 
     enum Clash: String, CaseIterable, Identifiable {
@@ -133,6 +154,7 @@ final class MigrationController: ObservableObject {
 
     @Published var step: Step = .source
     @Published var source: MigrationSourceKind = .xampp
+    @Published var sources: [Source] = []
     @Published var installations: [XAMPPInstallation] = []
     @Published var installationID: String?
     @Published var inventory: XAMPPInventory?
@@ -166,9 +188,18 @@ final class MigrationController: ObservableObject {
     /// fixture.
     static var applicationsFolder = URL(fileURLWithPath: "/Applications")
 
+    /// The installed apps DevStack can import from; apps it can't import
+    /// from yet, or that aren't here, stay out of the list.
     func loadSources() {
         installations = XAMPPInstallation.find(applications: Self.applicationsFolder)
         if installationID == nil || installation == nil { installationID = installations.first?.id }
+        sources = MigrationSourceKind.allCases.filter(\.isSupported).compactMap { kind in
+            if kind == .xampp {
+                return installations.isEmpty ? nil : Source(kind: kind, application: installations.first?.managerApplication)
+            }
+            return kind.installedLocation().map { Source(kind: kind, application: $0) }
+        }
+        if !sources.contains(where: { $0.kind == source }), let first = sources.first { source = first.kind }
     }
 
     // MARK: - Pre-checks
@@ -332,6 +363,51 @@ final class MigrationController: ObservableObject {
         }
     }
 
+    private var projectsRoot: URL {
+        model?.paths.defaultSiteRoot.deletingLastPathComponent() ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("DevStack")
+    }
+
+    /// Where the project's files will be.
+    func destination(for choice: ProjectChoice) -> URL {
+        switch choice.project.kind {
+        case .external: return choice.project.source
+        case .looseFiles: return localhostRoot
+        case .folder:
+            if choice.address == .localhostPath { return MigrationNaming.folder(named: choice.project.name, in: localhostRoot) }
+            return choice.folder ?? MigrationNaming.folder(named: choice.project.name, in: projectsRoot)
+        }
+    }
+
+    /// The folder an own-host project's site serves.
+    func documentRoot(for choice: ProjectChoice) -> URL {
+        let folder = destination(for: choice)
+        return choice.webRoot.isEmpty ? folder : folder.appendingPathComponent(choice.webRoot, isDirectory: true)
+    }
+
+    /// Asks where an own-host project goes: into the chosen folder when it
+    /// is empty, else into a folder of its own inside it.
+    func chooseFolder(for id: String) {
+        guard let index = projects.firstIndex(where: { $0.id == id }) else { return }
+        let choice = projects[index]
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Copy Here"
+        panel.message = "Choose where \(choice.project.name) goes. An empty folder holds the project itself; any other gets a \(choice.project.name) folder inside."
+        panel.directoryURL = destination(for: choice).deletingLastPathComponent()
+        guard panel.runModal() == .OK, let chosen = panel.url?.standardizedFileURL else { return }
+        let source = choice.project.source.resolvingSymlinksInPath().path
+        guard !chosen.resolvingSymlinksInPath().path.hasPrefix(source + "/"), chosen.resolvingSymlinksInPath().path != source else {
+            actionError = "\(choice.project.name) can't be copied into itself."
+            return
+        }
+        actionError = nil
+        let empty = ((try? FileManager.default.contentsOfDirectory(atPath: chosen.path)) ?? ["?"]).filter { $0 != ".DS_Store" }.isEmpty
+        projects[index].folder = empty ? chosen : MigrationNaming.folder(named: choice.project.name, in: chosen)
+    }
+
     private var localhostRoot: URL {
         guard let model else { return URL(fileURLWithPath: NSHomeDirectory()) }
         return URL(fileURLWithPath: model.configuration.sites.first { $0.hostname == "localhost" }?.documentRoot ?? model.paths.defaultSiteRoot.path, isDirectory: true)
@@ -444,7 +520,7 @@ final class MigrationController: ObservableObject {
         if !chosenProjects.isEmpty {
             update("files", .running)
             let localhostRoot = self.localhostRoot
-            let projectsRoot = model.paths.defaultSiteRoot.deletingLastPathComponent()
+            let projectsRoot = self.projectsRoot
             let totalBytes = chosenProjects.filter { $0.project.kind != .external }.reduce(Int64(0)) { $0 + $1.project.bytes }
             let totalFiles = chosenProjects.filter { $0.project.kind != .external }.reduce(0) { $0 + $1.project.files }
             var doneBytes: Int64 = 0
@@ -468,16 +544,28 @@ final class MigrationController: ObservableObject {
                     placed.append((choice, localhostRoot))
                 case .folder:
                     let parent = choice.address == .localhostPath ? localhostRoot : projectsRoot
-                    let destination = MigrationNaming.folder(named: project.name, in: parent, taken: takenFolders)
+                    var destination = MigrationNaming.folder(named: project.name, in: parent, taken: takenFolders)
+                    if choice.address == .ownSite, let chosen = choice.folder {
+                        // An empty folder chosen for it takes the project itself.
+                        let contents = ((try? FileManager.default.contentsOfDirectory(atPath: chosen.path)) ?? []).filter { $0 != ".DS_Store" }
+                        if !FileManager.default.fileExists(atPath: chosen.path) || contents.isEmpty {
+                            try? FileManager.default.removeItem(at: chosen.appendingPathComponent(".DS_Store"))
+                            _ = rmdir(chosen.path)
+                            destination = chosen
+                        } else {
+                            destination = MigrationNaming.folder(named: project.name, in: chosen)
+                        }
+                    }
                     takenFolders.insert(destination.lastPathComponent.lowercased())
-                    if destination.lastPathComponent != project.name {
+                    if choice.folder == nil || choice.address == .localhostPath, destination.lastPathComponent != project.name {
                         outcome.notes.append("\(project.name) went to \(destination.lastPathComponent), as \(parent.path) already has a \(project.name).")
                     }
                     let base = (bytes: doneBytes, files: doneFiles)
                     let flag = cancelFlag
+                    let target = destination
                     do {
                         let failures = try await Task.detached { [weak self] in
-                            try ProjectCopier.copyFolder(project.source, to: destination, totals: (project.files, project.bytes),
+                            try ProjectCopier.copyFolder(project.source, to: target, totals: (project.files, project.bytes),
                                                          isCancelled: { flag.isSet }) { progress in
                                 Task { @MainActor in
                                     guard let self else { return }
@@ -519,7 +607,7 @@ final class MigrationController: ObservableObject {
             let overrides = PHPSettingsImport.overrides(fromPHPINI: inventory.phpINI)
             var sites: [SiteDefinition] = []
             for (choice, folder) in placed where choice.address == .ownSite {
-                let webRoot = choice.project.webRoot.isEmpty ? folder : folder.appendingPathComponent(choice.project.webRoot, isDirectory: true)
+                let webRoot = choice.webRoot.isEmpty ? folder : folder.appendingPathComponent(choice.webRoot, isDirectory: true)
                 let id = UUID()
                 sites.append(SiteDefinition(
                     id: id, name: choice.project.name, hostname: choice.hostname,
@@ -610,6 +698,18 @@ final class MigrationController: ObservableObject {
 
     // MARK: Databases
 
+    /// What the temporary server reported before the exports.
+    private struct StartedSource: Sendable {
+        var recovery: Int
+        var rootHasPassword: Bool?
+        var upgradedFrom: String?
+        var upgradeError: String?
+        var checksPasswords = false
+        var accounts: [MariaDBAccount] = []
+        var sqlMode: String?
+        var snapshots: [String: DatabaseSnapshot] = [:]
+    }
+
     private struct DatabasePhase {
         var results: [DatabaseResult] = []
         var notes: [String] = []
@@ -679,7 +779,7 @@ final class MigrationController: ObservableObject {
         // 2. XAMPP's own MariaDB, privately, on the copy.
         update("server", .running, detail: "Replaying its log can take a minute when XAMPP did not stop cleanly.")
         let names = chosen.map(\.database.name)
-        let startup: Result<(recovery: Int, rootHasPassword: Bool?, accounts: [MariaDBAccount], sqlMode: String?, snapshots: [String: DatabaseSnapshot], events: Bool), Error> = await Task.detached {
+        let startup: Result<StartedSource, Error> = await Task.detached {
             do {
                 var recovery = 0
                 var startError: Error?
@@ -704,25 +804,38 @@ final class MigrationController: ObservableObject {
                     }
                 }
                 if let startError { throw startError }
+                var source = StartedSource(recovery: recovery)
                 let run: (String) throws -> [[String]] = { try server.query($0) }
-                let rootHasPassword = MariaDBAccounts.rootHasPassword(run: run)
-                let accounts = (try? MariaDBAccounts.read(run: run)) ?? []
-                let sqlMode = try? server.query("SELECT @@GLOBAL.sql_mode").first?.first
-                var snapshots: [String: DatabaseSnapshot] = [:]
-                for name in names { snapshots[name] = try DatabaseInspector.snapshot(of: name, mariaDBEvents: true, run: run) }
+                source.rootHasPassword = MariaDBAccounts.rootHasPassword(run: run)
+                // XAMPP updated without mysql_upgrade keeps an older layout of
+                // mysql.proc and mysql.event; upgrade the copy's so routines
+                // and events can be read.
+                var restart = false
+                if server.systemTablesNeedUpgrade() {
+                    source.upgradedFrom = ["mysql_upgrade_info", "mariadb_upgrade_info"]
+                        .compactMap { try? String(contentsOf: data.appendingPathComponent($0), encoding: .utf8) }.first
+                        .flatMap(MariaDBVersion.majorMinor) ?? "an older version"
+                    do { try server.upgradeSystemTables(); restart = true }
+                    catch { source.upgradeError = error.localizedDescription }
+                }
                 // Events only export while the server checks passwords, which
                 // works when root has none, as XAMPP sets it up.
-                var events = snapshots.values.allSatisfy { $0.events == 0 }
-                if rootHasPassword == false {
+                if source.rootHasPassword == false || restart {
                     server.stop()
-                    do {
-                        try server.start(forceRecovery: recovery, checkPasswords: true, isCancelled: { flag.isSet })
-                        events = true
-                    } catch {
-                        try server.start(forceRecovery: recovery, isCancelled: { flag.isSet })
+                    if source.rootHasPassword == false {
+                        do {
+                            try server.start(forceRecovery: recovery, checkPasswords: true, isCancelled: { flag.isSet })
+                            source.checksPasswords = true
+                        } catch {
+                            if flag.isSet { throw CancellationError() }
+                        }
                     }
+                    if !source.checksPasswords { try server.start(forceRecovery: recovery, isCancelled: { flag.isSet }) }
                 }
-                return .success((recovery, rootHasPassword, accounts, sqlMode, snapshots, events))
+                source.accounts = (try? MariaDBAccounts.read(run: run)) ?? []
+                source.sqlMode = try? server.query("SELECT @@GLOBAL.sql_mode").first?.first
+                for name in names { source.snapshots[name] = try DatabaseInspector.snapshot(of: name, mariaDBSource: true, run: run) }
+                return .success(source)
             } catch {
                 return .failure(error)
             }
@@ -734,11 +847,18 @@ final class MigrationController: ObservableObject {
             }
             return phase
         }
-        update("server", .done, detail: source.recovery > 0 ? "Started in recovery mode \(source.recovery)" : nil)
+        update("server", .done, detail: [source.recovery > 0 ? "Started in recovery mode \(source.recovery)" : nil,
+                                         source.upgradedFrom != nil && source.upgradeError == nil ? "System tables upgraded from MariaDB \(source.upgradedFrom!)" : nil]
+            .compactMap { $0 }.joined(separator: "; "))
+        if let from = source.upgradedFrom {
+            phase.notes.append(source.upgradeError == nil
+                ? "XAMPP's system tables were still from MariaDB \(from); DevStack upgraded them in its copy so routines and events could be read. XAMPP's own files are unchanged."
+                : "XAMPP's system tables are from MariaDB \(from) and could not be upgraded in the copy, so routines and events may be missing. \(source.upgradeError!)")
+        }
         if source.recovery > 0 {
             phase.notes.append("XAMPP's data needed InnoDB recovery mode \(source.recovery) to be read. Check the imported data; rows written just before XAMPP stopped may be missing.")
         }
-        if !source.events { phase.notes.append("Scheduled events stay behind: XAMPP's root has a password, and MariaDB only exports events after signing in.") }
+        if !source.checksPasswords, source.snapshots.values.contains(where: { $0.events > 0 }) { phase.notes.append("Scheduled events stay behind: XAMPP's root has a password, and MariaDB only exports events after signing in.") }
 
         // 3. Exports, kept in Backups as a copy of what XAMPP had.
         update("export", .running)
@@ -805,7 +925,7 @@ final class MigrationController: ObservableObject {
             let label = "\(name)\(target == name ? "" : " → \(target)") (\(index + 1) of \(chosen.count))"
             progress("import", Double(index) / Double(chosen.count), detail: label)
             let converted = workFolder.appendingPathComponent("\(Self.fileName(name)).mysql.sql")
-            let size = Double(max(1, (try? export.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 1))
+            let size = Double(max(1, FileSize.of(export)))
             let backupsRoot = model.paths.backups
             let result: Result<(DumpConversionReport, DatabaseSnapshot, URL?), Error> = await Task.detached { [weak self] in
                 do {
@@ -832,7 +952,14 @@ final class MigrationController: ObservableObject {
                 if !snapshot.unreadable.isEmpty {
                     message = ([message] + ["XAMPP could not read \(snapshot.unreadable.keys.sorted().joined(separator: ", "))"]).compactMap { $0 }.joined(separator: "; ")
                 }
-                let warnings = (exportWarnings[name] ?? []).filter { !$0.isEmpty }
+                // The export complains about events and routines it can't
+                // list even where there are none; keep only what matters.
+                let warnings = (exportWarnings[name] ?? []).filter { warning in
+                    let lower = warning.lowercased()
+                    if lower.contains("show events") { return snapshot.events > 0 }
+                    if lower.contains("function status") || lower.contains("procedure status") { return snapshot.routines > 0 }
+                    return !warning.isEmpty
+                }
                 phase.results.append(DatabaseResult(id: name, source: name, target: target, tables: arrived.tables.count, rows: arrived.rows,
                                                     outcome: differences.isEmpty && snapshot.unreadable.isEmpty && warnings.isEmpty ? .ok : .warning,
                                                     message: message ?? warnings.first))

@@ -5,9 +5,11 @@ public enum MariaDBReaderError: LocalizedError, Sendable {
     case serverExited(String)
     case serverTimedOut(String)
     case dumpFailed(String, String)
+    case upgradeFailed(String)
 
     public var errorDescription: String? {
         switch self {
+        case .upgradeFailed(let detail): "Couldn't upgrade the system tables: \(detail)"
         case .serverExited(let log): "MariaDB stopped while starting. Its log ends with:\n\(log)"
         case .serverTimedOut(let log): "MariaDB did not become ready in time. Its log ends with:\n\(log)"
         case .dumpFailed(let database, let detail): "Couldn't export \(database): \(detail)"
@@ -20,7 +22,7 @@ public enum MariaDBReaderError: LocalizedError, Sendable {
         let log: String
         switch self {
         case .serverExited(let text), .serverTimedOut(let text): log = text.lowercased()
-        case .dumpFailed: return false
+        case .dumpFailed, .upgradeFailed: return false
         }
         return log.contains("innodb") && (log.contains("corrupt") || log.contains("recovery") || log.contains("redo log")
             || log.contains("plugin 'innodb' init function returned error") || log.contains("assertion"))
@@ -43,6 +45,13 @@ public struct MariaDBTools: Sendable {
 
     public init(installation: XAMPPInstallation) {
         self.init(mysqld: installation.mysqld, mysql: installation.mysqlClient, mysqldump: installation.mysqldump, baseDirectory: installation.root)
+    }
+
+    /// mysql_upgrade, beside the client.
+    var upgrade: URL? {
+        let bin = mysql.deletingLastPathComponent()
+        return ["mysql_upgrade", "mariadb-upgrade"].map { bin.appendingPathComponent($0) }
+            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
     /// The folder holding english/errmsg.sys, which the server needs for its
@@ -177,6 +186,36 @@ public final class TemporaryMariaDB: @unchecked Sendable {
 
     public var isRunning: Bool { lock.withLock { process?.isRunning ?? false } }
 
+    /// The server's own version, such as "10.4.28-MariaDB".
+    public func version() -> String? { (try? query("SELECT VERSION()"))?.first?.first }
+
+    /// The data's system tables are older than the server: XAMPP was
+    /// updated without mysql_upgrade, so mysql.proc and mysql.event have an
+    /// old layout and routines and events can't be read.
+    public func systemTablesNeedUpgrade() -> Bool {
+        let recorded = ["mysql_upgrade_info", "mariadb_upgrade_info"]
+            .compactMap { try? String(contentsOf: dataDirectory.appendingPathComponent($0), encoding: .utf8) }.first
+        if let recorded, let server = version(), MariaDBVersion.majorMinor(recorded) != MariaDBVersion.majorMinor(server) {
+            return true
+        }
+        return (try? query("SELECT COUNT(*) FROM information_schema.ROUTINES")) == nil
+    }
+
+    /// Brings the copy's system tables up to the server's version with
+    /// XAMPP's own mysql_upgrade. Only the mysql database changes, and only
+    /// in the copy. Afterwards the server checks passwords, so it needs a
+    /// restart in the wanted mode.
+    public func upgradeSystemTables() throws {
+        guard let upgrade = tools.upgrade else { throw MariaDBReaderError.upgradeFailed("mysql_upgrade is missing.") }
+        let result = try ProcessRunner().run(executable: upgrade, arguments: [
+            "--no-defaults", "--socket=\(socket.path)", "--user=root", "--force", "--upgrade-system-tables"
+        ], timeout: 900)
+        guard result.exitCode == 0 else {
+            let output = (result.standardError + "\n" + result.standardOutput).split(whereSeparator: \.isNewline).suffix(4).joined(separator: "\n")
+            throw MariaDBReaderError.upgradeFailed(output)
+        }
+    }
+
     private var clientArguments: [String] {
         ["--no-defaults", "--socket=\(socket.path)", "--user=root", "--default-character-set=utf8mb4"]
     }
@@ -198,7 +237,7 @@ public final class TemporaryMariaDB: @unchecked Sendable {
             "--skip-dump-date", "--max-allowed-packet=1G", database
         ]
         let result = try StreamingCommand.run(executable: tools.mysqldump, arguments: arguments, outputFile: file,
-            poll: { progress(Int64((try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)) },
+            poll: { progress(FileSize.of(file)) },
             isCancelled: isCancelled)
         let warnings = result.standardError.split(whereSeparator: \.isNewline).map(String.init)
             .filter { !$0.lowercased().contains("using a password on the command line") && !$0.contains("Deprecated program name") }
@@ -208,9 +247,7 @@ public final class TemporaryMariaDB: @unchecked Sendable {
         return warnings
     }
 
-    private func fileHasContent(_ file: URL) -> Bool {
-        ((try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0
-    }
+    private func fileHasContent(_ file: URL) -> Bool { FileSize.of(file) > 0 }
 
     /// The end of the server's log, for error messages.
     public func logTail(lines: Int = 25) -> String {
@@ -267,9 +304,11 @@ public struct DatabaseSnapshot: Codable, Hashable, Sendable {
 public enum DatabaseInspector {
     /// Counts tables, rows, views, routines, triggers and events of
     /// `database` through `run`, which executes SQL and returns rows.
-    /// `mariaDBEvents` counts events in mysql.event, which MariaDB fills even
-    /// while it hides events from information_schema.
-    public static func snapshot(of database: String, mariaDBEvents: Bool = false, run: (String) throws -> [[String]]) throws -> DatabaseSnapshot {
+    /// `mariaDBSource` counts routines and events in mysql.proc and
+    /// mysql.event, which MariaDB fills even while information_schema can't
+    /// show them (grant tables skipped, or system tables from an older
+    /// version).
+    public static func snapshot(of database: String, mariaDBSource: Bool = false, run: (String) throws -> [[String]]) throws -> DatabaseSnapshot {
         let name = SQLText.literal(database)
         var snapshot = DatabaseSnapshot()
         let schema = try run("SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = \(name)")
@@ -282,9 +321,10 @@ public enum DatabaseInspector {
             snapshot.bytes += Int64(row[2]) ?? 0
         }
         func count(_ sql: String) -> Int { (try? run(sql))?.first?.first.flatMap { Int($0) } ?? 0 }
-        snapshot.routines = count("SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = \(name)")
+        snapshot.routines = count(mariaDBSource ? "SELECT COUNT(*) FROM mysql.proc WHERE db = \(name) AND type IN ('FUNCTION', 'PROCEDURE')"
+                                                : "SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = \(name)")
         snapshot.triggers = count("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = \(name)")
-        snapshot.events = count(mariaDBEvents ? "SELECT COUNT(*) FROM mysql.event WHERE db = \(name)"
+        snapshot.events = count(mariaDBSource ? "SELECT COUNT(*) FROM mysql.event WHERE db = \(name)"
                                               : "SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA = \(name)")
 
         // Exact row counts, forty tables a query; a table the server cannot
@@ -435,5 +475,21 @@ public enum XAMPPProcesses {
             }
         }
         return result
+    }
+}
+
+public enum MariaDBVersion {
+    /// "10.1" from "10.1.8-MariaDB".
+    public static func majorMinor(_ version: String) -> String? {
+        let parts = version.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "-").first?.split(separator: ".") ?? []
+        return parts.count >= 2 ? "\(parts[0]).\(parts[1])" : nil
+    }
+}
+
+public enum FileSize {
+    /// The current size of a file being written. A URL's resource values
+    /// are cached after the first read, so they would keep the old size.
+    public static func of(_ file: URL) -> Int64 {
+        (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.int64Value ?? 0
     }
 }

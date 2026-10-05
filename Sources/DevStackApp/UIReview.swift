@@ -182,6 +182,12 @@ import SwiftUI
             say("installations: \(controller.installations.map(\.title))")
             await controller.scan()
             controller.phpRuntimeID = "php-8.5"
+            if CommandLine.arguments.contains("--choose-folder"), let index = controller.projects.firstIndex(where: { $0.project.framework == .laravel }) {
+                // As if "Choose…" picked an empty folder elsewhere.
+                let chosen = base.appendingPathComponent("Elsewhere/Empty", isDirectory: true)
+                try? FileManager.default.createDirectory(at: chosen, withIntermediateDirectories: true)
+                controller.projects[index].folder = chosen
+            }
             for check in controller.checks { say("check [\(check.status)] \(check.title) — \(check.detail ?? "")") }
             for choice in controller.projects { say("project \(choice.project.name) → \(controller.url(for: choice))") }
             say("databases: \(controller.databases.map { "\($0.database.name)\($0.selected ? "" : " (off)")\($0.exists ? " exists → \($0.targetName)" : "")" })")
@@ -203,6 +209,7 @@ import SwiftUI
             }
             }
             say("mysql settings: \(model.configuration.mysqlSettings)")
+            for site in model.configuration.sites { say("site root \(site.hostname): \(site.documentRoot)") }
             for site in model.configuration.sites {
                 let path = site.hostname == "localhost" ? "/wp/" : "/"
                 let body = try? ProcessRunner().run(executable: URL(fileURLWithPath: "/usr/bin/curl"), arguments: [
@@ -224,6 +231,7 @@ import SwiftUI
                                       htdocs: URL(fileURLWithPath: "/Applications/XAMPP81/xamppfiles/htdocs"), dataDirectory: URL(fileURLWithPath: "/Applications/XAMPP81/xamppfiles/var/mysql"))
         controller.installations = [xampp, older]
         controller.installationID = xampp.id
+        controller.sources = [.init(kind: .xampp, application: xampp.managerApplication)]
         let htdocs = xampp.htdocs
         let projects = [
             MigrationProject(id: "crm", name: "crm", source: htdocs.appendingPathComponent("crm"), kind: .folder, framework: .plainPHP, webRoot: "", files: 812, bytes: 48_300_000),

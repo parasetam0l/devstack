@@ -997,6 +997,15 @@ private func migrationChecks() throws {
     try expect(limits.memoryLimit == "1G" && limits.uploadMaxFilesize == "64M" && limits.maxExecutionTime == 0 && limits.postMaxSize == "-1", "XAMPP's PHP limits were not carried over: \(limits)")
     try expect(MachO.architectures(of: URL(fileURLWithPath: "/usr/bin/true")).contains("arm64"), "Executable architectures were misread")
 
+    try expect(MariaDBVersion.majorMinor("10.1.8-MariaDB") == "10.1" && MariaDBVersion.majorMinor("10.4.28-MariaDB-log\n") == "10.4"
+               && MariaDBVersion.majorMinor("garbage") == nil, "MariaDB versions were misread")
+    let growing = scratch.appendingPathComponent("growing.sql")
+    FileManager.default.createFile(atPath: growing.path, contents: nil)
+    _ = FileSize.of(growing)
+    _ = try? growing.resourceValues(forKeys: [.fileSizeKey])
+    try Data(count: 4_096).write(to: growing)
+    try expect(FileSize.of(growing) == 4_096, "A growing export kept its first, cached size")
+
     // Copying.
     let copy = scratch.appendingPathComponent("copy")
     try FileManager.default.createSymbolicLink(at: htdocs.appendingPathComponent("app/link"), withDestinationURL: htdocs.appendingPathComponent("app/artisan"))

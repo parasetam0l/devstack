@@ -64,7 +64,7 @@ struct MigrationWizardView: View {
                     Task { await controller.scan() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(controller.installation == nil || !controller.source.isSupported)
+                .disabled(controller.sources.isEmpty || (controller.source == .xampp && controller.installation == nil))
             case .check:
                 Button("Back") { controller.step = .source }
                 Spacer()
@@ -99,20 +99,20 @@ struct MigrationWizardView: View {
 
     // MARK: - Source
 
-    private var sourceStep: some View {
-        Group {
-            Panel("Apps") {
-                ForEach(MigrationSourceKind.allCases) { kind in
-                    SourceRow(kind: kind, selected: controller.source == kind) {
-                        if kind.isSupported { controller.source = kind }
+    @ViewBuilder private var sourceStep: some View {
+        if controller.sources.isEmpty {
+            Banner(symbol: "questionmark.folder", title: "No app to import from",
+                   detail: "DevStack imports from XAMPP and looks for it in Applications, where its installer puts the xamppfiles folder. None is there.", tint: .secondary)
+        } else {
+            Panel("Found on this Mac") {
+                ForEach(controller.sources) { source in
+                    SourceRow(kind: source.kind, application: source.application, selected: controller.source == source.kind) {
+                        controller.source = source.kind
                     }
                 }
             }
             if controller.source == .xampp {
-                if controller.installations.isEmpty {
-                    Banner(symbol: "questionmark.folder", title: "No XAMPP in Applications",
-                           detail: "DevStack looks for the xamppfiles folder the XAMPP installer puts in /Applications.", tint: .secondary)
-                } else if controller.installations.count > 1 {
+                if controller.installations.count > 1 {
                     Panel("Installation", note: "Each copy keeps its own htdocs and databases.") {
                         ForEach(controller.installations) { installation in
                             PanelRow {
@@ -173,13 +173,18 @@ struct MigrationWizardView: View {
     // MARK: - Choose
 
     @ViewBuilder private var chooseStep: some View {
+        if let error = controller.actionError {
+            Banner(symbol: "exclamationmark.triangle.fill", title: "That didn't work", detail: error)
+        }
         if let problem = controller.hostnameProblem {
             Banner(symbol: "exclamationmark.triangle.fill", title: "Fix a hostname", detail: problem, tint: .red)
         }
         if !controller.projects.isEmpty {
             Panel("Projects", note: "Copies go to your DevStack folder; XAMPP keeps its own. A localhost address works as it did in XAMPP; a host of its own suits projects with a public folder.") {
                 ForEach($controller.projects) { $choice in
-                    ProjectChoiceRow(choice: $choice, url: controller.url(for: choice))
+                    ProjectChoiceRow(choice: $choice, url: controller.url(for: choice),
+                                     documentRoot: controller.documentRoot(for: choice).path,
+                                     chooseFolder: choice.project.kind == .folder ? { controller.chooseFolder(for: choice.id) } : nil)
                 }
             } accessory: {
                 selectAllButton(all: controller.projects.allSatisfy(\.selected)) { selected in
@@ -349,39 +354,29 @@ struct MigrationWizardView: View {
 
 private struct SourceRow: View {
     let kind: MigrationSourceKind
+    let application: URL?
     let selected: Bool
     let select: () -> Void
-    @State private var location: URL?
 
     var body: some View {
         PanelRow {
             Image(systemName: selected ? "largecircle.fill.circle" : "circle")
                 .foregroundStyle(selected ? Color.accentColor : .secondary)
-                .opacity(kind.isSupported ? 1 : 0.4)
             icon.frame(width: 28, height: 28)
             VStack(alignment: .leading, spacing: 1) {
                 Text(kind.title)
                 Text(kind.detail).font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
-            if !kind.isSupported {
-                Tag(text: "Coming soon")
-            } else if location != nil {
-                Tag(text: "Found", tint: .green)
-            } else {
-                Tag(text: "Not found")
-            }
         }
-        .opacity(kind.isSupported ? 1 : 0.6)
         .onTapGesture(perform: select)
-        .task { location = kind.installedLocation() }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
     }
 
     @ViewBuilder private var icon: some View {
-        if let location, location.pathExtension == "app" {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: location.path)).resizable()
+        if let application, application.pathExtension == "app", FileManager.default.fileExists(atPath: application.path) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: application.path)).resizable()
         } else {
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Color.secondary.opacity(0.15))
@@ -394,15 +389,72 @@ private struct SourceRow: View {
 private struct ProjectChoiceRow: View {
     @Binding var choice: MigrationController.ProjectChoice
     let url: String
+    let documentRoot: String
+    let chooseFolder: (() -> Void)?
+    @State private var folders: [String] = []
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            mainRow
+            if choice.address == .ownSite {
+                documentRootRow
+            }
+        }
+        .opacity(choice.selected ? 1 : 0.55)
+        .task(id: choice.project.source) { folders = Self.folders(in: choice.project.source) }
+    }
+
+    /// Where its own host serves from: the web root inside the project, and
+    /// where the project goes.
+    private var documentRootRow: some View {
+        HStack(spacing: 8) {
+            Text("Document root").font(.caption).foregroundStyle(.secondary)
+            Text((documentRoot as NSString).abbreviatingWithTildeInPath)
+                .font(.caption.monospaced())
+                .lineLimit(1).truncationMode(.middle)
+                .help(documentRoot)
+                .textSelection(.enabled)
+            Spacer(minLength: 8)
+            Picker("Web root", selection: $choice.webRoot) {
+                Text("Project folder").tag("")
+                if !folders.isEmpty { Divider() }
+                ForEach(Array(Set(folders + (choice.webRoot.isEmpty ? [] : [choice.webRoot]))).sorted(), id: \.self) { folder in
+                    Text(folder + "/").tag(folder)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+            .controlSize(.small)
+            .help("The folder inside the project the site serves")
+            if let chooseFolder {
+                Button("Choose…", action: chooseFolder)
+                    .controlSize(.small)
+                    .help("Choose where the project is copied")
+            }
+        }
+        .padding(.leading, 40)
+        .padding(.trailing, 10)
+        .padding(.bottom, 7)
+    }
+
+    /// The project's top-level folders, for its web root.
+    private static func folders(in project: URL) -> [String] {
+        let entries = (try? FileManager.default.contentsOfDirectory(at: project, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+        return entries.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .map(\.lastPathComponent)
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .prefix(40).map { $0 }
+    }
+
+    private var mainRow: some View {
         PanelRow {
             Toggle(choice.project.name, isOn: $choice.selected).labelsHidden()
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(choice.project.name).lineLimit(1).truncationMode(.middle)
                     Tag(text: choice.project.framework.title)
-                    if !choice.project.webRoot.isEmpty { Tag(text: choice.project.webRoot + "/") }
+                    if choice.address == .ownSite, !choice.webRoot.isEmpty { Tag(text: choice.webRoot + "/") }
                 }
                 Text(url).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
@@ -428,8 +480,6 @@ private struct ProjectChoiceRow: View {
             Text(choice.project.kind == .external ? "In place" : MigrationController.bytes(choice.project.bytes))
                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 64, alignment: .trailing)
         }
-        .disabled(false)
-        .opacity(choice.selected ? 1 : 0.55)
     }
 }
 
