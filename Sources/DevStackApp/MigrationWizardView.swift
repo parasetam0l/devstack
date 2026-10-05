@@ -34,7 +34,7 @@ struct MigrationWizardView: View {
             Divider()
             footer
         }
-        .frame(width: 720, height: 620)
+        .frame(width: 780, height: 640)
         .interactiveDismissDisabled(controller.isRunning)
         .onAppear { if controller.installations.isEmpty { controller.loadSources() } }
     }
@@ -180,11 +180,12 @@ struct MigrationWizardView: View {
             Banner(symbol: "exclamationmark.triangle.fill", title: "Fix a hostname", detail: problem, tint: .red)
         }
         if !controller.projects.isEmpty {
-            Panel("Projects", note: "Copies go to your DevStack folder; XAMPP keeps its own. A localhost address works as it did in XAMPP; a host of its own suits projects with a public folder.") {
+            Panel("Projects", note: "Folders in htdocs are copied to your DevStack folder; projects elsewhere stay where they are unless you pick Copy. A localhost address works as it did in XAMPP; a host of its own suits projects with a public folder.") {
                 ForEach($controller.projects) { $choice in
                     ProjectChoiceRow(choice: $choice, url: controller.url(for: choice),
                                      documentRoot: controller.documentRoot(for: choice).path,
-                                     chooseFolder: choice.project.kind == .folder ? { controller.chooseFolder(for: choice.id) } : nil)
+                                     chooseFolder: { controller.chooseFolder(for: choice.id) },
+                                     requestAccess: { openSettings in Task { await controller.requestAccess(for: choice.id, openSettings: openSettings) } })
                 }
             } accessory: {
                 selectAllButton(all: controller.projects.allSatisfy(\.selected)) { selected in
@@ -390,25 +391,48 @@ private struct ProjectChoiceRow: View {
     @Binding var choice: MigrationController.ProjectChoice
     let url: String
     let documentRoot: String
-    let chooseFolder: (() -> Void)?
+    let chooseFolder: () -> Void
+    let requestAccess: (_ openSettings: Bool) -> Void
     @State private var folders: [String] = []
+
+    private var external: Bool { choice.project.kind == .external }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             mainRow
-            if choice.address == .ownSite {
+            if !choice.project.readable {
+                accessRow
+            } else if choice.address == .ownSite || external {
                 documentRootRow
             }
         }
-        .opacity(choice.selected ? 1 : 0.55)
-        .task(id: choice.project.source) { folders = Self.folders(in: choice.project.source) }
+        .opacity(choice.selected || !choice.project.readable ? 1 : 0.55)
+        .task(id: choice.project.readable) { folders = Self.folders(in: choice.project.source) }
     }
 
-    /// Where its own host serves from: the web root inside the project, and
-    /// where the project goes.
+    /// A folder macOS guards: DevStack asks for it, or sends the user to
+    /// Privacy & Security after a refusal.
+    private var accessRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "lock.fill").foregroundStyle(.orange).font(.caption)
+            Text("macOS hasn't let DevStack read \((choice.project.source.path as NSString).abbreviatingWithTildeInPath).")
+                .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            Spacer(minLength: 8)
+            Button("Allow Access…") { requestAccess(true) }
+                .help("Opens Privacy & Security → Files and Folders, where DevStack can be allowed")
+            Button("Check Again") { requestAccess(false) }
+        }
+        .controlSize(.small)
+        .padding(.leading, 40)
+        .padding(.trailing, 10)
+        .padding(.bottom, 7)
+    }
+
+    /// Where it is served from: the web root inside the project, whether it
+    /// is used in place or copied, and where a copy goes.
     private var documentRootRow: some View {
         HStack(spacing: 8) {
-            Text("Document root").font(.caption).foregroundStyle(.secondary)
+            Text(choice.address == .ownSite ? "Document root" : "Served from").font(.caption).foregroundStyle(.secondary)
             Text((documentRoot as NSString).abbreviatingWithTildeInPath)
                 .font(.caption.monospaced())
                 .lineLimit(1).truncationMode(.middle)
@@ -425,14 +449,23 @@ private struct ProjectChoiceRow: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .fixedSize()
-            .controlSize(.small)
             .help("The folder inside the project the site serves")
-            if let chooseFolder {
+            if external {
+                Picker("Files", selection: $choice.copy) {
+                    Text("In place").tag(false)
+                    Text("Copy").tag(true)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .fixedSize()
+                .help("In place serves the folder where it is; Copy puts a copy in your DevStack folder")
+            }
+            if choice.copiesFiles, choice.address == .ownSite || external {
                 Button("Choose…", action: chooseFolder)
-                    .controlSize(.small)
                     .help("Choose where the project is copied")
             }
         }
+        .controlSize(.small)
         .padding(.leading, 40)
         .padding(.trailing, 10)
         .padding(.bottom, 7)
@@ -449,12 +482,12 @@ private struct ProjectChoiceRow: View {
 
     private var mainRow: some View {
         PanelRow {
-            Toggle(choice.project.name, isOn: $choice.selected).labelsHidden()
+            Toggle(choice.project.name, isOn: $choice.selected).labelsHidden().disabled(!choice.project.readable)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(choice.project.name).lineLimit(1).truncationMode(.middle)
-                    Tag(text: choice.project.framework.title)
-                    if choice.address == .ownSite, !choice.webRoot.isEmpty { Tag(text: choice.webRoot + "/") }
+                    Text(choice.project.name).lineLimit(1).truncationMode(.middle).layoutPriority(1)
+                    if choice.project.readable { Tag(text: choice.project.framework.title) }
+                    if external { Tag(text: choice.project.localhostPath != nil ? "Alias" : "Virtual host", tint: .blue) }
                 }
                 Text(url).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
@@ -477,7 +510,7 @@ private struct ProjectChoiceRow: View {
                     .frame(width: 170)
                     .controlSize(.small)
             }
-            Text(choice.project.kind == .external ? "In place" : MigrationController.bytes(choice.project.bytes))
+            Text(choice.inPlace ? "In place" : MigrationController.bytes(choice.project.bytes))
                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 64, alignment: .trailing)
         }
     }

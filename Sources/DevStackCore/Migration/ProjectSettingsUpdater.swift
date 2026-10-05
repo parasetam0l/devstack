@@ -25,9 +25,10 @@ public enum ProjectSettingsUpdater {
         return envValue("DB_DATABASE", in: text)
     }
 
-    /// Applies the changes and returns one line per file changed.
+    /// Applies the changes and returns one line per file changed; with
+    /// `apply` false only says what would change.
     public static func update(project: URL, renamedDatabases: [String: String], mysqlPort: UInt16, newURL: String,
-                              oldURLs: [String]) throws -> [String] {
+                              oldURLs: [String], apply: Bool = true) throws -> [String] {
         var changes: [String] = []
         let wpConfig = project.appendingPathComponent("wp-config.php")
         if var text = try? String(contentsOf: wpConfig, encoding: .utf8) {
@@ -44,7 +45,7 @@ public enum ProjectSettingsUpdater {
                 text = replaceDefine(name, with: newURL, in: text)
             }
             if text != original {
-                try backUpAndWrite(text, to: wpConfig)
+                if apply { try backUpAndWrite(text, to: wpConfig) }
                 changes.append("wp-config.php: database settings and address")
             }
         }
@@ -62,7 +63,7 @@ public enum ProjectSettingsUpdater {
                 text = replaceEnv("APP_URL", with: newURL, in: text)
             }
             if text != original {
-                try backUpAndWrite(text, to: dotEnv)
+                if apply { try backUpAndWrite(text, to: dotEnv) }
                 changes.append(".env: database settings and APP_URL")
             }
         }

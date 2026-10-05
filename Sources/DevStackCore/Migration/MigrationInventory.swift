@@ -23,8 +23,8 @@ public struct MigrationProject: Identifiable, Hashable, Sendable {
     public enum Kind: Hashable, Sendable {
         /// A folder in htdocs; it is copied.
         case folder
-        /// A virtual host whose folder lies outside htdocs; its site serves
-        /// the folder where it is.
+        /// A folder elsewhere that Apache served through an Alias or a
+        /// virtual host; it stays where it is unless it is copied.
         case external
         /// Files directly in htdocs; they go to the localhost site.
         case looseFiles([String])
@@ -40,11 +40,16 @@ public struct MigrationProject: Identifiable, Hashable, Sendable {
     public var webRoot: String
     /// The virtual host name it answered to.
     public var virtualHost: String?
+    /// The localhost/<path> it answered at through an Apache Alias.
+    public var localhostPath: String?
+    /// macOS lets DevStack read the folder; Desktop, Documents and
+    /// Downloads need the user's permission first.
+    public var readable: Bool
     public var files: Int
     public var bytes: Int64
 
     public init(id: String, name: String, source: URL, kind: Kind, framework: ProjectFramework, webRoot: String,
-                virtualHost: String? = nil, files: Int = 0, bytes: Int64 = 0) {
+                virtualHost: String? = nil, localhostPath: String? = nil, readable: Bool = true, files: Int = 0, bytes: Int64 = 0) {
         self.id = id
         self.name = name
         self.source = source
@@ -52,17 +57,19 @@ public struct MigrationProject: Identifiable, Hashable, Sendable {
         self.framework = framework
         self.webRoot = webRoot
         self.virtualHost = virtualHost
+        self.localhostPath = localhostPath
+        self.readable = readable
         self.files = files
         self.bytes = bytes
     }
 
-    /// The addresses it had: under localhost for a folder in htdocs, and its
-    /// virtual host name.
+    /// The addresses it had: under localhost for a folder in htdocs or an
+    /// Alias, and its virtual host name.
     public var originalURLs: [String] {
         var urls: [String] = []
-        if kind == .folder {
-            let path = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
-            urls += ["http://localhost/\(path)", "https://localhost/\(path)", "http://127.0.0.1/\(path)"]
+        for path in [kind == .folder ? name : nil, localhostPath].compactMap({ $0 }) {
+            let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+            urls += ["http://localhost/\(encoded)", "https://localhost/\(encoded)", "http://127.0.0.1/\(encoded)"]
         }
         if let virtualHost { urls += ["http://\(virtualHost)", "https://\(virtualHost)"] }
         return urls
@@ -84,6 +91,9 @@ public struct MigrationDatabase: Identifiable, Hashable, Sendable {
 /// What an XAMPP installation holds, read without changing anything.
 public struct XAMPPInventory: Sendable {
     public var installation: XAMPPInstallation
+    /// The folder Apache served at localhost: XAMPP's htdocs, or the
+    /// DocumentRoot httpd.conf sets instead.
+    public var htdocs: URL
     public var projects: [MigrationProject]
     public var databases: [MigrationDatabase]
     /// The data folder is readable without an administrator password.
@@ -96,11 +106,15 @@ public struct XAMPPInventory: Sendable {
     public var phpINI: String?
     /// XAMPP's own pages in htdocs, which are not imported.
     public var skippedDefaults: [String]
+    /// Apache settings that don't carry over, one sentence each.
+    public var notes: [String]
 
     public init(installation: XAMPPInstallation, projects: [MigrationProject] = [], databases: [MigrationDatabase] = [],
                 dataReadable: Bool = true, dataBytes: Int64 = 0, serverArchitectures: Set<String> = ["arm64"],
-                virtualHostsIncluded: Bool = false, phpINI: String? = nil, skippedDefaults: [String] = []) {
+                virtualHostsIncluded: Bool = false, phpINI: String? = nil, skippedDefaults: [String] = [], notes: [String] = []) {
         self.installation = installation
+        self.htdocs = installation.htdocs
+        self.notes = notes
         self.projects = projects
         self.databases = databases
         self.dataReadable = dataReadable
@@ -128,15 +142,17 @@ public enum XAMPPScanner {
     public static func scan(_ installation: XAMPPInstallation, fileManager: FileManager = .default,
                             progress: (String) -> Void = { _ in }) -> XAMPPInventory {
         var inventory = XAMPPInventory(installation: installation)
-        let httpd = (try? String(contentsOf: installation.httpdConfiguration, encoding: .utf8)) ?? ""
-        inventory.virtualHostsIncluded = ApacheConfiguration.includesVirtualHosts(httpd)
-        let virtualHosts = inventory.virtualHostsIncluded
-            ? ApacheConfiguration.virtualHosts((try? String(contentsOf: installation.virtualHostsConfiguration, encoding: .utf8)) ?? "")
-            : []
+        progress("Reading Apache's configuration…")
+        let apache = ApacheConfiguration.load(installation.httpdConfiguration, serverRoot: installation.root, fileManager: fileManager)
+        inventory.virtualHostsIncluded = !apache.virtualHosts.isEmpty
         inventory.phpINI = try? String(contentsOf: installation.phpINI, encoding: .utf8)
         inventory.serverArchitectures = MachO.architectures(of: installation.mysqld)
 
-        let htdocs = installation.htdocs.resolvingSymlinksInPath().standardizedFileURL
+        // httpd.conf may serve localhost from somewhere other than htdocs.
+        let configuredRoot = apache.documentRoot.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            .flatMap { fileManager.fileExists(atPath: $0.path) ? $0 : nil }
+        let htdocs = (configuredRoot ?? installation.htdocs).resolvingSymlinksInPath().standardizedFileURL
+        inventory.htdocs = htdocs
         let entries = ((try? fileManager.contentsOfDirectory(at: htdocs, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])) ?? [])
             .filter { !$0.lastPathComponent.hasPrefix(".") }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
@@ -168,27 +184,7 @@ public enum XAMPPScanner {
                                                        framework: .plainPHP, webRoot: "", files: size.files, bytes: size.bytes))
         }
 
-        // Virtual hosts: a folder in htdocs takes the host's name and web
-        // root; a folder elsewhere becomes a project of its own.
-        for host in virtualHosts {
-            let root = URL(fileURLWithPath: host.documentRoot, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
-            guard root.path != htdocs.path else { continue }
-            if root.path.hasPrefix(htdocs.path + "/") {
-                let relative = root.path.dropFirst(htdocs.path.count + 1)
-                let folder = String(relative.split(separator: "/").first ?? "")
-                if let index = inventory.projects.firstIndex(where: { $0.kind == .folder && $0.name == folder }), inventory.projects[index].virtualHost == nil {
-                    inventory.projects[index].virtualHost = host.serverName
-                    inventory.projects[index].webRoot = String(relative.dropFirst(folder.count).drop { $0 == "/" })
-                }
-            } else if fileManager.fileExists(atPath: root.path), !inventory.projects.contains(where: { $0.virtualHost == host.serverName }) {
-                // A web root named public or web sits inside the project.
-                let isWebRoot = ["public", "web", "public_html", "htdocs"].contains(root.lastPathComponent.lowercased())
-                let project = isWebRoot ? root.deletingLastPathComponent() : root
-                inventory.projects.append(MigrationProject(id: root.path, name: project.lastPathComponent, source: project, kind: .external,
-                                                           framework: ProjectDetector.detect(at: project, fileManager: fileManager).framework,
-                                                           webRoot: isWebRoot ? root.lastPathComponent : "", virtualHost: host.serverName))
-            }
-        }
+        addApacheProjects(apache, installation: installation, htdocs: htdocs, to: &inventory, fileManager: fileManager, progress: progress)
 
         progress("Reading the databases…")
         let data = installation.dataDirectory
@@ -210,6 +206,97 @@ public enum XAMPPScanner {
         inventory.dataReadable = readable && !dataEntries.isEmpty
         if inventory.dataReadable { inventory.dataBytes = FolderSize.measure(data, fileManager: fileManager).bytes }
         return inventory
+    }
+
+    static let webRootNames: Set<String> = ["public", "web", "public_html", "htdocs", "www"]
+    static let localhostNames: Set<String> = ["", "localhost", "127.0.0.1", "::1"]
+
+    /// Projects Apache served from folders outside htdocs, through Alias
+    /// lines (at localhost/<path>) and virtual hosts (at their own name),
+    /// one per folder; and virtual hosts on folders in htdocs.
+    static func addApacheProjects(_ apache: ApacheSetup, installation: XAMPPInstallation, htdocs: URL, to inventory: inout XAMPPInventory,
+                                  fileManager: FileManager, progress: (String) -> Void) {
+        let xampp = installation.root.resolvingSymlinksInPath().standardizedFileURL
+        func resolved(_ path: String) -> URL { URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL }
+        func inside(_ url: URL, _ folder: URL) -> Bool { url.path == folder.path || url.path.hasPrefix(folder.path + "/") }
+        /// XAMPP's own aliases (phpMyAdmin, icons, the manual) and hosts.
+        func belongsToXAMPP(_ url: URL) -> Bool { inside(url, xampp) && !inside(url, htdocs) }
+
+        var external: [String: Int] = [:]
+        func project(serving served: URL) -> Int {
+            if let index = external[served.path] { return index }
+            let isWebRoot = webRootNames.contains(served.lastPathComponent.lowercased())
+            let folder = isWebRoot ? served.deletingLastPathComponent() : served
+            progress("Reading \(folder.lastPathComponent)…")
+            let readable = FolderAccess.state(of: folder) == .readable
+            let detected = readable ? ProjectDetector.detect(at: folder, fileManager: fileManager) : (framework: ProjectFramework.plainPHP, webRoot: "")
+            let size = readable ? FolderSize.measure(folder, fileManager: fileManager) : (files: 0, bytes: Int64(0))
+            inventory.projects.append(MigrationProject(id: served.path, name: folder.lastPathComponent, source: folder, kind: .external,
+                                                       framework: detected.framework, webRoot: isWebRoot ? served.lastPathComponent : "",
+                                                       readable: readable, files: size.files, bytes: size.bytes))
+            external[served.path] = inventory.projects.count - 1
+            return inventory.projects.count - 1
+        }
+
+        // Hosts on htdocs, or named localhost, are localhost: their Alias
+        // lines are localhost's.
+        var localhostAliases = apache.aliases
+        var hosts: [ApacheVirtualHost] = []
+        for host in apache.virtualHosts {
+            if host.documentRoot.isEmpty || resolved(host.documentRoot).path == htdocs.path || localhostNames.contains(host.serverName) {
+                localhostAliases += host.pathAliases
+            } else if !hosts.contains(where: { $0.serverName == host.serverName }) {
+                hosts.append(host)
+            }
+        }
+
+        for alias in localhostAliases {
+            let target = resolved(alias.directory)
+            let path = alias.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard !path.isEmpty, !belongsToXAMPP(target) else { continue }
+            if inside(target, htdocs) {
+                inventory.notes.append("Alias \(alias.path) served \(target.path.dropFirst(htdocs.path.count + 1)) in htdocs; DevStack serves that folder at its own name.")
+                continue
+            }
+            guard FolderAccess.state(of: target) != .missing else {
+                inventory.notes.append("Alias \(alias.path) pointed to \(target.path), which no longer exists.")
+                continue
+            }
+            let index = project(serving: target)
+            if inventory.projects[index].localhostPath == nil { inventory.projects[index].localhostPath = path }
+        }
+
+        for host in hosts {
+            let root = resolved(host.documentRoot)
+            guard !belongsToXAMPP(root) else { continue }
+            if !host.aliases.isEmpty {
+                inventory.notes.append("\(host.serverName) also answered to \(host.aliases.joined(separator: ", ")); a DevStack site has one name.")
+            }
+            if let port = host.ports.first(where: { !["80", "443", "*"].contains($0) }) {
+                inventory.notes.append("\(host.serverName) listened on port \(port); in DevStack it answers on DevStack's web ports.")
+            }
+            if !host.pathAliases.isEmpty {
+                inventory.notes.append("\(host.serverName) had Alias lines (\(host.pathAliases.map(\.path).joined(separator: ", "))), which don't carry over.")
+            }
+            if inside(root, htdocs) {
+                let relative = root.path.dropFirst(htdocs.path.count + 1)
+                let folder = String(relative.split(separator: "/").first ?? "")
+                if let index = inventory.projects.firstIndex(where: { $0.kind == .folder && $0.name == folder }), inventory.projects[index].virtualHost == nil {
+                    inventory.projects[index].virtualHost = host.serverName
+                    inventory.projects[index].webRoot = String(relative.dropFirst(folder.count).drop { $0 == "/" })
+                }
+                continue
+            }
+            guard FolderAccess.state(of: root) != .missing else {
+                inventory.notes.append("\(host.serverName) pointed to \(root.path), which no longer exists.")
+                continue
+            }
+            let index = project(serving: root)
+            if inventory.projects[index].virtualHost == nil { inventory.projects[index].virtualHost = host.serverName }
+        }
+        for pattern in apache.aliasMatches where !pattern.contains(xampp.path) {
+            inventory.notes.append("AliasMatch \(pattern) is a pattern and doesn't carry over.")
+        }
     }
 
     /// XAMPP's index.php only sends visitors to its dashboard.
@@ -239,6 +326,19 @@ public enum ProjectDetector {
             return (.staticSite, "")
         }
         return (.plainPHP, "")
+    }
+}
+
+public enum FolderAccess {
+    public enum State: Equatable, Sendable { case readable, unreadable, missing }
+
+    /// Whether a folder exists and can be listed. macOS refuses folders in
+    /// Desktop, Documents and Downloads until the user allows DevStack; the
+    /// first try asks.
+    public static func state(of folder: URL) -> State {
+        var info = stat()
+        if stat(folder.path, &info) != 0 { return errno == ENOENT || errno == ENOTDIR ? .missing : .unreadable }
+        return (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) != nil ? .readable : .unreadable
     }
 }
 
@@ -356,9 +456,14 @@ public enum MigrationNaming {
     /// A .localhost name for a project; names ending in .test or .localhost
     /// are kept, others (.local belongs to Bonjour, .dev is a real domain)
     /// trade their last label for .localhost.
-    public static func hostname(for project: MigrationProject, taken: Set<String>) -> String {
+    /// With `keepDomains` (the helper can serve any name), a virtual host
+    /// keeps its own name, except .local, which belongs to Bonjour.
+    public static func hostname(for project: MigrationProject, keepDomains: Bool = false, taken: Set<String>) -> String {
         var base: String
-        if let host = project.virtualHost, !host.isEmpty {
+        if keepDomains, let host = project.virtualHost, !host.hasSuffix(".local"),
+           let valid = try? HostnameValidator.validateSite(host) {
+            base = valid
+        } else if let host = project.virtualHost, !host.isEmpty {
             if host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".test") {
                 base = host
             } else {

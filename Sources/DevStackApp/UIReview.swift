@@ -175,12 +175,16 @@ import SwiftUI
             try? await model.saveConfiguration()
             say("support: \(model.paths.applicationSupport.path)")
             MigrationController.applicationsFolder = applications
+            if CommandLine.arguments.contains("--keep-domains") { MigrationController.keepDomainsOverride = true }
             for round in 1...(CommandLine.arguments.contains("--twice") ? 2 : 1) {
             say("== round \(round)")
             let controller = MigrationController(model: model)
             controller.loadSources()
             say("installations: \(controller.installations.map(\.title))")
             await controller.scan()
+            if CommandLine.arguments.contains("--copy-external") {
+                for index in controller.projects.indices where controller.projects[index].project.kind == .external { controller.projects[index].copy = true }
+            }
             controller.phpRuntimeID = "php-8.5"
             if CommandLine.arguments.contains("--choose-folder"), let index = controller.projects.firstIndex(where: { $0.project.framework == .laravel }) {
                 // As if "Choose…" picked an empty folder elsewhere.
@@ -189,7 +193,9 @@ import SwiftUI
                 controller.projects[index].folder = chosen
             }
             for check in controller.checks { say("check [\(check.status)] \(check.title) — \(check.detail ?? "")") }
-            for choice in controller.projects { say("project \(choice.project.name) → \(controller.url(for: choice))") }
+            for choice in controller.projects {
+                say("project \(choice.project.name) [\(choice.project.kind == .external ? (choice.copy ? "copy" : "in place") : "htdocs")\(choice.project.readable ? "" : ", unreadable")] → \(controller.url(for: choice)) serves \(controller.documentRoot(for: choice).path)")
+            }
             say("databases: \(controller.databases.map { "\($0.database.name)\($0.selected ? "" : " (off)")\($0.exists ? " exists → \($0.targetName)" : "")" })")
             let started = Date()
             controller.start()
@@ -206,16 +212,17 @@ import SwiftUI
                 for database in results.databases { say("database [\(database.outcome)] \(database.source) → \(database.target): \(database.tables) tables, \(database.rows) rows — \(database.message ?? "")") }
                 for note in results.notes { say("note: \(note)") }
                 say("report: \(results.report?.path ?? "-")")
+                // Each project at the address the results give it.
+                for project in results.projects {
+                    guard let url = URL(string: project.url), let host = url.host else { continue }
+                    let body = try? ProcessRunner().run(executable: URL(fileURLWithPath: "/usr/bin/curl"), arguments: [
+                        "-sk", "-L", "--max-time", "10", "--resolve", "\(host):18543:127.0.0.1", project.url.hasSuffix("/") ? project.url : project.url + "/"], timeout: 15)
+                    say("GET \(project.url) → \(body?.standardOutput.prefix(100) ?? "")")
+                }
             }
             }
             say("mysql settings: \(model.configuration.mysqlSettings)")
             for site in model.configuration.sites { say("site root \(site.hostname): \(site.documentRoot)") }
-            for site in model.configuration.sites {
-                let path = site.hostname == "localhost" ? "/wp/" : "/"
-                let body = try? ProcessRunner().run(executable: URL(fileURLWithPath: "/usr/bin/curl"), arguments: [
-                    "-sk", "--max-time", "10", "--resolve", "\(site.hostname):18543:127.0.0.1", "https://\(site.hostname):18543\(path)"], timeout: 15)
-                say("GET \(site.hostname)\(path) → \(body?.standardOutput.prefix(120) ?? "")")
-            }
             await model.stopAll()
             NSApp.terminate(nil)
         }
@@ -238,18 +245,26 @@ import SwiftUI
             MigrationProject(id: "shop", name: "shop kopyası 2", source: htdocs.appendingPathComponent("shop kopyası 2"), kind: .folder, framework: .plainPHP, webRoot: "", virtualHost: "shop.local", files: 2_310, bytes: 210_000_000),
             MigrationProject(id: "app", name: "laravel-app", source: htdocs.appendingPathComponent("laravel-app"), kind: .folder, framework: .laravel, webRoot: "public", files: 9_120, bytes: 96_000_000),
             MigrationProject(id: "blog", name: "blog", source: htdocs.appendingPathComponent("blog"), kind: .folder, framework: .wordpress, webRoot: "", files: 3_402, bytes: 88_000_000),
-            MigrationProject(id: "loose", name: "Files in htdocs", source: htdocs, kind: .looseFiles(["test.php", "info.php"]), framework: .plainPHP, webRoot: "", files: 2, bytes: 9_000)
+            MigrationProject(id: "loose", name: "Files in htdocs", source: htdocs, kind: .looseFiles(["test.php", "info.php"]), framework: .plainPHP, webRoot: "", files: 2, bytes: 9_000),
+            MigrationProject(id: "desk", name: "invoice-tool", source: URL(fileURLWithPath: "/Users/me/Projects/invoice-tool"), kind: .external, framework: .plainPHP,
+                             webRoot: "", localhostPath: "invoices", files: 640, bytes: 21_000_000),
+            MigrationProject(id: "lan", name: "a2fairs-mobile", source: URL(fileURLWithPath: "/Users/me/Projects/a2fairs-mobile"), kind: .external, framework: .laravel,
+                             webRoot: "public", virtualHost: "a2fairs-mobile.lan", files: 12_400, bytes: 180_000_000),
+            MigrationProject(id: "locked", name: "client-site", source: URL(fileURLWithPath: "/Users/me/Desktop/client-site"), kind: .external, framework: .plainPHP,
+                             webRoot: "", localhostPath: "client", readable: false)
         ]
         controller.inventory = XAMPPInventory(installation: xampp, projects: projects,
                                               databases: ["crm_db", "shop", "wp_blog", "test"].map { MigrationDatabase(name: $0, isSample: $0 == "test") },
                                               dataReadable: false, dataBytes: 412_000_000, serverArchitectures: ["x86_64"], virtualHostsIncluded: true,
-                                              skippedDefaults: ["dashboard", "img", "index.php"])
+                                              skippedDefaults: ["dashboard", "img", "index.php"],
+                                              notes: ["a2fairs-mobile.lan also answered to www.a2fairs-mobile.lan; a DevStack site has one name."])
         controller.rosettaAvailable = step != "check"
         controller.phpRuntimeID = "php-8.4"
+        controller.keepDomains = true
         controller.projects = projects.map { project in
             let own = !project.webRoot.isEmpty || project.virtualHost != nil
             return MigrationController.ProjectChoice(project: project, address: own ? .ownSite : .localhostPath,
-                                                     hostname: MigrationNaming.hostname(for: project, taken: []))
+                                                     hostname: MigrationNaming.hostname(for: project, keepDomains: true, taken: []))
         }
         controller.databases = [
             MigrationController.DatabaseChoice(database: MigrationDatabase(name: "crm_db"), selected: true, exists: false, renamedName: "crm_db"),

@@ -56,9 +56,11 @@ final class MigrationController: ObservableObject {
         /// The folder inside the project its own host serves, such as
         /// "public"; "" for the project folder itself.
         var webRoot: String
-        /// Where its files go when it has a host of its own; nil for
-        /// ~/DevStack/<name>.
+        /// Where its files go when they are copied and it has a host of
+        /// its own; nil for ~/DevStack/<name>.
         var folder: URL?
+        /// A project outside htdocs is copied instead of used where it is.
+        var copy = false
         var id: String { project.id }
 
         init(project: MigrationProject, address: Address, hostname: String) {
@@ -66,9 +68,28 @@ final class MigrationController: ObservableObject {
             self.address = address
             self.hostname = hostname
             self.webRoot = project.webRoot
+            self.selected = project.readable
         }
 
-        var canChooseAddress: Bool { project.kind == .folder }
+        var canChooseAddress: Bool {
+            if case .looseFiles = project.kind { return false }
+            return true
+        }
+
+        /// Its files are copied: folders in htdocs always, others when asked.
+        var copiesFiles: Bool { project.kind == .folder || (project.kind == .external && copy) }
+        /// It stays where it is and is served from there.
+        var inPlace: Bool { project.kind == .external && !copy }
+    }
+
+    /// Where an imported project ended up.
+    struct Placement {
+        var choice: ProjectChoice
+        /// The project's folder: its copy, or where it already was.
+        var project: URL
+        /// What localhost/<path> or its own host serves: the folder, or the
+        /// link to it in the localhost folder.
+        var served: URL
     }
 
     /// An app found on this Mac that DevStack imports from.
@@ -169,6 +190,8 @@ final class MigrationController: ObservableObject {
     @Published var rootWithoutPassword = true
     @Published var matchSQLMode = true
     @Published var updateProjectSettings = true
+    /// Virtual hosts keep their own domains: the helper can serve any name.
+    @Published var keepDomains = false
     @Published var tasks: [ImportTask] = []
     @Published var copyProgress: FileCopyProgress?
     @Published var isRunning = false
@@ -187,6 +210,10 @@ final class MigrationController: ObservableObject {
     /// UserDefaults key for the Sites page's import banner, closed by hand
     /// or after an import.
     static let importHintDismissedKey = "DevStackImportHintDismissed"
+
+    /// Keeps virtual hosts' own domains whatever the helper's state; the
+    /// end-to-end review sets it, as it runs without the helper.
+    static var keepDomainsOverride: Bool?
 
     /// Where apps are looked for; the end-to-end review points it at a
     /// fixture.
@@ -225,14 +252,20 @@ final class MigrationController: ObservableObject {
         let engine = model.importDatabaseEngine
         phpRuntimeID = PHPVersionMapping.runtimeID(for: installation.phpVersion, available: model.runtimePackCatalog.packs.map(\.id).filter { $0.hasPrefix("php-") })
             ?? model.configuration.defaultPHPRuntimeID
+        keepDomains = Self.keepDomainsOverride ?? model.helperInstalled
         var taken = Set(model.configuration.sites.map(\.hostname) + HostnameValidator.managementHostnames)
         projects = found.projects.map { project in
-            let hostname = MigrationNaming.hostname(for: project, taken: taken)
+            let hostname = MigrationNaming.hostname(for: project, keepDomains: keepDomains, taken: taken)
             taken.insert(hostname)
-            // A project with its own web root or host name keeps working only
-            // at a host of its own; plain folders keep their XAMPP address.
-            let ownSite = project.kind == .external || !project.webRoot.isEmpty || project.virtualHost != nil
-            let address: Address = { if case .looseFiles = project.kind { return .localhostPath }; return ownSite ? .ownSite : .localhostPath }()
+            // Each project keeps the address it had: a virtual host keeps a
+            // host of its own, an Alias or a plain folder stays under
+            // localhost. A public/ web root needs a host of its own.
+            let address: Address
+            switch project.kind {
+            case .looseFiles: address = .localhostPath
+            case .external: address = project.virtualHost != nil || project.localhostPath == nil ? .ownSite : .localhostPath
+            case .folder: address = !project.webRoot.isEmpty || project.virtualHost != nil ? .ownSite : .localhostPath
+            }
             return ProjectChoice(project: project, address: address, hostname: hostname)
         }
         let existing = model.existingDatabaseNames(engine)
@@ -253,9 +286,27 @@ final class MigrationController: ObservableObject {
         result.append(Check(id: "found", status: .ok, title: "\(installation.title) in \(installation.location.path)",
                              detail: installation.phpVersion.map { "PHP \($0), Apache and MariaDB." }))
         let projectCount = inventory.projects.count
+        let elsewhere = inventory.projects.filter { $0.kind == .external }.count
+        let shape = elsewhere == 0 ? "in htdocs" : "\(projectCount - elsewhere) in htdocs, \(elsewhere) elsewhere through Apache's aliases and virtual hosts"
         result.append(Check(id: "projects", status: projectCount == 0 ? .info : .ok,
-                            title: projectCount == 0 ? "No projects in htdocs" : "\(projectCount) project\(projectCount == 1 ? "" : "s"), \(Self.bytes(inventory.projectBytes))",
+                            title: projectCount == 0 ? "No projects found" : "\(projectCount) project\(projectCount == 1 ? "" : "s"): \(shape)",
                             detail: inventory.skippedDefaults.isEmpty ? nil : "XAMPP's own pages (\(inventory.skippedDefaults.joined(separator: ", "))) stay behind."))
+        let locked = inventory.projects.filter { !$0.readable }
+        if !locked.isEmpty {
+            result.append(Check(id: "access", status: .warning,
+                                title: "macOS hasn't let DevStack read \(locked.count) project folder\(locked.count == 1 ? "" : "s")",
+                                detail: "\(locked.prefix(3).map { ($0.source.path as NSString).abbreviatingWithTildeInPath }.joined(separator: ", "))\(locked.count > 3 ? ", …" : ""). Folders on the Desktop or in Documents and Downloads need your permission; allow it on the next step."))
+        }
+        if inventory.projects.contains(where: { $0.virtualHost.map { !$0.hasSuffix(".localhost") && !$0.hasSuffix(".test") } ?? false }) {
+            result.append(keepDomains
+                ? Check(id: "domains", status: .ok, title: "Sites keep their XAMPP domains", detail: "The helper serves them; .local names become .localhost, as Bonjour owns .local.")
+                : Check(id: "domains", status: .info, title: "Domains become .localhost names",
+                        detail: "Set up the helper in Settings to keep domains such as shop.lan."))
+        }
+        if !inventory.notes.isEmpty {
+            result.append(Check(id: "apache", status: .info, title: "Some Apache settings don't carry over",
+                                detail: inventory.notes.prefix(3).joined(separator: " ") + (inventory.notes.count > 3 ? " The report lists all \(inventory.notes.count)." : "")))
+        }
         if inventory.databases.isEmpty {
             result.append(Check(id: "databases", status: .info, title: "No databases found"))
         } else {
@@ -362,9 +413,24 @@ final class MigrationController: ObservableObject {
         case .ownSite: return "https://\(choice.hostname)\(suffix)"
         case .localhostPath:
             if case .looseFiles = choice.project.kind { return "https://localhost\(suffix)/" }
-            let name = folder?.lastPathComponent ?? MigrationNaming.folder(named: choice.project.name, in: localhostRoot).lastPathComponent
-            return "https://localhost\(suffix)/\(name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name)"
+            return "https://localhost\(suffix)/\(localhostPath(of: folder ?? localhostLocation(for: choice)))"
         }
+    }
+
+    /// Where a project under localhost will be: its copy for a folder in
+    /// htdocs, a link to it for one elsewhere (named as its Alias was).
+    func localhostLocation(for choice: ProjectChoice) -> URL {
+        guard choice.project.kind == .external else { return MigrationNaming.folder(named: choice.project.name, in: localhostRoot) }
+        let parts = (choice.project.localhostPath ?? choice.project.name).split(separator: "/").map(String.init)
+        let parent = parts.dropLast().reduce(localhostRoot) { $0.appendingPathComponent($1, isDirectory: true) }
+        return MigrationNaming.folder(named: parts.last ?? choice.project.name, in: parent)
+    }
+
+    /// The URL path of something in the localhost folder, encoded.
+    private func localhostPath(of location: URL) -> String {
+        let root = localhostRoot.path + "/"
+        let relative = location.path.hasPrefix(root) ? String(location.path.dropFirst(root.count)) : location.lastPathComponent
+        return relative.split(separator: "/").map { String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }.joined(separator: "/")
     }
 
     private var projectsRoot: URL {
@@ -374,7 +440,7 @@ final class MigrationController: ObservableObject {
     /// Where the project's files will be.
     func destination(for choice: ProjectChoice) -> URL {
         switch choice.project.kind {
-        case .external: return choice.project.source
+        case .external: return choice.copy ? choice.folder ?? MigrationNaming.folder(named: choice.project.name, in: projectsRoot) : choice.project.source
         case .looseFiles: return localhostRoot
         case .folder:
             if choice.address == .localhostPath { return MigrationNaming.folder(named: choice.project.name, in: localhostRoot) }
@@ -410,6 +476,27 @@ final class MigrationController: ObservableObject {
         actionError = nil
         let empty = ((try? FileManager.default.contentsOfDirectory(atPath: chosen.path)) ?? ["?"]).filter { $0 != ".DS_Store" }.isEmpty
         projects[index].folder = empty ? chosen : MigrationNaming.folder(named: choice.project.name, in: chosen)
+    }
+
+    /// Tries the folder again; the first try makes macOS ask, and after a
+    /// refusal only Privacy & Security can allow it.
+    func requestAccess(for id: String, openSettings: Bool) async {
+        guard let index = projects.firstIndex(where: { $0.id == id }) else { return }
+        let folder = projects[index].project.source
+        let state = await Task.detached { FolderAccess.state(of: folder) }.value
+        guard state == .readable else {
+            if openSettings, let settings = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") {
+                NSWorkspace.shared.open(settings)
+            }
+            return
+        }
+        let found = await Task.detached { (ProjectDetector.detect(at: folder), FolderSize.measure(folder)) }.value
+        guard let current = projects.firstIndex(where: { $0.id == id }) else { return }
+        projects[current].project.readable = true
+        projects[current].project.framework = found.0.framework
+        projects[current].project.files = found.1.files
+        projects[current].project.bytes = found.1.bytes
+        projects[current].selected = true
     }
 
     private var localhostRoot: URL {
@@ -483,6 +570,7 @@ final class MigrationController: ObservableObject {
         }
 
         var outcome = Results()
+        outcome.notes = inventory.notes
         let stamp = Self.stamp()
         let exportsFolder = model.paths.backups.appendingPathComponent("XAMPP import \(stamp)", isDirectory: true)
         let workFolder = model.paths.applicationSupport.appendingPathComponent("Imports/\(UUID().uuidString)", isDirectory: true)
@@ -517,8 +605,8 @@ final class MigrationController: ObservableObject {
         }
 
         // Projects.
-        var placed: [(choice: ProjectChoice, folder: URL)] = []
-        // Folders this run copied; a cancel before their sites exist removes them.
+        var placed: [Placement] = []
+        // Folders and links this run made; a cancel before their sites exist removes them.
         var createdFolders: [URL] = []
         func cancelCopies() {
             for folder in createdFolders { try? FileManager.default.removeItem(at: folder) }
@@ -528,8 +616,9 @@ final class MigrationController: ObservableObject {
             update("files", .running)
             let localhostRoot = self.localhostRoot
             let projectsRoot = self.projectsRoot
-            let totalBytes = chosenProjects.filter { $0.project.kind != .external }.reduce(Int64(0)) { $0 + $1.project.bytes }
-            let totalFiles = chosenProjects.filter { $0.project.kind != .external }.reduce(0) { $0 + $1.project.files }
+            let copied = chosenProjects.filter { $0.copiesFiles || $0.project.kind != .external }
+            let totalBytes = copied.reduce(Int64(0)) { $0 + $1.project.bytes }
+            let totalFiles = copied.reduce(0) { $0 + $1.project.files }
             var doneBytes: Int64 = 0
             var doneFiles = 0
             var skippedFiles: [FileCopyFailure] = []
@@ -537,10 +626,7 @@ final class MigrationController: ObservableObject {
             for choice in chosenProjects {
                 if cancelled { cancelCopies(); return finish() }
                 let project = choice.project
-                switch project.kind {
-                case .external:
-                    placed.append((choice, project.source))
-                case .looseFiles(let names):
+                if case .looseFiles(let names) = project.kind {
                     let result = await Task.detached { try? ProjectCopier.copyFiles(names, from: project.source, into: localhostRoot) }.value
                     if let result {
                         skippedFiles += result.failures
@@ -548,11 +634,15 @@ final class MigrationController: ObservableObject {
                     }
                     doneFiles += project.files
                     doneBytes += project.bytes
-                    placed.append((choice, localhostRoot))
-                case .folder:
-                    let parent = choice.address == .localhostPath ? localhostRoot : projectsRoot
+                    placed.append(Placement(choice: choice, project: localhostRoot, served: localhostRoot))
+                    continue
+                }
+                var folder = project.source
+                if choice.copiesFiles {
+                    let underLocalhost = project.kind == .folder && choice.address == .localhostPath
+                    let parent = underLocalhost ? localhostRoot : projectsRoot
                     var destination = MigrationNaming.folder(named: project.name, in: parent, taken: takenFolders)
-                    if choice.address == .ownSite, let chosen = choice.folder {
+                    if !underLocalhost, let chosen = choice.folder {
                         // An empty folder chosen for it takes the project itself.
                         let contents = ((try? FileManager.default.contentsOfDirectory(atPath: chosen.path)) ?? []).filter { $0 != ".DS_Store" }
                         if !FileManager.default.fileExists(atPath: chosen.path) || contents.isEmpty {
@@ -564,7 +654,7 @@ final class MigrationController: ObservableObject {
                         }
                     }
                     takenFolders.insert(destination.lastPathComponent.lowercased())
-                    if choice.folder == nil || choice.address == .localhostPath, destination.lastPathComponent != project.name {
+                    if choice.folder == nil || underLocalhost, destination.lastPathComponent != project.name {
                         outcome.notes.append("\(project.name) went to \(destination.lastPathComponent), as \(parent.path) already has a \(project.name).")
                     }
                     let base = (bytes: doneBytes, files: doneFiles)
@@ -598,8 +688,32 @@ final class MigrationController: ObservableObject {
                     doneBytes += project.bytes
                     doneFiles += project.files
                     createdFolders.append(destination)
-                    placed.append((choice, destination))
+                    folder = destination
                 }
+                var served = folder
+                if project.kind == .external, choice.address == .localhostPath {
+                    // localhost/<alias> keeps working through a link in the
+                    // localhost folder to where the project is.
+                    let target = choice.webRoot.isEmpty ? folder : folder.appendingPathComponent(choice.webRoot, isDirectory: true)
+                    // An earlier import may have linked it already.
+                    let plain = (choice.project.localhostPath ?? project.name).split(separator: "/").reduce(localhostRoot) { $0.appendingPathComponent(String($1)) }
+                    if let existing = try? FileManager.default.destinationOfSymbolicLink(atPath: plain.path),
+                       URL(fileURLWithPath: existing).standardizedFileURL.path == target.standardizedFileURL.path {
+                        placed.append(Placement(choice: choice, project: folder, served: plain))
+                        continue
+                    }
+                    let link = localhostLocation(for: choice)
+                    do {
+                        try FileManager.default.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+                        createdFolders.append(link)
+                        served = link
+                    } catch {
+                        outcome.notes.append("\(project.name) could not be linked into localhost: \(error.localizedDescription)")
+                        continue
+                    }
+                }
+                placed.append(Placement(choice: choice, project: folder, served: served))
             }
             copyProgress = nil
             if skippedFiles.isEmpty {
@@ -613,7 +727,9 @@ final class MigrationController: ObservableObject {
             update("sites", .running)
             let overrides = PHPSettingsImport.overrides(fromPHPINI: inventory.phpINI)
             var sites: [SiteDefinition] = []
-            for (choice, folder) in placed where choice.address == .ownSite {
+            for placement in placed where placement.choice.address == .ownSite {
+                let choice = placement.choice
+                let folder = placement.project
                 let webRoot = choice.webRoot.isEmpty ? folder : folder.appendingPathComponent(choice.webRoot, isDirectory: true)
                 let id = UUID()
                 sites.append(SiteDefinition(
@@ -659,14 +775,20 @@ final class MigrationController: ObservableObject {
             var changed: [String] = []
             let port = model.configuration.ports.mysqlListen
             let renames = renamed.filter { $0.key != $0.value }
-            for (choice, folder) in placed {
+            var untouched: [String] = []
+            for placement in placed {
+                let choice = placement.choice
+                let folder = placement.project
                 if case .looseFiles = choice.project.kind { continue }
-                let newURL = url(for: choice, folder: folder)
+                let newURL = url(for: choice, folder: placement.served)
                 // Read before the update, which may rename its database.
                 let wordPress = choice.project.framework == .wordpress ? ProjectSettingsUpdater.wordPressSettings(in: folder) : nil
-                if let changes = try? ProjectSettingsUpdater.update(project: folder, renamedDatabases: renames, mysqlPort: port, newURL: newURL, oldURLs: choice.project.originalURLs),
+                // A project used where it is keeps its files as they are.
+                if let changes = try? ProjectSettingsUpdater.update(project: folder, renamedDatabases: renames, mysqlPort: port, newURL: newURL,
+                                                                    oldURLs: choice.project.originalURLs, apply: !choice.inPlace),
                    !changes.isEmpty {
-                    changed += changes.map { "\(choice.project.name): \($0)" }
+                    if choice.inPlace { untouched.append("\(choice.project.name) stays where it is, so DevStack left its files alone; change by hand: \(changes.joined(separator: "; ")).") }
+                    else { changed += changes.map { "\(choice.project.name): \($0)" } }
                 }
                 if let settings = wordPress, let database = settings.database, let target = renamed[database], imported.contains(target) {
                     if let rows = await replaceWordPressAddresses(database: target, prefix: settings.tablePrefix, oldURLs: choice.project.originalURLs, newURL: newURL) {
@@ -678,6 +800,7 @@ final class MigrationController: ObservableObject {
             }
             update("settings", .done, detail: changed.isEmpty ? "Nothing pointed at XAMPP." : "\(changed.count) change\(changed.count == 1 ? "" : "s"); originals kept as .xampp-backup")
             outcome.notes += changed
+            outcome.notes += untouched
         }
 
         // The stack and each site.
@@ -1026,12 +1149,14 @@ final class MigrationController: ObservableObject {
 
     // MARK: After-checks
 
-    private func probe(_ placed: [(choice: ProjectChoice, folder: URL)]) async -> [ProjectResult] {
+    private func probe(_ placed: [Placement]) async -> [ProjectResult] {
         guard let model else { return [] }
         let port = model.configuration.ports.webHTTPSListen
         var results: [ProjectResult] = []
-        for (choice, folder) in placed {
-            let url = url(for: choice, folder: folder)
+        for placement in placed {
+            let choice = placement.choice
+            let folder = placement.project
+            let url = url(for: choice, folder: placement.served)
             let site = choice.address == .ownSite
                 ? model.configuration.sites.first { $0.hostname == choice.hostname.lowercased() }
                 : model.configuration.sites.first { $0.hostname == "localhost" }
@@ -1039,12 +1164,8 @@ final class MigrationController: ObservableObject {
                 results.append(ProjectResult(id: choice.id, name: choice.project.name, url: url, folder: folder.path, outcome: .failed, message: "Its site was not added."))
                 continue
             }
-            let path: String
-            if choice.address == .localhostPath, choice.project.kind == .folder {
-                path = "/" + (folder.lastPathComponent.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? folder.lastPathComponent) + "/"
-            } else {
-                path = "/"
-            }
+            // Loose files are localhost itself; the rest sit under it.
+            let path = choice.address == .localhostPath && choice.canChooseAddress ? "/" + localhostPath(of: placement.served) + "/" : "/"
             let log = URL(fileURLWithPath: site.logs.error)
             let host = site.hostname
             let response = await Task.detached { () -> (SiteProbe.Response, [String]) in

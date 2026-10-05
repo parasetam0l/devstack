@@ -172,58 +172,223 @@ public enum INIFile {
     }
 }
 
-/// An Apache `<VirtualHost>` block.
-public struct ApacheVirtualHost: Hashable, Sendable {
-    public var serverName: String
-    public var aliases: [String]
-    public var documentRoot: String
+/// An Apache `Alias`: a URL path served from a folder.
+public struct ApacheAlias: Hashable, Sendable {
+    /// "/project1"
+    public var path: String
+    public var directory: String
 
-    public init(serverName: String, aliases: [String] = [], documentRoot: String) {
-        self.serverName = serverName
-        self.aliases = aliases
-        self.documentRoot = documentRoot
+    public init(path: String, directory: String) {
+        self.path = path
+        self.directory = directory
     }
 }
 
+/// An Apache `<VirtualHost>` block.
+public struct ApacheVirtualHost: Hashable, Sendable {
+    /// Lowercased, without a port; "" when the block names none.
+    public var serverName: String
+    public var aliases: [String]
+    public var documentRoot: String
+    /// The ports it listens on, from `<VirtualHost *:80 *:8080>`.
+    public var ports: [String]
+    /// `Alias` lines inside the block.
+    public var pathAliases: [ApacheAlias]
+
+    public init(serverName: String, aliases: [String] = [], documentRoot: String, ports: [String] = [], pathAliases: [ApacheAlias] = []) {
+        self.serverName = serverName
+        self.aliases = aliases
+        self.documentRoot = documentRoot
+        self.ports = ports
+        self.pathAliases = pathAliases
+    }
+}
+
+/// What an Apache configuration serves, read from httpd.conf and every file
+/// it includes.
+public struct ApacheSetup: Hashable, Sendable {
+    /// The main DocumentRoot, outside any virtual host.
+    public var documentRoot: String?
+    public var virtualHosts: [ApacheVirtualHost] = []
+    /// `Alias` lines outside virtual hosts.
+    public var aliases: [ApacheAlias] = []
+    /// `AliasMatch` patterns, which are regular expressions and not carried.
+    public var aliasMatches: [String] = []
+    /// The files read, in order.
+    public var files: [String] = []
+
+    public init() {}
+}
+
 public enum ApacheConfiguration {
-    /// Whether httpd.conf includes the virtual hosts file; XAMPP ships it
-    /// commented out.
-    public static func includesVirtualHosts(_ httpdConfiguration: String) -> Bool {
-        httpdConfiguration.split(whereSeparator: \.isNewline).contains { line in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            return trimmed.lowercased().hasPrefix("include") && trimmed.contains("httpd-vhosts.conf")
-        }
+    /// Reads `file` and everything it includes the way Apache does: paths
+    /// relative to ServerRoot, `Include` and `IncludeOptional` with
+    /// wildcards, `Define` variables and continued lines. An installation
+    /// moved after it was set up (/Applications/XAMPP renamed XAMPP82) still
+    /// names its old ServerRoot; paths under it are read as under
+    /// `serverRoot`.
+    public static func load(_ file: URL, serverRoot: URL, fileManager: FileManager = .default) -> ApacheSetup {
+        var setup = ApacheSetup()
+        var state = ParseState(serverRoot: serverRoot)
+        state.installation = serverRoot.standardizedFileURL.path
+        read(file, state: &state, setup: &setup, depth: 0, fileManager: fileManager)
+        return setup
+    }
+
+    /// Reads configuration text on its own, without following includes.
+    public static func parse(_ text: String, serverRoot: URL) -> ApacheSetup {
+        var setup = ApacheSetup()
+        var state = ParseState(serverRoot: serverRoot)
+        parse(text, state: &state, setup: &setup, depth: 0, fileManager: .default, follow: false)
+        return setup
     }
 
     /// The virtual hosts with a name and a document root, one per name; the
     /// example hosts XAMPP ships are left out.
     public static func virtualHosts(_ text: String) -> [ApacheVirtualHost] {
-        var hosts: [ApacheVirtualHost] = []
-        var current: (name: String?, aliases: [String], root: String?)?
-        for rawLine in text.split(whereSeparator: \.isNewline) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !line.hasPrefix("#") else { continue }
-            let lower = line.lowercased()
-            if lower.hasPrefix("<virtualhost") {
-                current = (nil, [], nil)
-            } else if lower.hasPrefix("</virtualhost") {
-                if let block = current, let name = block.name, let root = block.root,
-                   !name.contains("dummy-host"), !hosts.contains(where: { $0.serverName == name }) {
-                    hosts.append(ApacheVirtualHost(serverName: name, aliases: block.aliases, documentRoot: root))
+        var named: [ApacheVirtualHost] = []
+        for host in parse(text, serverRoot: URL(fileURLWithPath: "/")).virtualHosts
+        where !host.serverName.isEmpty && !host.documentRoot.isEmpty && !named.contains(where: { $0.serverName == host.serverName }) {
+            named.append(host)
+        }
+        return named
+    }
+
+    private struct ParseState {
+        var serverRoot: URL
+        /// Where the installation really is, and the ServerRoot its
+        /// configuration names when that differs.
+        var installation: String?
+        var movedFrom: String?
+        var variables: [String: String] = [:]
+        var visited: Set<String> = []
+        var host: ApacheVirtualHost?
+    }
+
+    private static func read(_ file: URL, state: inout ParseState, setup: inout ApacheSetup, depth: Int, fileManager: FileManager) {
+        let path = file.standardizedFileURL.path
+        guard depth < 16, !state.visited.contains(path),
+              let text = (try? String(contentsOf: file, encoding: .utf8)) ?? (try? String(contentsOf: file, encoding: .isoLatin1)) else { return }
+        state.visited.insert(path)
+        setup.files.append(path)
+        parse(text, state: &state, setup: &setup, depth: depth, fileManager: fileManager, follow: true)
+    }
+
+    private static func parse(_ text: String, state: inout ParseState, setup: inout ApacheSetup, depth: Int, fileManager: FileManager, follow: Bool) {
+        var pending = ""
+        for rawLine in text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+            var line = pending + rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasSuffix("\\") {
+                pending = String(line.dropLast()) + " "
+                continue
+            }
+            pending = ""
+            line = line.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            let words = tokens(line).map { substitute($0, state.variables) }
+            guard let directive = words.first?.lowercased() else { continue }
+            let arguments = Array(words.dropFirst())
+            switch directive {
+            case "serverroot":
+                guard let value = arguments.first else { continue }
+                let named = URL(fileURLWithPath: value, isDirectory: true).standardizedFileURL.path
+                if let installation = state.installation, named != installation {
+                    state.movedFrom = named
+                } else {
+                    state.serverRoot = URL(fileURLWithPath: value, isDirectory: true)
                 }
-                current = nil
-            } else if current != nil {
-                let parts = line.split(maxSplits: 1, whereSeparator: \.isWhitespace)
-                guard parts.count == 2 else { continue }
-                let value = parts[1].trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-                switch parts[0].lowercased() {
-                case "servername": current?.name = value.split(separator: ":").first.map(String.init)?.lowercased()
-                case "serveralias": current?.aliases += value.split(whereSeparator: \.isWhitespace).map { $0.lowercased() }
-                case "documentroot": current?.root = value
-                default: break
+            case "define":
+                if arguments.count >= 2 { state.variables[arguments[0]] = arguments[1] }
+            case "include", "includeoptional":
+                guard follow, let pattern = arguments.first else { continue }
+                for file in expand(resolve(pattern, state), fileManager: fileManager) {
+                    read(file, state: &state, setup: &setup, depth: depth + 1, fileManager: fileManager)
                 }
+            case "<virtualhost":
+                let ports = arguments.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ">")) }
+                    .compactMap { $0.split(separator: ":").last.map(String.init) }.filter { !$0.isEmpty }
+                state.host = ApacheVirtualHost(serverName: "", documentRoot: "", ports: ports)
+            case "</virtualhost>":
+                if let host = state.host, !host.serverName.contains("dummy-host") { setup.virtualHosts.append(host) }
+                state.host = nil
+            case "servername":
+                if let value = arguments.first {
+                    // "http://shop.test:80" and "shop.test:80" name shop.test.
+                    var name = value.lowercased()
+                    if let scheme = name.range(of: "://") { name = String(name[scheme.upperBound...]) }
+                    state.host?.serverName = String(name.split(separator: ":").first ?? "")
+                }
+            case "serveralias":
+                state.host?.aliases += arguments.map { $0.lowercased() }
+            case "documentroot":
+                guard let value = arguments.first else { continue }
+                let root = resolve(value, state).path
+                if state.host != nil { state.host?.documentRoot = root } else { setup.documentRoot = root }
+            case "alias":
+                guard arguments.count >= 2 else { continue }
+                let alias = ApacheAlias(path: arguments[0], directory: resolve(arguments[1], state).path)
+                if state.host != nil { state.host?.pathAliases.append(alias) } else { setup.aliases.append(alias) }
+            case "aliasmatch":
+                if arguments.count >= 2 { setup.aliasMatches.append("\(arguments[0]) → \(arguments[1])") }
+            default:
+                break
             }
         }
-        return hosts
+    }
+
+    /// Words of a directive, with double-quoted words kept whole.
+    static func tokens(_ line: String) -> [String] {
+        var words: [String] = []
+        var current = ""
+        var quoted = false
+        var hasWord = false
+        for character in line {
+            if character == "\"" {
+                quoted.toggle()
+                hasWord = true
+            } else if character.isWhitespace, !quoted {
+                if hasWord { words.append(current) }
+                current = ""
+                hasWord = false
+            } else {
+                current.append(character)
+                hasWord = true
+            }
+        }
+        if hasWord { words.append(current) }
+        return words
+    }
+
+    private static func substitute(_ word: String, _ variables: [String: String]) -> String {
+        guard word.contains("${") else { return word }
+        var result = word
+        for (name, value) in variables { result = result.replacingOccurrences(of: "${\(name)}", with: value) }
+        return result
+    }
+
+    private static func resolve(_ path: String, _ state: ParseState) -> URL {
+        var path = path
+        if let moved = state.movedFrom, let installation = state.installation, path == moved || path.hasPrefix(moved + "/") {
+            path = installation + path.dropFirst(moved.count)
+        }
+        let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : state.serverRoot.appendingPathComponent(path)
+        return url.standardizedFileURL
+    }
+
+    /// The files an Include names: one file, every file in a folder, or the
+    /// matches of a wildcard in the last part of the path.
+    private static func expand(_ url: URL, fileManager: FileManager) -> [URL] {
+        let name = url.lastPathComponent
+        var isDirectory: ObjCBool = false
+        if !name.contains("*") && !name.contains("?") && !name.contains("[") {
+            guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return [] }
+            guard isDirectory.boolValue else { return [url] }
+            return ((try? fileManager.contentsOfDirectory(atPath: url.path)) ?? []).filter { !$0.hasPrefix(".") }.sorted()
+                .map { url.appendingPathComponent($0) }
+        }
+        let folder = url.deletingLastPathComponent()
+        return ((try? fileManager.contentsOfDirectory(atPath: folder.path)) ?? []).sorted()
+            .filter { fnmatch(name, $0, 0) == 0 }
+            .map { folder.appendingPathComponent($0) }
     }
 }

@@ -923,8 +923,23 @@ private func migrationChecks() throws {
     // php.ini, my.cnf and Apache files.
     let ini = INIFile.settings("[client]\nport=3306\n[mysqld]\n; comment\nuser=mysql\ndatadir = \"/data dir\"\nskip-networking\nport=3306 # trailing\n", section: "mysqld")
     try expect(ini.map(\.key) == ["user", "datadir", "skip-networking", "port"] && ini[1].value == "/data dir" && ini[3].value == "3306", "my.cnf was misread")
-    try expect(ApacheConfiguration.includesVirtualHosts("#Include etc/extra/httpd-vhosts.conf\n") == false
-               && ApacheConfiguration.includesVirtualHosts("Include etc/extra/httpd-vhosts.conf\n"), "The virtual hosts include was misread")
+    let parsed = ApacheConfiguration.parse("""
+        Define SITES /Users/me/Sites
+        # Alias /commented "/nowhere"
+        Alias /one "${SITES}/one"
+        Alias "/two words" \\
+            "/Users/me/Two Words/public"
+        <VirtualHost *:80 *:8081>
+            ServerName http://Api.Test:80
+            DocumentRoot relative/root
+            Alias /docs /Users/me/docs
+        </VirtualHost>
+        """, serverRoot: URL(fileURLWithPath: "/srv"))
+    try expect(parsed.aliases == [ApacheAlias(path: "/one", directory: "/Users/me/Sites/one"), ApacheAlias(path: "/two words", directory: "/Users/me/Two Words/public")],
+               "Alias lines were misread: \(parsed.aliases)")
+    try expect(parsed.virtualHosts == [ApacheVirtualHost(serverName: "api.test", documentRoot: "/srv/relative/root", ports: ["80", "8081"],
+                                                         pathAliases: [ApacheAlias(path: "/docs", directory: "/Users/me/docs")])],
+               "A virtual host was misread: \(parsed.virtualHosts)")
     let hosts = ApacheConfiguration.virtualHosts("""
         <VirtualHost *:80>
             ServerName dummy-host.example.com
@@ -941,16 +956,71 @@ private func migrationChecks() throws {
             DocumentRoot "/htdocs/shop/public"
         </VirtualHost>
         """)
-    try expect(hosts == [ApacheVirtualHost(serverName: "shop.local", aliases: ["www.shop.local"], documentRoot: "/htdocs/shop/public")], "Virtual hosts were misread")
+    try expect(hosts == [ApacheVirtualHost(serverName: "shop.local", aliases: ["www.shop.local"], documentRoot: "/htdocs/shop/public", ports: ["80"])],
+               "Virtual hosts were misread: \(hosts)")
+
+    // An installation moved after setup still names its old ServerRoot.
+    let moved = scratch.appendingPathComponent("XAMPP82/xamppfiles")
+    try FileManager.default.createDirectory(at: moved.appendingPathComponent("etc"), withIntermediateDirectories: true)
+    try Data("""
+        ServerRoot "/Applications/XAMPP/xamppfiles"
+        DocumentRoot "/Applications/XAMPP/xamppfiles/htdocs"
+        Alias /phpmyadmin "/Applications/XAMPP/xamppfiles/phpmyadmin"
+        Alias /mine "/Users/me/mine"
+        """.utf8).write(to: moved.appendingPathComponent("etc/httpd.conf"))
+    let movedSetup = ApacheConfiguration.load(moved.appendingPathComponent("etc/httpd.conf"), serverRoot: moved)
+    try expect(movedSetup.documentRoot == moved.appendingPathComponent("htdocs").path
+               && movedSetup.aliases.map(\.directory) == [moved.appendingPathComponent("phpmyadmin").path, "/Users/me/mine"],
+               "A moved installation's paths were not read as its own: \(movedSetup.documentRoot ?? "-") \(movedSetup.aliases)")
 
     // A small XAMPP installation.
     let applications = scratch.appendingPathComponent("Applications")
     let root = applications.appendingPathComponent("XAMPP/xamppfiles")
     let htdocs = root.appendingPathComponent("htdocs")
+    let elsewhere = scratch.appendingPathComponent("Elsewhere")
     let files: [String: String] = [
         "xampp": "", "properties.ini": "[General]\nbase_stack_version=8.2.4-0\n",
-        "etc/httpd.conf": "Include etc/extra/httpd-vhosts.conf\n",
-        "etc/extra/httpd-vhosts.conf": "<VirtualHost *:80>\nServerName crm.local\nDocumentRoot \"\(htdocs.path)/crm/public\"\n</VirtualHost>\n<VirtualHost *:80>\nServerName api.dev\nDocumentRoot \"\(scratch.path)/api/public\"\n</VirtualHost>\n",
+        "etc/httpd.conf": """
+            ServerRoot "\(root.path)"
+            DocumentRoot "\(htdocs.path)"
+            Include etc/extra/httpd-vhosts.conf
+            IncludeOptional etc/extra/custom/*.conf
+            Include etc/extra/httpd-xampp.conf
+            IncludeOptional etc/extra/missing/*.conf
+            """,
+        "etc/extra/httpd-xampp.conf": "Alias /phpmyadmin \"\(root.path)/phpmyadmin\"\nAliasMatch ^/manual(.*)$ \"\(root.path)/manual$1\"\n",
+        "etc/extra/httpd-vhosts.conf": """
+            <VirtualHost *:80>
+                ServerName localhost
+                DocumentRoot "\(htdocs.path)"
+                Alias /desk1 "\(elsewhere.path)/Desktop/desk1"
+            </VirtualHost>
+            <VirtualHost *:80>
+                ServerName crm.local
+                DocumentRoot "\(htdocs.path)/crm/public"
+            </VirtualHost>
+            <VirtualHost *:80>
+                ServerName api.dev
+                DocumentRoot "\(scratch.path)/api/public"
+            </VirtualHost>
+            """,
+        "etc/extra/custom/projects.conf": """
+            Define PROJECTS "\(elsewhere.path)/Projects"
+            Alias /desk2 \\
+                "${PROJECTS}/desk2"
+            Alias /shopcode "${PROJECTS}/shop/public"
+            Alias /gone "\(elsewhere.path)/Gone"
+            Alias /locked "\(elsewhere.path)/Locked"
+            AliasMatch ^/x(.*)$ "/tmp/x$1"
+            <VirtualHost *:80 *:8081>
+                ServerName shop.lan
+                ServerAlias www.shop.lan
+                DocumentRoot "${PROJECTS}/shop/public"
+            </VirtualHost>
+            """,
+        "../../../Elsewhere/Desktop/desk1/index.php": "<?php", "../../../Elsewhere/Projects/desk2/index.php": "<?php",
+        "../../../Elsewhere/Projects/shop/artisan": "", "../../../Elsewhere/Projects/shop/public/index.php": "<?php",
+        "../../../Elsewhere/Locked/index.php": "<?php",
         "etc/my.cnf": "[mysqld]\ndatadir=\(root.path)/var/mysql\n",
         "etc/php.ini": "memory_limit=1G\nupload_max_filesize=8M\nmax_execution_time=0\n",
         "htdocs/index.php": "<?php header('Location: '.$uri.'/dashboard/');",
@@ -969,8 +1039,29 @@ private func migrationChecks() throws {
     }
     let installations = XAMPPInstallation.find(applications: applications)
     try expect(installations.count == 1 && installations[0].version == "8.2.4" && installations[0].phpVersion == "8.2", "XAMPP was not found")
+    let locked = elsewhere.appendingPathComponent("Locked")
+    try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: locked.path)
     let inventory = XAMPPScanner.scan(installations[0])
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
     func project(_ name: String) -> MigrationProject? { inventory.projects.first { $0.name == name } }
+    try expect(project("desk1")?.kind == .external && project("desk1")?.localhostPath == "desk1" && project("desk1")?.readable == true,
+               "An Alias inside the localhost host was missed")
+    try expect(project("desk2")?.localhostPath == "desk2", "An Alias in an included file was missed")
+    try expect(project("shop")?.virtualHost == "shop.lan" && project("shop")?.localhostPath == "shopcode" && project("shop")?.webRoot == "public"
+               && project("shop")?.framework == .laravel, "An Alias and a host on one folder were not one project")
+    try expect(project("shop")?.originalURLs.contains("http://localhost/shopcode") == true && project("shop")?.originalURLs.contains("http://shop.lan") == true,
+               "An Alias project's XAMPP addresses were misread")
+    try expect(project("Locked")?.readable == false, "A folder DevStack can't read was not marked")
+    try expect(project("phpmyadmin") == nil && project("Gone") == nil && project("manual") == nil, "XAMPP's own or missing folders became projects")
+    for expected in ["/gone", "www.shop.lan", "8081", "AliasMatch ^/x"] {
+        try expect(inventory.notes.contains { $0.contains(expected) }, "The notes do not mention \(expected): \(inventory.notes)")
+    }
+    try expect(!inventory.notes.contains { $0.contains("manual") }, "XAMPP's own AliasMatch was reported")
+    try expect(MigrationNaming.hostname(for: project("shop")!, keepDomains: true, taken: []) == "shop.lan"
+               && MigrationNaming.hostname(for: project("shop")!, taken: []) == "shop.localhost"
+               && MigrationNaming.hostname(for: project("crm")!, keepDomains: true, taken: []) == "crm.localhost"
+               && MigrationNaming.hostname(for: project("shop")!, keepDomains: true, taken: ["shop.lan"]) == "shop-2.lan",
+               "Domains were not kept, or .local was kept")
     try expect(Set(inventory.skippedDefaults) == ["dashboard", "favicon.ico", "index.php"], "XAMPP's own pages were imported: \(inventory.skippedDefaults)")
     try expect(project("app")?.framework == .laravel && project("app")?.webRoot == "public", "Laravel's web root was missed")
     try expect(project("blog")?.framework == .wordpress && project("static")?.framework == .staticSite, "Frameworks were misread")
