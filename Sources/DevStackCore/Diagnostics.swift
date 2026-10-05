@@ -15,6 +15,10 @@ public struct DiagnosticContext: Sendable {
     public var selectedWebServer: WebServer
     public var ports: ServicePorts
     public var localNetworkAccess: Bool
+    /// Open DevStack at login is on.
+    public var startAtLogin: Bool
+    /// macOS waits for the user to approve the login item.
+    public var loginItemNeedsApproval: Bool
 
     public init(
         paths: DevStackPaths,
@@ -30,7 +34,9 @@ public struct DiagnosticContext: Sendable {
         selectedPostgreSQL: PostgreSQLEngine = .none,
         selectedWebServer: WebServer = .apache,
         ports: ServicePorts = ServicePorts(),
-        localNetworkAccess: Bool = false
+        localNetworkAccess: Bool = false,
+        startAtLogin: Bool = false,
+        loginItemNeedsApproval: Bool = false
     ) {
         self.paths = paths
         self.runtimeManifests = runtimeManifests
@@ -45,6 +51,8 @@ public struct DiagnosticContext: Sendable {
         self.selectedWebServer = selectedWebServer
         self.ports = ports
         self.localNetworkAccess = localNetworkAccess
+        self.startAtLogin = startAtLogin
+        self.loginItemNeedsApproval = loginItemNeedsApproval
         self.requiredRuntimeIDs = requiredRuntimeIDs
     }
 }
@@ -77,7 +85,8 @@ public struct DevStackDoctor: Sendable {
         results.append(contentsOf: serviceReadinessResults(context.serviceStates))
         progress?("Checking ports and local domain mappings…")
         results.append(contentsOf: portResults(context: context))
-        results.append(hostsResult(expected: context.expectedHostnames))
+        results.append(hostsResult(expected: context.expectedHostnames, helperAvailable: context.helperStatus != nil))
+        results.append(loginItemResult(context))
         results.append(contentsOf: runtimeResults(context.runtimeManifests, paths: context.paths, required: context.requiredRuntimeIDs, progress: progress))
         progress?("Validating configuration and certificates…")
         results.append(contentsOf: configurationResults(context))
@@ -167,8 +176,9 @@ public struct DevStackDoctor: Sendable {
                     ? "Answering DevStack hostnames with \(status.dnsAnswerAddress ?? "the LAN address") over UDP+TCP; other queries are forwarded to the system resolvers."
                     : "Disabled."),
                 remediation: status.dnsFailure ?? (status.dnsEnabled ? nil : (context.localNetworkAccess
-                    ? "Local network access is enabled in Settings but the helper is not answering on port 53."
-                    : "Enable Local network access in Settings to serve DevStack hostnames to phones."))
+                    ? "Local network access is on in Settings, but the helper is not answering on port 53."
+                    : nil)),
+                fix: context.localNetworkAccess && (status.dnsFailure != nil || !status.dnsEnabled) ? .restartLocalDNS : nil
             )
         ]
     }
@@ -299,7 +309,19 @@ public struct DevStackDoctor: Sendable {
         }
     }
 
-    private func hostsResult(expected: [String]) -> DiagnosticResult {
+    private func loginItemResult(_ context: DiagnosticContext) -> DiagnosticResult {
+        guard context.startAtLogin else {
+            return .init(id: "login-item", title: "Open at login", severity: .info, evidence: "Off.")
+        }
+        return context.loginItemNeedsApproval
+            ? .init(id: "login-item", title: "Open at login", severity: .warning,
+                    evidence: "On, but macOS waits for your approval, so DevStack does not open at login yet.",
+                    remediation: "Approve DevStack in System Settings → General → Login Items & Extensions.",
+                    fix: .approveLoginItem)
+            : .init(id: "login-item", title: "Open at login", severity: .info, evidence: "DevStack opens when you log in.")
+    }
+
+    private func hostsResult(expected: [String], helperAvailable: Bool) -> DiagnosticResult {
         let expected = expected.filter { $0 != "localhost" && !$0.hasSuffix(".localhost") }
         if expected.isEmpty {
             return .init(id: "hosts", title: "Local domain resolution", severity: .info, evidence: "The configured .localhost domains resolve through macOS without hosts-file edits.")
@@ -316,7 +338,8 @@ public struct DevStackDoctor: Sendable {
                 evidence: healthy
                     ? "The marked DevStack section contains all expected hostnames."
                     : "Managed markers: \(hasMarkers ? "present" : "missing"); missing hostnames: \(missing.isEmpty ? "none" : missing.joined(separator: ", ")).",
-                remediation: healthy ? nil : "Reapply site mappings from DevStack."
+                remediation: healthy ? nil : "Write the site hostnames to /etc/hosts again.",
+                fix: healthy || !helperAvailable ? nil : .applyHostMappings
             )
         } catch {
             return .init(id: "hosts", title: "/etc/hosts mappings", severity: .error, evidence: error.localizedDescription)

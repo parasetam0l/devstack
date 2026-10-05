@@ -532,6 +532,27 @@ public enum DiagnosticFix: Codable, Hashable, Sendable {
     /// Stops a server left running by a DevStack runtime, such as one an old
     /// copy started, that holds a port the stack needs.
     case stopProcess(pid: Int32, command: String)
+    /// Writes the site hostnames to /etc/hosts through the helper.
+    case applyHostMappings
+    /// Turns Local DNS on again through the helper.
+    case restartLocalDNS
+    /// Opens Login Items, where macOS waits for approval of Open at Login.
+    case approveLoginItem
+
+    /// The order Fix All applies fixes in: what blocks the helper first,
+    /// then the helper, then what needs it.
+    public var repairOrder: Int {
+        switch self {
+        case .removeOtherHelper: 0
+        case .stopProcess: 1
+        case .repairHelper: 2
+        case .installRuntime: 3
+        case .trustCertificate: 4
+        case .applyHostMappings: 5
+        case .restartLocalDNS: 6
+        case .approveLoginItem: 7
+        }
+    }
 }
 
 public struct DiagnosticResult: Codable, Hashable, Identifiable, Sendable {

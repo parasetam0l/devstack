@@ -181,7 +181,7 @@ struct Banner<Actions: View>: View {
             Image(systemName: symbol).foregroundStyle(tint).font(.body.weight(.semibold)).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).fontWeight(.medium)
-                if let detail { Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+                if let detail { Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(8).fixedSize(horizontal: false, vertical: true) }
             }
             Spacer(minLength: 8)
             actions.controlSize(.small)

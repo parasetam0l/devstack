@@ -58,6 +58,10 @@ import SwiftUI
                 .init(id: "port", title: "Port 3306 is available", severity: .info, evidence: "No conflicting listener was found on the loopback interface.")
             ])
         }
+        if CommandLine.arguments.contains("--repaired") {
+            model.repairSummary = RepairSummary(done: ["Removed the helper of the DevStack copy at /Users/me/Downloads/DevStack.app", "Set up the helper", "Trusted the DevStack certificate authority"],
+                                                remaining: ["Port 8080"])
+        }
         if let directory = argument("--snapshot") {
             // The bare debug executable has no bundle, so it launches as a
             // background tool without windows.

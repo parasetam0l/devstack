@@ -485,14 +485,24 @@ struct DoctorView: View {
             } description: {
                 Text("Doctor checks ports, runtimes, signatures, configuration and system integration.")
             } actions: {
-                Button("Run Checks") { Task { await model.runDoctor() } }.buttonStyle(.borderedProminent)
+                HStack {
+                    Button("Run Checks") { Task { await model.runDoctor() } }
+                    fixAllButton
+                }
             }
         } else {
             PanelPage {
-                if model.isRunningDoctor {
+                if model.isRepairing {
+                    Banner(symbol: "wrench.and.screwdriver", title: model.repairProgress ?? "Fixing…",
+                           detail: "macOS may ask for your password.", tint: .accentColor) {
+                        ProgressView().controlSize(.small)
+                    }
+                } else if model.isRunningDoctor {
                     Banner(symbol: "stethoscope", title: model.diagnosticProgress ?? "Checking your stack…", tint: .accentColor) {
                         ProgressView().controlSize(.small)
                     }
+                } else if let summary = model.repairSummary {
+                    repairSummaryBanner(summary)
                 }
                 if let report = model.diagnosticReport {
                     let results = report.results.filter { !state.attentionOnly || $0.severity != .info }
@@ -534,7 +544,7 @@ struct DoctorView: View {
                                         if let fix = result.fix {
                                             Button(title(of: fix)) { apply(fix) }
                                                 .controlSize(.small)
-                                                .disabled(model.isBusy || model.isRunningDoctor)
+                                                .disabled(model.isBusy || model.isRunningDoctor || model.isRepairing)
                                         }
                                     }
                                 }
@@ -547,7 +557,8 @@ struct DoctorView: View {
                             .help("Save a support bundle with the report and logs")
                         Button { Task { await model.runDoctor() } } label: { Label("Run Again", systemImage: "arrow.clockwise") }
                             .buttonStyle(.borderless)
-                            .disabled(model.isRunningDoctor)
+                            .disabled(model.isRunningDoctor || model.isRepairing)
+                        fixAllButton.padding(.leading, 6)
                     }
                 }
             }
@@ -561,6 +572,30 @@ struct DoctorView: View {
         case .trustCertificate: "Trust…"
         case .installRuntime: "Install"
         case .stopProcess: "Stop"
+        case .applyHostMappings: "Write"
+        case .restartLocalDNS: "Restart"
+        case .approveLoginItem: "Approve…"
+        }
+    }
+
+    /// Checks from scratch and applies every fix; its own, prominent button.
+    private var fixAllButton: some View {
+        Button { Task { await model.repairAll() } } label: { Label("Fix All", systemImage: "wrench.and.screwdriver") }
+            .buttonStyle(.borderedProminent)
+            .disabled(model.isRepairing || model.isRunningDoctor || model.isBusy)
+            .help("Run every check again and fix everything DevStack can: the helper and its approval, other copies' helpers, leftover servers, runtimes, certificate trust, host names, Local DNS and Open at Login. macOS asks for your password where needed.")
+    }
+
+    private func repairSummaryBanner(_ summary: RepairSummary) -> some View {
+        let clean = summary.remaining.isEmpty
+        let title = summary.done.isEmpty
+            ? (clean ? "Everything is in order." : "Nothing DevStack can fix on its own.")
+            : "Fixed \(summary.done.count) issue\(summary.done.count == 1 ? "" : "s").\(clean ? " Everything is in order." : "")"
+        var lines = summary.done.map { "✓ " + $0 }
+        if !clean { lines.append("Still needs attention: " + summary.remaining.joined(separator: ", ") + ".") }
+        return Banner(symbol: clean ? "checkmark.seal.fill" : "exclamationmark.triangle.fill", title: title,
+                      detail: lines.isEmpty ? nil : lines.joined(separator: "\n"), tint: clean ? .green : .orange) {
+            Button("Dismiss") { model.repairSummary = nil }
         }
     }
 

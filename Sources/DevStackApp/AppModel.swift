@@ -111,6 +111,10 @@ final class AppModel: ObservableObject {
     @Published var isPresentingNewSite = false
     @Published var isPresentingSetupWizard = false
     @Published var runtimePackProgress: RuntimePackProgress?
+    /// Fix All: running, the step under way, and what it did.
+    @Published var isRepairing = false
+    @Published var repairProgress: String?
+    @Published var repairSummary: RepairSummary?
     /// The exact runtime packs this version installs (Resources/runtime-packs.json).
     let runtimePackCatalog = AppModel.loadRuntimePackCatalog()
     @Published var appearance = AppAppearance(rawValue: UserDefaults.standard.string(forKey: "DevStackAppearance") ?? "") ?? .system {
@@ -285,7 +289,9 @@ final class AppModel: ObservableObject {
                 try? generateConfiguration()
             }
             runtimeManifests = try loadRuntimeLock()
-            let loginItemEnabled = SMAppService.mainApp.status == .enabled
+            // Waiting for approval in Login Items still counts as on, so Doctor
+            // can lead the user to approve it.
+            let loginItemEnabled = [.enabled, .requiresApproval].contains(SMAppService.mainApp.status)
             if configuration.startAtLogin != loginItemEnabled {
                 configuration.startAtLogin = loginItemEnabled
                 try await store.save(configuration)
@@ -582,7 +588,9 @@ final class AppModel: ObservableObject {
             requiredRuntimeIDs: Set(runtimePacksInUse).union(dashboardServices.map(\.runtimeID)).union(phpRuntimeIDsInUse),
             selectedDatabase: configuration.selectedDatabase, selectedPostgreSQL: configuration.selectedPostgreSQL,
             selectedWebServer: configuration.selectedWebServer,
-            ports: configuration.ports, localNetworkAccess: configuration.localNetworkAccess
+            ports: configuration.ports, localNetworkAccess: configuration.localNetworkAccess,
+            startAtLogin: configuration.startAtLogin,
+            loginItemNeedsApproval: SMAppService.mainApp.status == .requiresApproval
         )
         let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
         let progressModel = self
@@ -615,6 +623,57 @@ final class AppModel: ObservableObject {
 
     /// Runs a Doctor fix, then checks again.
     func applyFix(_ fix: DiagnosticFix) async {
+        await perform(fix)
+        await runDoctor()
+    }
+
+    /// Fix All: checks from scratch and applies every fix Doctor offers,
+    /// then checks again. Fixes that only show once the helper answers (host
+    /// mappings, Local DNS) get a second pass. macOS asks for passwords where
+    /// a fix needs one.
+    func repairAll() async {
+        guard !isRepairing, !isBusy, !isRunningDoctor else { return }
+        isRepairing = true
+        repairSummary = nil
+        defer { isRepairing = false; repairProgress = nil }
+        var attempted: Set<DiagnosticFix> = []
+        var done: [String] = []
+        for _ in 0..<2 {
+            repairProgress = "Checking…"
+            await runDoctor()
+            let fixes = Array(Set(diagnosticReport?.results.compactMap(\.fix) ?? []).subtracting(attempted))
+                .sorted { $0.repairOrder < $1.repairOrder }
+            guard !fixes.isEmpty else { break }
+            for fix in fixes {
+                attempted.insert(fix)
+                repairProgress = repairTitle(fix) + "…"
+                await perform(fix)
+                done.append(repairTitle(fix))
+            }
+        }
+        if !done.isEmpty {
+            repairProgress = "Checking again…"
+            await runDoctor()
+        }
+        let remaining = diagnosticReport?.results.filter { $0.severity != .info }.map(\.title) ?? []
+        repairSummary = RepairSummary(done: done, remaining: remaining)
+    }
+
+    func repairTitle(_ fix: DiagnosticFix) -> String {
+        switch fix {
+        case .removeOtherHelper(let executable):
+            "Removed the helper of the DevStack copy at \(HelperProcesses.Running(pid: 0, executable: executable).applicationPath ?? executable)"
+        case .stopProcess(let pid, let command): "Stopped \(command) (PID \(pid)), left by another DevStack copy"
+        case .repairHelper: "Set up the helper"
+        case .installRuntime(let id): "Installed \(runtimePackCatalog.pin(for: id)?.displayName ?? id)"
+        case .trustCertificate: "Trusted the DevStack certificate authority"
+        case .applyHostMappings: "Wrote the site hostnames to /etc/hosts"
+        case .restartLocalDNS: "Restarted Local DNS"
+        case .approveLoginItem: "Opened Login Items to approve Open at Login"
+        }
+    }
+
+    private func perform(_ fix: DiagnosticFix) async {
         switch fix {
         case .removeOtherHelper(let executable): await removeOtherHelper(executable: executable)
         case .repairHelper: await installHelper()
@@ -627,8 +686,24 @@ final class AppModel: ObservableObject {
                 PortOwner(pid: pid, command: command, executable: executable).stop()
                 try? await Task.sleep(for: .seconds(2))
             }
+        case .applyHostMappings: await reapplyHostMappings()
+        case .restartLocalDNS: await setLocalNetworkAccess(true)
+        case .approveLoginItem: SMAppService.openSystemSettingsLoginItems()
         }
-        await runDoctor()
+    }
+
+    /// Writes the site and tool hostnames to /etc/hosts again.
+    private func reapplyHostMappings() async {
+        guard helperInstalled, !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
+        let hostnames = (configuration.sites.map(\.hostname) + Self.managementHostnames).filter { $0 != "localhost" }
+        do {
+            try await helper.applyHostMappings(hostnames.map { HostMapping(hostname: $0) })
+            helperStatus = try? await helper.status()
+        } catch {
+            errorMessage = "Could not write the hostnames: \(error.localizedDescription)"
+        }
     }
 
     /// Stops the helper that runs from another DevStack copy, moves that copy
@@ -1058,11 +1133,12 @@ final class AppModel: ObservableObject {
             } else if service.status == .enabled {
                 try await service.unregister()
             }
-            configuration.startAtLogin = SMAppService.mainApp.status == .enabled
+            configuration.startAtLogin = [.enabled, .requiresApproval].contains(SMAppService.mainApp.status)
             try await store.save(configuration)
+            if enabled, SMAppService.mainApp.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
         } catch {
             errorMessage = "Could not update the login item: \(error.localizedDescription)"
-            configuration.startAtLogin = SMAppService.mainApp.status == .enabled
+            configuration.startAtLogin = [.enabled, .requiresApproval].contains(SMAppService.mainApp.status)
         }
     }
 
@@ -1759,4 +1835,10 @@ final class AppModel: ObservableObject {
     private func shellQuote(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
+}
+
+/// What Fix All did, and what still needs the user.
+struct RepairSummary: Equatable {
+    var done: [String]
+    var remaining: [String]
 }
