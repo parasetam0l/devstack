@@ -224,14 +224,19 @@ public struct DevStackDoctor: Sendable {
         let selectedDatabaseService: ServiceKind = context.selectedDatabase == .mysql57 ? .mysql57 : .mysql84
         let webService = context.selectedWebServer.service
         let ports = context.ports
+        // Only the ports of services in the stack; a database left out of it
+        // may run elsewhere on its usual port.
         var owners: [(UInt16, ServiceKind)] = [
             (ports.webHTTPListen, webService), (ports.webHTTPSListen, webService),
-            (ports.mysqlListen, selectedDatabaseService), (ports.postgresqlListen, .postgresql18),
             (ports.mailpitSMTPListen, .mailpit), (ports.mailpitInboxListen, .mailpit)
         ]
+        if context.selectedDatabase != .none { owners.append((ports.mysqlListen, selectedDatabaseService)) }
+        if context.selectedPostgreSQL != .none { owners.append((ports.postgresqlListen, .postgresql18)) }
         var upstreams: [UInt16: UInt16] = [:]
         if context.helperInstalled {
             for entry in ports.forwardings {
+                if entry.publicPort == ports.mysql, context.selectedDatabase == .none { continue }
+                if entry.publicPort == ports.postgresql, context.selectedPostgreSQL == .none { continue }
                 let service: ServiceKind
                 switch entry.publicPort {
                 case ports.webHTTP, ports.webHTTPS: service = webService
@@ -252,22 +257,34 @@ public struct DevStackDoctor: Sendable {
             let upstream = upstreams[port]
             let ours = listening && (upstream == nil ? phases[service] == .running : ownForwarder)
             let expected = phases[service] == .running && (port >= 1024 || context.helperInstalled)
+            // lsof sees this user's processes, such as servers an old copy left.
+            let owner = listening && !ours ? PortOwner.lookup(port: port, runner: runner) : nil
             let evidence: String
             if ours {
                 evidence = upstream.map { "The DevStack helper forwards it to port \($0)." } ?? "\(service.displayName) is listening."
             } else if listening {
-                evidence = "Another program is listening\(upstream != nil ? ", not this copy's helper" : "")."
+                evidence = owner.map { owner in
+                    "Used by \(owner.summary)\(owner.executable.map { " from \($0)" } ?? "")."
+                        + (owner.isDevStackRuntime ? " It is a DevStack server this copy did not start, such as one an old copy left running." : "")
+                } ?? "Another program is listening\(upstream != nil ? ", not this copy's helper" : "")."
             } else {
                 evidence = "Nothing is listening."
             }
             let severity: DiagnosticSeverity
             let remediation: String?
+            var fix: DiagnosticFix?
             if ours {
                 severity = .info
                 remediation = nil
             } else if listening {
-                severity = expected || upstream != nil ? .error : .warning
-                remediation = "Stop the other program, or give DevStack another port in Settings."
+                // The stack cannot start while another program holds one of its ports.
+                severity = .error
+                if let owner, owner.isDevStackRuntime {
+                    remediation = "Stop it, then start the stack again."
+                    fix = .stopProcess(pid: owner.pid, command: owner.command)
+                } else {
+                    remediation = "Quit that program, or choose another port in Settings → Ports."
+                }
             } else if expected {
                 severity = .error
                 remediation = upstream != nil
@@ -277,8 +294,8 @@ public struct DevStackDoctor: Sendable {
                 severity = .info
                 remediation = nil
             }
-            return .init(id: "port-\(port)", title: "Port \(port)", severity: severity, evidence: evidence, remediation: remediation,
-                         fix: !listening && expected && upstream != nil ? .repairHelper : nil)
+            if !listening, expected, upstream != nil { fix = .repairHelper }
+            return .init(id: "port-\(port)", title: "Port \(port)", severity: severity, evidence: evidence, remediation: remediation, fix: fix)
         }
     }
 

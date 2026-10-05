@@ -27,11 +27,16 @@ public enum HelperProcesses {
         guard let result = try? runner.run(executable: URL(fileURLWithPath: "/usr/bin/pgrep"),
                                            arguments: ["-x", "DevStackPrivilegedHelper"], timeout: 5) else { return [] }
         return result.standardOutput.split(whereSeparator: \.isNewline).compactMap { Int32($0) }.compactMap { pid in
-            // Readable for root processes too; no privileges needed.
-            var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
-            guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
-            return Running(pid: pid, executable: String(cString: buffer))
+            executablePath(of: pid).map { Running(pid: pid, executable: $0) }
         }
+    }
+
+    /// A process's executable; readable for root processes too, without
+    /// privileges.
+    public static func executablePath(of pid: Int32) -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        return String(cString: buffer)
     }
 
     /// Helpers that do not run from `application`.

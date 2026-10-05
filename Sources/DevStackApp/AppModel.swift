@@ -473,6 +473,13 @@ final class AppModel: ObservableObject {
             return
         }
         let previouslyRunning = Set((await supervisor.allStates()).filter { $0.phase == .running }.map(\.service))
+        // Name busy ports before anything starts, so the helper never begins
+        // forwarding for a stack that cannot run.
+        let conflicts = portConflicts(skipping: previouslyRunning)
+        guard conflicts.isEmpty else {
+            errorMessage = Self.describe(conflicts)
+            return
+        }
         do {
             try generateConfiguration()
             try validateRequiredRuntimes()
@@ -498,9 +505,42 @@ final class AppModel: ObservableObject {
             for state in await supervisor.allStates() where state.phase == .running && !previouslyRunning.contains(state.service) {
                 await supervisor.stop(state.service)
             }
+            // A stack that did not start leaves nothing on ports 80 and 443.
+            if previouslyRunning.isEmpty { await stopPortForwarding() }
             errorMessage = error.localizedDescription
         }
         await refreshServiceStates()
+    }
+
+    /// The ports of the services about to start that another program holds.
+    private func portConflicts(skipping running: Set<ServiceKind>) -> [PortConflict] {
+        let ports = configuration.ports
+        let web = configuration.selectedWebServer.service
+        var needed: [(UInt16, ServiceKind)] = [(ports.mailpitSMTPListen, .mailpit), (ports.mailpitInboxListen, .mailpit)]
+        // Start Stack replaces a running web server of this copy, whichever it is.
+        if !running.contains(.apache), !running.contains(.nginx) {
+            needed += [(ports.webHTTPListen, web), (ports.webHTTPSListen, web)]
+        }
+        if let mysql = configuration.selectedDatabase.service { needed.append((ports.mysqlListen, mysql)) }
+        if let postgreSQL = configuration.selectedPostgreSQL.service { needed.append((ports.postgresqlListen, postgreSQL)) }
+        return needed.filter { !running.contains($0.1) && PortAvailability.isListening($0.0) }
+            .map { PortConflict(port: $0.0, service: $0.1, owner: PortOwner.lookup(port: $0.0)) }
+    }
+
+    private static func describe(_ conflicts: [PortConflict]) -> String {
+        let lines = conflicts.map { "• " + $0.description }.joined(separator: "\n")
+        let leftovers = conflicts.contains { $0.owner?.isDevStackRuntime == true }
+        let others = conflicts.contains { $0.owner?.isDevStackRuntime != true }
+        var advice: [String] = []
+        if leftovers { advice.append("Stop the servers another DevStack copy left running from Doctor.") }
+        if others { advice.append("Quit the other programs, or choose other ports in Settings → Ports.") }
+        return "The stack can't start: \(conflicts.count == 1 ? "a port it needs is" : "ports it needs are") in use.\n\n\(lines)\n\n\(advice.joined(separator: " "))"
+    }
+
+    private func stopPortForwarding() async {
+        guard helperInstalled, helper.canAuthenticate else { return }
+        try? await helper.setPortForwarding(PortForwardingConfiguration(enabled: false))
+        helperStatus = try? await helper.status()
     }
 
     func stopAll() async {
@@ -580,6 +620,13 @@ final class AppModel: ObservableObject {
         case .repairHelper: await installHelper()
         case .trustCertificate: await trustHTTPS()
         case .installRuntime(let id): if let message = await installRuntimePacks([id]) { errorMessage = message }
+        case .stopProcess(let pid, let command):
+            // Only a DevStack runtime server, checked again in case the PID was reused.
+            if let executable = HelperProcesses.executablePath(of: pid),
+               PortOwner(pid: pid, command: command, executable: executable).isDevStackRuntime {
+                PortOwner(pid: pid, command: command, executable: executable).stop()
+                try? await Task.sleep(for: .seconds(2))
+            }
         }
         await runDoctor()
     }

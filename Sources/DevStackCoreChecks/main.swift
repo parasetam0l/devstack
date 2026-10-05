@@ -691,6 +691,14 @@ enum DevStackCoreChecks {
         unusedRuntime.kind = .nginx
         let unusedReport = DevStackDoctor().run(context: DiagnosticContext(paths: paths, runtimeManifests: [unusedRuntime], requiredRuntimeIDs: ["apache-2.4"]), appVersion: "checks")
         try expect(unusedReport.results.contains { $0.id == "runtime-nginx-1.30" && $0.severity == .info && $0.fix == nil }, "Doctor reported a runtime the stack does not use as a failure")
+        // Servers an old copy left running can be stopped from Doctor; other
+        // programs on a needed port are only named.
+        let leftover = PortOwner(pid: 1, command: "httpd", executable: "/Users/me/.Trash/DevStack.app/Contents/Resources/Runtimes/apache-2.4/bin/httpd")
+        let homebrew = PortOwner(pid: 2, command: "mysqld", executable: "/opt/homebrew/opt/mysql/bin/mysqld")
+        try expect(leftover.isDevStackRuntime && !homebrew.isDevStackRuntime, "DevStack runtime servers are not told apart")
+        let conflict = PortConflict(port: 8080, service: .apache, owner: leftover)
+        try expect(conflict.description.hasPrefix("Port 8080 (Apache) is used by httpd (PID 1)") && conflict.recoveryAction.contains("Doctor"), "Port conflicts are not named")
+        try expect(PortConflict(port: 3306, service: .mysql84, owner: homebrew).recoveryAction.contains("Settings"), "Other programs get the wrong advice")
         let otherHelper = HelperProcesses.Running(pid: 1, executable: "/Users/me/.Trash/DevStack.app/Contents/Library/LaunchServices/DevStackPrivilegedHelper")
         try expect(otherHelper.applicationPath == "/Users/me/.Trash/DevStack.app", "Helper app path is wrong")
 

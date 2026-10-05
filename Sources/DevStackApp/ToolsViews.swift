@@ -560,6 +560,7 @@ struct DoctorView: View {
         case .repairHelper: model.helperIsRegistered ? "Repair…" : "Set Up…"
         case .trustCertificate: "Trust…"
         case .installRuntime: "Install"
+        case .stopProcess: "Stop"
         }
     }
 

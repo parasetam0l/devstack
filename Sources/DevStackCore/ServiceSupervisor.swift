@@ -78,8 +78,8 @@ public actor ServiceSupervisor {
         transition(specification.kind, to: .starting)
 
         do {
-            if case .tcpLoopback = specification.readinessProbe, probe(specification.readinessProbe) {
-                throw ServiceFailure(message: "The service port is already in use.", recoveryAction: "Stop the conflicting server or change its port before starting this service.")
+            if case .tcpLoopback(let port) = specification.readinessProbe, probe(specification.readinessProbe) {
+                throw PortConflict(port: port, service: specification.kind, owner: PortOwner.lookup(port: port)).failure
             }
             try FileManager.default.createDirectory(at: specification.logFile.deletingLastPathComponent(), withIntermediateDirectories: true)
             // O_APPEND: when the log is truncated by rotation, the service keeps

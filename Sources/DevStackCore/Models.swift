@@ -477,7 +477,9 @@ public enum ServicePhase: String, Codable, Sendable {
 }
 
 public struct ServiceFailure: Codable, Hashable, LocalizedError, Sendable {
-    public var errorDescription: String? { message + (logExcerpt.map { "\n" + $0 } ?? "") }
+    public var errorDescription: String? {
+        message + (recoveryAction.map { "\n\n" + $0 } ?? "") + (logExcerpt.map { "\n\n" + $0 } ?? "")
+    }
     public var message: String
     public var exitCode: Int32?
     public var failedProbe: String?
@@ -527,6 +529,9 @@ public enum DiagnosticFix: Codable, Hashable, Sendable {
     case trustCertificate
     /// Installs a runtime pack and what it needs.
     case installRuntime(String)
+    /// Stops a server left running by a DevStack runtime, such as one an old
+    /// copy started, that holds a port the stack needs.
+    case stopProcess(pid: Int32, command: String)
 }
 
 public struct DiagnosticResult: Codable, Hashable, Identifiable, Sendable {
