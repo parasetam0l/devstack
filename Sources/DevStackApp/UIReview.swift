@@ -50,7 +50,11 @@ import SwiftUI
         if CommandLine.arguments.contains("--report") {
             model.diagnosticReport = .init(appVersion: "UI review", results: [
                 .init(id: "architecture", title: "Native Apple Silicon runtimes", severity: .info, evidence: "All inspected executables use arm64."),
-                .init(id: "helper", title: "System integration", severity: .warning, evidence: "The privileged helper is not installed in this isolated review.", remediation: "Complete setup in Settings to enable local domains and HTTPS."),
+                .init(id: "helper", title: "System integration", severity: .warning, evidence: "The privileged helper is not installed in this isolated review.", remediation: "Complete setup in Settings to enable local domains and HTTPS.", fix: .repairHelper),
+                .init(id: "other-helper-1", title: "Helper from another DevStack copy", severity: .error,
+                      evidence: "A DevStack helper runs from /Users/me/Downloads/DevStack.app, signed by team ABCDE12345. It holds the helper's name and the privileged ports, so this copy's helper cannot start, and macOS starts it again at every boot while that copy exists.",
+                      remediation: "Remove stops it, moves that copy to the Trash and sets up this copy's helper. Empty the Trash afterwards.",
+                      fix: .removeOtherHelper(executable: "/Users/me/Downloads/DevStack.app/Contents/Library/LaunchServices/DevStackPrivilegedHelper")),
                 .init(id: "port", title: "Port 3306 is available", severity: .info, evidence: "No conflicting listener was found on the loopback interface.")
             ])
         }

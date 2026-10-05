@@ -516,6 +516,19 @@ public enum DiagnosticSeverity: String, Codable, CaseIterable, Sendable {
     case error
 }
 
+/// An action that resolves a diagnostic result, offered next to it in Doctor.
+public enum DiagnosticFix: Codable, Hashable, Sendable {
+    /// Stops the helper running from another DevStack copy, moves that copy
+    /// to the Trash and sets up this copy's helper.
+    case removeOtherHelper(executable: String)
+    /// Sets up the helper, or registers it again when it does not respond.
+    case repairHelper
+    /// Trusts the DevStack CA for this user.
+    case trustCertificate
+    /// Installs a runtime pack and what it needs.
+    case installRuntime(String)
+}
+
 public struct DiagnosticResult: Codable, Hashable, Identifiable, Sendable {
     public var id: String
     public var title: String
@@ -523,14 +536,17 @@ public struct DiagnosticResult: Codable, Hashable, Identifiable, Sendable {
     public var evidence: String
     public var remediation: String?
     public var containsSensitiveData: Bool
+    public var fix: DiagnosticFix?
 
-    public init(id: String, title: String, severity: DiagnosticSeverity, evidence: String, remediation: String? = nil, containsSensitiveData: Bool = false) {
+    public init(id: String, title: String, severity: DiagnosticSeverity, evidence: String, remediation: String? = nil,
+                containsSensitiveData: Bool = false, fix: DiagnosticFix? = nil) {
         self.id = id
         self.title = title
         self.severity = severity
         self.evidence = evidence
         self.remediation = remediation
         self.containsSensitiveData = containsSensitiveData
+        self.fix = fix
     }
 }
 

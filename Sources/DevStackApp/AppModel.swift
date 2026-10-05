@@ -538,8 +538,10 @@ final class AppModel: ObservableObject {
             certificateTrusted: localCATrusted,
             expectedHostnames: configuration.sites.map(\.hostname) + ["phpmyadmin.localhost", "mailpit.localhost", "adminer.localhost"],
             serviceStates: serviceStates,
-            requiredRuntimeIDs: Set(configuration.sites.map(\.phpRuntimeID)).union(configuration.selectedDatabaseServices.map(\.runtimeID)).union(["php-8.5"]),
+            // Everything the stack runs, so runtimes it does not use are optional.
+            requiredRuntimeIDs: Set(runtimePacksInUse).union(dashboardServices.map(\.runtimeID)).union(phpRuntimeIDsInUse),
             selectedDatabase: configuration.selectedDatabase, selectedPostgreSQL: configuration.selectedPostgreSQL,
+            selectedWebServer: configuration.selectedWebServer,
             ports: configuration.ports, localNetworkAccess: configuration.localNetworkAccess
         )
         let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
@@ -569,6 +571,63 @@ final class AppModel: ObservableObject {
             helperInstalled = false
             helperSetupState = .unavailable("Setup failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Runs a Doctor fix, then checks again.
+    func applyFix(_ fix: DiagnosticFix) async {
+        switch fix {
+        case .removeOtherHelper(let executable): await removeOtherHelper(executable: executable)
+        case .repairHelper: await installHelper()
+        case .trustCertificate: await trustHTTPS()
+        case .installRuntime(let id): if let message = await installRuntimePacks([id]) { errorMessage = message }
+        }
+        await runDoctor()
+    }
+
+    /// Stops the helper that runs from another DevStack copy, moves that copy
+    /// to the Trash so it cannot start again at boot, and registers this
+    /// copy's helper in its place. Every copy uses the same launchd label, so
+    /// the other helper holds it (and the privileged ports) until it is gone.
+    func removeOtherHelper(executable: String) async {
+        guard !isBusy else { return }
+        let other = HelperProcesses.Running(pid: HelperProcesses.running().first { $0.executable == executable }?.pid ?? 0, executable: executable)
+        // One administrator prompt: launchd's job for the shared label, then
+        // the process itself in case it runs under another label.
+        var command = "/bin/launchctl bootout system/\(PrivilegedHelperConstants.machServiceName) 2>/dev/null"
+        if other.pid > 0 { command += "; /bin/kill \(other.pid) 2>/dev/null" }
+        command += "; exit 0"
+        isBusy = true
+        let failure: String? = await Task.detached {
+            do {
+                _ = try ProcessRunner().runChecked(executable: URL(fileURLWithPath: "/usr/bin/osascript"),
+                                                   arguments: ["-e", "do shell script \"\(command)\" with administrator privileges"], timeout: 300)
+                return nil
+            } catch {
+                return error.localizedDescription.contains("-128")
+                    ? "The administrator prompt was cancelled; the other helper still runs."
+                    : "Could not stop the other helper: \(error.localizedDescription)"
+            }
+        }.value
+        isBusy = false
+        if let failure { errorMessage = failure; return }
+
+        if let copy = other.applicationPath, FileManager.default.fileExists(atPath: copy) {
+            let copyURL = URL(fileURLWithPath: copy)
+            let trash = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".Trash").path + "/"
+            if !copy.hasPrefix(trash) {
+                do {
+                    _ = try await NSWorkspace.shared.recycle([copyURL])
+                } catch {
+                    NSWorkspace.shared.activateFileViewerSelecting([copyURL])
+                    errorMessage = "The other helper is stopped, but \(copy) could not be moved to the Trash (\(error.localizedDescription)). Delete it yourself: macOS starts its helper again at every boot while it exists."
+                }
+            }
+        }
+
+        // This copy's registration may look enabled while launchd ran the
+        // other job under its label; register it afresh.
+        if helper.registrationStatus == .enabled { try? await helper.unregister() }
+        await installHelper()
     }
 
     // MARK: - Setup wizard

@@ -12,6 +12,7 @@ public struct DiagnosticContext: Sendable {
     public var requiredRuntimeIDs: Set<String>
     public var selectedDatabase: DatabaseEngine
     public var selectedPostgreSQL: PostgreSQLEngine
+    public var selectedWebServer: WebServer
     public var ports: ServicePorts
     public var localNetworkAccess: Bool
 
@@ -27,6 +28,7 @@ public struct DiagnosticContext: Sendable {
         requiredRuntimeIDs: Set<String> = [],
         selectedDatabase: DatabaseEngine = .mysql84,
         selectedPostgreSQL: PostgreSQLEngine = .none,
+        selectedWebServer: WebServer = .apache,
         ports: ServicePorts = ServicePorts(),
         localNetworkAccess: Bool = false
     ) {
@@ -40,6 +42,7 @@ public struct DiagnosticContext: Sendable {
         self.serviceStates = serviceStates
         self.selectedDatabase = selectedDatabase
         self.selectedPostgreSQL = selectedPostgreSQL
+        self.selectedWebServer = selectedWebServer
         self.ports = ports
         self.localNetworkAccess = localNetworkAccess
         self.requiredRuntimeIDs = requiredRuntimeIDs
@@ -68,6 +71,7 @@ public struct DevStackDoctor: Sendable {
         results.append(directoryResult(context.paths.applicationSupport, id: "application-support"))
         results.append(directoryResult(context.paths.logs, id: "logs"))
         results.append(helperResult(context))
+        results.append(contentsOf: otherHelperResults(context))
         results.append(caTrustResult(context))
         results.append(contentsOf: helperStatusResults(context.helperStatus, context: context))
         results.append(contentsOf: serviceReadinessResults(context.serviceStates))
@@ -120,8 +124,28 @@ public struct DevStackDoctor: Sendable {
             title: "Privileged helper",
             severity: severity,
             evidence: evidence,
-            remediation: severity == .info ? nil : "Install or reauthorize the DevStack helper from Settings."
+            remediation: severity == .info ? nil : "Set up or repair the DevStack helper.",
+            fix: severity == .info ? nil : .repairHelper
         )
+    }
+
+    /// A helper running from another DevStack copy holds the helper's launchd
+    /// label and the privileged ports, so this copy's helper cannot start; it
+    /// comes back at every boot while that copy exists.
+    private func otherHelperResults(_ context: DiagnosticContext) -> [DiagnosticResult] {
+        guard let application = context.applicationURL else { return [] }
+        return HelperProcesses.others(than: application, runner: runner).map { helper in
+            let copy = helper.applicationPath ?? helper.executable
+            let team = HelperProcesses.teamIdentifier(ofApplicationAt: copy)
+            return .init(
+                id: "other-helper-\(helper.pid)",
+                title: "Helper from another DevStack copy",
+                severity: .error,
+                evidence: "A DevStack helper runs from \(copy)\(team.map { ", signed by team \($0)" } ?? ""). It holds the helper's name and the privileged ports, so this copy's helper cannot start, and macOS starts it again at every boot while that copy exists.",
+                remediation: "Remove stops it, moves that copy to the Trash and sets up this copy's helper. Empty the Trash afterwards.",
+                fix: .removeOtherHelper(executable: helper.executable)
+            )
+        }
     }
 
     private func helperStatusResults(_ status: PrivilegedHelperStatus?, context: DiagnosticContext) -> [DiagnosticResult] {
@@ -157,7 +181,8 @@ public struct DevStackDoctor: Sendable {
             title: "Local CA trust",
             severity: context.certificateTrusted ? .info : .warning,
             evidence: context.certificateTrusted ? "The public DevStack CA is trusted for this user." : "The DevStack CA is not trusted for this user.",
-            remediation: context.certificateTrusted ? nil : "Trust the public local CA from the SSL tab; user trust needs no administrator password."
+            remediation: context.certificateTrusted ? nil : "Trust the DevStack CA; macOS asks for your login password.",
+            fix: context.certificateTrusted ? nil : .trustCertificate
         )
     }
 
@@ -197,13 +222,14 @@ public struct DevStackDoctor: Sendable {
 
     private func portResults(context: DiagnosticContext) -> [DiagnosticResult] {
         let selectedDatabaseService: ServiceKind = context.selectedDatabase == .mysql57 ? .mysql57 : .mysql84
-        let webService: ServiceKind = context.serviceStates.contains { $0.service == .nginx && $0.phase == .running } ? .nginx : .apache
+        let webService = context.selectedWebServer.service
         let ports = context.ports
-        var owners: [(Int, ServiceKind)] = [
-            (Int(ports.webHTTPListen), webService), (Int(ports.webHTTPSListen), webService),
-            (Int(ports.mysqlListen), selectedDatabaseService), (Int(ports.postgresqlListen), .postgresql18),
-            (Int(ports.mailpitSMTPListen), .mailpit), (Int(ports.mailpitInboxListen), .mailpit)
+        var owners: [(UInt16, ServiceKind)] = [
+            (ports.webHTTPListen, webService), (ports.webHTTPSListen, webService),
+            (ports.mysqlListen, selectedDatabaseService), (ports.postgresqlListen, .postgresql18),
+            (ports.mailpitSMTPListen, .mailpit), (ports.mailpitInboxListen, .mailpit)
         ]
+        var upstreams: [UInt16: UInt16] = [:]
         if context.helperInstalled {
             for entry in ports.forwardings {
                 let service: ServiceKind
@@ -213,34 +239,46 @@ public struct DevStackDoctor: Sendable {
                 case ports.postgresql: service = .postgresql18
                 default: service = .mailpit
                 }
-                owners.append((Int(entry.publicPort), service))
+                owners.append((entry.publicPort, service))
+                upstreams[entry.publicPort] = entry.upstreamPort
             }
         }
         var phases: [ServiceKind: ServicePhase] = [:]
         for state in context.serviceStates { phases[state.service] = state.phase }
+        // This copy's helper answers; a listener on a forwarded port is its.
+        let ownForwarder = context.helperStatus?.portForwardingEnabled == true
         return owners.map { port, service in
-            do {
-                let result = try runner.run(
-                    executable: URL(fileURLWithPath: "/usr/sbin/lsof"),
-                    arguments: ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN"],
-                    timeout: 5
-                )
-                let occupied = result.exitCode == 0 && !result.standardOutput.isEmpty
-                let expected = phases[service] == .running && (port >= 1024 || context.helperInstalled)
-                let severity: DiagnosticSeverity = expected ? (occupied ? .info : .error) : (occupied ? .warning : .info)
-                let evidence = occupied ? redact(result.standardOutput) : "Available"
-                return .init(
-                    id: "port-\(port)",
-                    title: "Port \(port)",
-                    severity: severity,
-                    evidence: expected && occupied ? "DevStack expects this listener.\n\(evidence)" : evidence,
-                    remediation: expected && !occupied
-                        ? "Restart \(service.rawValue); its readiness listener is missing."
-                        : (!expected && occupied ? "Stop the conflicting listener before starting DevStack." : nil)
-                )
-            } catch {
-                return .init(id: "port-\(port)", title: "Port \(port)", severity: .warning, evidence: error.localizedDescription)
+            let listening = PortAvailability.isListening(port)
+            let upstream = upstreams[port]
+            let ours = listening && (upstream == nil ? phases[service] == .running : ownForwarder)
+            let expected = phases[service] == .running && (port >= 1024 || context.helperInstalled)
+            let evidence: String
+            if ours {
+                evidence = upstream.map { "The DevStack helper forwards it to port \($0)." } ?? "\(service.displayName) is listening."
+            } else if listening {
+                evidence = "Another program is listening\(upstream != nil ? ", not this copy's helper" : "")."
+            } else {
+                evidence = "Nothing is listening."
             }
+            let severity: DiagnosticSeverity
+            let remediation: String?
+            if ours {
+                severity = .info
+                remediation = nil
+            } else if listening {
+                severity = expected || upstream != nil ? .error : .warning
+                remediation = "Stop the other program, or give DevStack another port in Settings."
+            } else if expected {
+                severity = .error
+                remediation = upstream != nil
+                    ? "The helper is not forwarding this port. Repair the helper."
+                    : "\(service.displayName) is not listening. Restart it and check its log."
+            } else {
+                severity = .info
+                remediation = nil
+            }
+            return .init(id: "port-\(port)", title: "Port \(port)", severity: severity, evidence: evidence, remediation: remediation,
+                         fix: !listening && expected && upstream != nil ? .repairHelper : nil)
         }
     }
 
@@ -297,13 +335,25 @@ public struct DevStackDoctor: Sendable {
                 guard let root else { return true }
                 return !FileManager.default.fileExists(atPath: root.appendingPathComponent(relative).path)
             }
-            guard missing.isEmpty, let root else {
+            guard let root else {
+                // Runtimes the stack does not use are optional downloads.
+                let used = required.contains(manifest.id)
                 return .init(
                     id: "runtime-\(manifest.id)",
                     title: "Runtime \(manifest.id)",
-                    severity: manifest.supportState == .conditional && !required.contains(manifest.id) ? .warning : .error,
-                    evidence: "Missing: \(missing.joined(separator: ", "))",
-                    remediation: "Reinstall DevStack or import a valid signed runtime pack."
+                    severity: used ? .error : .info,
+                    evidence: used ? "Not installed, but your stack uses it." : "Not installed. Your stack does not use it.",
+                    remediation: used ? "Install it from the Runtimes page." : nil,
+                    fix: used ? .installRuntime(manifest.id) : nil
+                )
+            }
+            guard missing.isEmpty else {
+                return .init(
+                    id: "runtime-\(manifest.id)",
+                    title: "Runtime \(manifest.id)",
+                    severity: .error,
+                    evidence: "Incomplete. Missing: \(missing.joined(separator: ", "))",
+                    remediation: "Remove it on the Runtimes page and install it again."
                 )
             }
             let binaryFailures = auditRuntimeBinaries(at: root, manifest: manifest)
@@ -312,7 +362,7 @@ public struct DevStackDoctor: Sendable {
                 title: "Runtime \(manifest.id)",
                 severity: binaryFailures.isEmpty ? .info : .error,
                 evidence: binaryFailures.isEmpty ? "Entry points, ARM64 architecture, signatures, and dependency paths passed." : binaryFailures.joined(separator: "\n"),
-                remediation: binaryFailures.isEmpty ? nil : "Reinstall DevStack or import a valid signed runtime pack."
+                remediation: binaryFailures.isEmpty ? nil : "Remove it on the Runtimes page and install it again."
             )
         }
     }
@@ -348,16 +398,21 @@ public struct DevStackDoctor: Sendable {
 
     private func configurationResults(_ context: DiagnosticContext) -> [DiagnosticResult] {
         var checks: [(id: String, title: String, executable: URL, arguments: [String], reportsOutput: Bool)] = []
-        let apacheConfig = context.paths.generatedApache.appendingPathComponent("httpd.conf")
-        checks.append((
-            "config-apache", "Apache configuration",
-            context.paths.runtimeDirectory("apache-2.4").appendingPathComponent("bin/httpd"),
-            ["-t", "-f", apacheConfig.path],
-            true
-        ))
-        checks.append(("config-nginx", "Nginx configuration", context.paths.runtimeDirectory("nginx-1.30").appendingPathComponent("sbin/nginx"),
-            ["-t", "-p", context.paths.generatedNginx.path + "/", "-c", context.paths.generatedNginx.appendingPathComponent("nginx.conf").path], true))
-        for runtimeID in ["php-7.4", "php-8.4", "php-8.5"] {
+        // Only what the stack runs: the selected web server and the PHP
+        // versions in use. The others have no generated configuration.
+        if context.selectedWebServer == .apache {
+            let apacheConfig = context.paths.generatedApache.appendingPathComponent("httpd.conf")
+            checks.append((
+                "config-apache", "Apache configuration",
+                context.paths.runtimeDirectory("apache-2.4").appendingPathComponent("bin/httpd"),
+                ["-t", "-f", apacheConfig.path],
+                true
+            ))
+        } else {
+            checks.append(("config-nginx", "Nginx configuration", context.paths.runtimeDirectory("nginx-1.30").appendingPathComponent("sbin/nginx"),
+                ["-t", "-p", context.paths.generatedNginx.path + "/", "-c", context.paths.generatedNginx.appendingPathComponent("nginx.conf").path], true))
+        }
+        for runtimeID in ["php-7.4", "php-8.4", "php-8.5"] where context.requiredRuntimeIDs.contains(runtimeID) {
             let config = context.paths.generatedPHP.appendingPathComponent("\(runtimeID)-fpm.conf")
             checks.append((
                 "config-\(runtimeID)", "\(runtimeID) FPM configuration",
@@ -384,14 +439,13 @@ public struct DevStackDoctor: Sendable {
                 let path = argument.replacingOccurrences(of: "--defaults-file=", with: "")
                 return !FileManager.default.fileExists(atPath: path)
             }
-            guard FileManager.default.isExecutableFile(atPath: executable.path), missingReference == nil else {
-                return .init(
-                    id: id,
-                    title: title,
-                    severity: .warning,
-                    evidence: "Not checked because the runtime or generated configuration is not installed.",
-                    remediation: "Install the runtime and generate configuration before running this check."
-                )
+            guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+                // The runtime check above reports the missing runtime.
+                return .init(id: id, title: title, severity: .info, evidence: "Not checked: the runtime is not installed.")
+            }
+            guard missingReference == nil else {
+                return .init(id: id, title: title, severity: .info,
+                             evidence: "Not checked: DevStack writes this configuration when the stack first starts.")
             }
             do {
                 let result = try runner.runChecked(executable: executable, arguments: arguments,

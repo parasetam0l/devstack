@@ -24,4 +24,23 @@ public enum PortAvailability {
         }
         return result == 0
     }
+
+    /// True when something accepts TCP connections on 127.0.0.1 at the port,
+    /// whoever owns it: unlike lsof, this also sees listeners owned by root,
+    /// such as the helper's forwarders on ports 80 and 443.
+    public static func isListening(_ port: UInt16) -> Bool {
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = port.bigEndian
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        return withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
+    }
 }

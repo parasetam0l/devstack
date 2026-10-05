@@ -651,6 +651,7 @@ enum DevStackCoreChecks {
                     ServiceState(service: .mailpit, phase: .running, pid: 1234),
                     ServiceState(service: .mysql84, phase: .failed, failure: failedMySQL)
                 ],
+                requiredRuntimeIDs: ["php-8.5"],
                 selectedDatabase: .mysql57
             ),
             appVersion: "0.1.0"
@@ -662,7 +663,10 @@ enum DevStackCoreChecks {
         try expect(report.results.contains(where: { $0.id == "service-mailpit" && $0.severity == .info }), "Doctor did not report running service")
         try expect(report.results.contains(where: { $0.id == "service-mysql-8.4" && $0.severity == .error && $0.remediation == failedMySQL.recoveryAction }), "Doctor did not surface service failure recovery")
         try expect(report.results.contains(where: { $0.id == "database-state" && $0.evidence.contains("MySQL 5.7.44") }), "Doctor did not report selected database state")
-        try expect(report.results.contains(where: { $0.id == "config-php-8.5" && $0.severity == .warning }), "Doctor did not skip missing runtime configuration")
+        try expect(report.results.contains(where: { $0.id == "config-php-8.5" && $0.severity == .info && $0.evidence.contains("not installed") }), "Doctor did not skip missing runtime configuration")
+        // Only what the stack runs is checked: Nginx while Apache is selected,
+        // and PHP versions no site uses, are left out.
+        try expect(!report.results.contains(where: { $0.id == "config-nginx" || $0.id == "config-php-8.4" }), "Doctor checked configuration the stack does not use")
         try expect(report.results.contains(where: { $0.id == "config-apache" && $0.severity == .info && $0.evidence.contains("Syntax OK") }), "Doctor did not validate installed Apache configuration")
         try expect(report.results.contains(where: { $0.id == "port-3306" }), "Doctor omitted database port check")
 
@@ -681,7 +685,14 @@ enum DevStackCoreChecks {
         let optionalReport = DevStackDoctor().run(context: DiagnosticContext(paths: paths, runtimeManifests: [optionalRuntime]), appVersion: "checks")
         try expect(optionalReport.results.contains { $0.id == "runtime-mysql-5.7" && $0.severity == .info }, "Doctor treated an intentionally omitted legacy runtime as a repair failure")
         let requiredReport = DevStackDoctor().run(context: DiagnosticContext(paths: paths, runtimeManifests: [optionalRuntime], requiredRuntimeIDs: ["mysql-5.7"]), appVersion: "checks")
-        try expect(requiredReport.results.contains { $0.id == "runtime-mysql-5.7" && $0.severity == .error }, "Doctor failed to report a missing selected runtime")
+        try expect(requiredReport.results.contains { $0.id == "runtime-mysql-5.7" && $0.severity == .error && $0.fix == .installRuntime("mysql-5.7") }, "Doctor failed to report a missing selected runtime")
+        var unusedRuntime = executableManifest.runtime
+        unusedRuntime.id = "nginx-1.30"
+        unusedRuntime.kind = .nginx
+        let unusedReport = DevStackDoctor().run(context: DiagnosticContext(paths: paths, runtimeManifests: [unusedRuntime], requiredRuntimeIDs: ["apache-2.4"]), appVersion: "checks")
+        try expect(unusedReport.results.contains { $0.id == "runtime-nginx-1.30" && $0.severity == .info && $0.fix == nil }, "Doctor reported a runtime the stack does not use as a failure")
+        let otherHelper = HelperProcesses.Running(pid: 1, executable: "/Users/me/.Trash/DevStack.app/Contents/Library/LaunchServices/DevStackPrivilegedHelper")
+        try expect(otherHelper.applicationPath == "/Users/me/.Trash/DevStack.app", "Helper app path is wrong")
 
         let migrated = try JSONDecoder().decode(AppConfiguration.self, from: Data(#"{"schemaVersion":1,"sites":[]}"#.utf8))
         try expect(migrated.selectedWebServer == .apache, "Nginx must stay disabled when migrating old configurations")

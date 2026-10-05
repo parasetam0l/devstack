@@ -467,6 +467,18 @@ struct DoctorView: View {
     @StateObject private var state = DoctorViewState()
 
     var body: some View {
+        content
+            .alert("Remove the other DevStack helper?", isPresented: Binding(get: { state.pendingRemoval != nil }, set: { if !$0 { state.pendingRemoval = nil } }),
+                   presenting: state.pendingRemoval) { executable in
+                Button("Remove") { Task { await model.applyFix(.removeOtherHelper(executable: executable)) } }
+                Button("Cancel", role: .cancel) {}
+            } message: { executable in
+                let copy = HelperProcesses.Running(pid: 0, executable: executable).applicationPath ?? executable
+                Text("It runs from \(copy). DevStack stops it (macOS asks for an administrator password), moves that copy to the Trash and sets up this copy's helper. Empty the Trash afterwards so it cannot start again.")
+            }
+    }
+
+    @ViewBuilder private var content: some View {
         if model.diagnosticReport == nil && !model.isRunningDoctor {
             ContentUnavailableView {
                 Label("Check Your Stack", systemImage: "stethoscope")
@@ -512,10 +524,18 @@ struct DoctorView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(.top, 4)
                                 } label: {
-                                    Label {
-                                        Text(result.title)
-                                    } icon: {
-                                        Image(systemName: result.severity.symbol).foregroundStyle(result.severity.color)
+                                    HStack {
+                                        Label {
+                                            Text(result.title)
+                                        } icon: {
+                                            Image(systemName: result.severity.symbol).foregroundStyle(result.severity.color)
+                                        }
+                                        Spacer(minLength: 8)
+                                        if let fix = result.fix {
+                                            Button(title(of: fix)) { apply(fix) }
+                                                .controlSize(.small)
+                                                .disabled(model.isBusy || model.isRunningDoctor)
+                                        }
                                     }
                                 }
                             }
@@ -531,6 +551,23 @@ struct DoctorView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func title(of fix: DiagnosticFix) -> String {
+        switch fix {
+        case .removeOtherHelper: "Remove…"
+        case .repairHelper: model.helperIsRegistered ? "Repair…" : "Set Up…"
+        case .trustCertificate: "Trust…"
+        case .installRuntime: "Install"
+        }
+    }
+
+    private func apply(_ fix: DiagnosticFix) {
+        if case .removeOtherHelper(let executable) = fix {
+            state.pendingRemoval = executable
+        } else {
+            Task { await model.applyFix(fix) }
         }
     }
 
@@ -550,7 +587,11 @@ struct DoctorView: View {
     }
 }
 
-@MainActor private final class DoctorViewState: ObservableObject { @Published var attentionOnly = true }
+@MainActor private final class DoctorViewState: ObservableObject {
+    @Published var attentionOnly = true
+    /// The other copy's helper awaiting confirmation before removal.
+    @Published var pendingRemoval: String?
+}
 
 private extension DiagnosticSeverity {
     var symbol: String {
