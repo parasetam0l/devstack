@@ -698,7 +698,22 @@ enum DevStackCoreChecks {
         try expect(leftover.isDevStackRuntime && !homebrew.isDevStackRuntime, "DevStack runtime servers are not told apart")
         let conflict = PortConflict(port: 8080, service: .apache, owner: leftover)
         try expect(conflict.description.hasPrefix("Port 8080 (Apache) is used by httpd (PID 1)") && conflict.recoveryAction.contains("Doctor"), "Port conflicts are not named")
-        try expect(PortConflict(port: 3306, service: .mysql84, owner: homebrew).recoveryAction.contains("Settings"), "Other programs get the wrong advice")
+        try expect(PortConflict(port: 3306, service: .mysql84, owner: homebrew).recoveryAction.contains("free port"), "Other programs get the wrong advice")
+        let docker = PortOwner(pid: 3, command: "com.docker.backend", executable: "/Applications/Docker.app/Contents/MacOS/com.docker.backend")
+        try expect(docker.containerApplication == "Docker" && PortConflict(port: 3306, service: .mysql84, owner: docker).description.contains("Docker (com.docker.backend, PID 3): a container publishes it"), "Docker is not named")
+
+        // With 80 and 443, the web server listens on internal ports the helper
+        // forwards to; DevStack can move those, and the public ports stay.
+        var forwarded = ServicePorts(webHTTP: 80, webHTTPS: 443)
+        try expect(forwarded.webHTTPListen == 8080 && forwarded.proxyHTTPListen == 8082 && forwarded.isInternal(.webHTTP) && !forwarded.isInternal(.mysql), "Internal ports default to the fallbacks")
+        forwarded.setInternalPort(18080, for: .webHTTP)
+        try expect(forwarded.webHTTP == 80 && forwarded.webHTTPListen == 18080 && forwarded.forwardings.contains { $0.publicPort == 80 && $0.upstreamPort == 18080 }, "A moved internal port is not forwarded to")
+        try expect(forwarded.publicOnly == ServicePorts(webHTTP: 80, webHTTPS: 443), "Settings compares internal ports")
+        let roundTrip = try JSONDecoder().decode(ServicePorts.self, from: JSONEncoder().encode(forwarded))
+        try expect(roundTrip == forwarded, "Internal ports are not saved")
+        let older = try JSONDecoder().decode(ServicePorts.self, from: Data(#"{"webHTTP":80,"webHTTPS":443,"mysql":3306,"postgresql":5432,"mailpitSMTP":1025,"mailpitInbox":8025}"#.utf8))
+        try expect(older.internalPorts == nil && older.webHTTPListen == 8080, "Configurations without internal ports do not load")
+        try expect(ServicePorts().proxyHTTPListen == nil && ServicePorts().webHTTPListen == 8080 && !ServicePorts().isInternal(.webHTTP), "High ports listen directly")
         let otherHelper = HelperProcesses.Running(pid: 1, executable: "/Users/me/.Trash/DevStack.app/Contents/Library/LaunchServices/DevStackPrivilegedHelper")
         try expect(otherHelper.applicationPath == "/Users/me/.Trash/DevStack.app", "Helper app path is wrong")
 

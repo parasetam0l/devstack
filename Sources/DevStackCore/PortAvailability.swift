@@ -43,4 +43,17 @@ public enum PortAvailability {
             }
         }
     }
+
+    /// The first port from `start` up that nothing listens on, that can be
+    /// bound, and that is not in `excluded`.
+    public static func firstFree(from start: UInt16, excluding excluded: Set<UInt16>, limit: Int = 500) -> UInt16? {
+        var port = Int(start)
+        for _ in 0..<limit {
+            guard port <= Int(UInt16.max) else { return nil }
+            let candidate = UInt16(port)
+            if !excluded.contains(candidate), !isListening(candidate), isFree(candidate) { return candidate }
+            port += 1
+        }
+        return nil
+    }
 }

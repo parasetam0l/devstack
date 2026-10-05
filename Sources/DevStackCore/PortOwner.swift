@@ -22,9 +22,19 @@ public struct PortOwner: Hashable, Sendable {
         return executable.contains("DevStack") && executable.contains("/Runtimes/")
     }
 
-    /// "httpd (PID 812)".
+    /// The container app behind the port, when it is one: its containers'
+    /// published ports show up as the app's own process.
+    public var containerApplication: String? {
+        let path = executable ?? ""
+        if command.hasPrefix("com.docker") || command.hasPrefix("vpnkit") || path.contains("/Docker.app/") { return "Docker" }
+        if command.localizedCaseInsensitiveContains("orbstack") || path.contains("/OrbStack.app/") { return "OrbStack" }
+        return nil
+    }
+
+    /// "httpd (PID 812)", or "Docker (com.docker.backend, PID 2331)".
     public var summary: String {
-        "\(executable.map { URL(fileURLWithPath: $0).lastPathComponent } ?? command) (PID \(pid))"
+        let name = executable.map { URL(fileURLWithPath: $0).lastPathComponent } ?? command
+        return containerApplication.map { "\($0) (\(name), PID \(pid))" } ?? "\(name) (PID \(pid))"
     }
 
     public static func lookup(port: UInt16, runner: ProcessRunner = .init()) -> PortOwner? {
@@ -67,15 +77,19 @@ public struct PortConflict: Hashable, Sendable {
     /// "Port 8080 (Apache) is used by httpd (PID 812), a server another DevStack copy left running."
     public var description: String {
         let user = owner.map { owner in
-            " by \(owner.summary)" + (owner.isDevStackRuntime ? ", a server another DevStack copy left running" : "")
+            " by \(owner.summary)"
+                + (owner.isDevStackRuntime ? ", a server another DevStack copy left running"
+                   : owner.containerApplication != nil ? ": a container publishes it" : "")
         } ?? " by another program"
         return "Port \(port) (\(service.displayName)) is used\(user)."
     }
 
     public var recoveryAction: String {
-        owner?.isDevStackRuntime == true
-            ? "Stop it from Doctor, then start the stack again."
-            : "Quit that program, or choose another port in Settings → Ports."
+        if owner?.isDevStackRuntime == true { return "Stop it from Doctor, then start the stack again." }
+        if let application = owner?.containerApplication {
+            return "Stop that \(application) container, or let Doctor's Fix All move DevStack to a free port."
+        }
+        return "Quit that program, or let Doctor's Fix All move DevStack to a free port."
     }
 
     public var failure: ServiceFailure {

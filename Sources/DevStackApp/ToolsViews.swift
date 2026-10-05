@@ -575,6 +575,7 @@ struct DoctorView: View {
         case .applyHostMappings: "Write"
         case .restartLocalDNS: "Restart"
         case .approveLoginItem: "Approve…"
+        case .usePort(_, let port, _): "Use \(port)"
         }
     }
 
@@ -784,19 +785,19 @@ private struct PortsPanel: View {
 
     var body: some View {
         Panel("Ports", note: note) {
-            portRow("Web HTTP", text: $draft.webHTTP, fallback: ServicePorts.webHTTPFallback, isWebPort: true)
-            portRow("Web HTTPS", text: $draft.webHTTPS, fallback: ServicePorts.webHTTPSFallback, isWebPort: true)
-            portRow("MySQL", text: $draft.mysql, fallback: ServicePorts.mysqlFallback, isWebPort: false)
-            portRow("PostgreSQL", text: $draft.postgresql, fallback: ServicePorts.postgresqlFallback, isWebPort: false)
-            portRow("Mail SMTP", text: $draft.mailpitSMTP, fallback: ServicePorts.mailpitSMTPFallback, isWebPort: false)
-            portRow("Mail inbox", text: $draft.mailpitInbox, fallback: ServicePorts.mailpitInboxFallback, isWebPort: false)
+            portRow("Web HTTP", text: $draft.webHTTP, role: .webHTTP, isWebPort: true)
+            portRow("Web HTTPS", text: $draft.webHTTPS, role: .webHTTPS, isWebPort: true)
+            portRow("MySQL", text: $draft.mysql, role: .mysql, isWebPort: false)
+            portRow("PostgreSQL", text: $draft.postgresql, role: .postgresql, isWebPort: false)
+            portRow("Mail SMTP", text: $draft.mailpitSMTP, role: .mailpitSMTP, isWebPort: false)
+            portRow("Mail inbox", text: $draft.mailpitInbox, role: .mailpitInbox, isWebPort: false)
             PanelRow {
                 Button("Use 8080 and 8443") { useDevPorts() }.disabled(locked).help("Ports that work without the helper")
                 Button("Use 80 and 443") { useStandardPorts() }.disabled(locked).help("Site addresses without a port number; needs the helper")
                 Spacer()
-                Button("Revert") { sync() }.disabled(locked || draft.ports == applied)
+                Button("Revert") { sync() }.disabled(locked || !changed)
                 Button("Apply") { Task { await apply() } }
-                    .disabled(locked || draft.ports?.isValid != true || draft.ports == applied)
+                    .disabled(locked || draft.ports?.isValid != true || !changed)
             }
             .controlSize(.small)
         }
@@ -804,18 +805,24 @@ private struct PortsPanel: View {
         .onChange(of: model.configuration.ports) { _, _ in sync() }
     }
 
+    /// Edited public ports; DevStack's internal choices are not edited here.
+    private var changed: Bool { draft.ports?.publicOnly != applied.publicOnly }
+
     private var note: String {
         if model.hasRunningServices { return "Stop the stack to change ports." }
         if let message = validationMessage { return message }
         return "Ports below 1024 use the helper, which forwards them to unprivileged ports."
     }
 
-    private func portRow(_ title: String, text: Binding<String>, fallback: UInt16, isWebPort: Bool) -> some View {
+    private func portRow(_ title: String, text: Binding<String>, role: PortRole, isWebPort: Bool) -> some View {
         PanelRow {
             Text(title)
             Spacer(minLength: 8)
             if let value = UInt16(text.wrappedValue), value > 0, value < 1024 {
-                Text(verbatim: isWebPort && (value == 80 || value == 443) ? "via the helper; no port in site URLs" : "via the helper, to \(fallback)")
+                // The internal port the helper forwards to; DevStack moves it
+                // when another program holds it.
+                let internalPort = applied.internalPort(role)
+                Text(verbatim: isWebPort && (value == 80 || value == 443) ? "via the helper to \(internalPort); no port in site URLs" : "via the helper, to \(internalPort)")
                     .font(.caption).foregroundStyle(.secondary)
             }
             TextField(title, text: text)
@@ -852,7 +859,8 @@ private struct PortsPanel: View {
     }
 
     private func apply() async {
-        guard let ports = draft.ports else { return }
+        guard var ports = draft.ports else { return }
+        ports.internalPorts = applied.internalPorts
         await model.updatePorts(ports)
         sync()
     }

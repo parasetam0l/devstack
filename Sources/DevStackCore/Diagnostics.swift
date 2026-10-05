@@ -159,14 +159,21 @@ public struct DevStackDoctor: Sendable {
 
     private func helperStatusResults(_ status: PrivilegedHelperStatus?, context: DiagnosticContext) -> [DiagnosticResult] {
         guard let status else { return [] }
+        // Forwarding runs with the stack: off while it is stopped, by design.
         let forwardingNeedsHelper = !context.ports.forwardings.isEmpty
+        let webRunning = context.serviceStates.contains { $0.service == context.selectedWebServer.service && $0.phase == .running }
+        let missing = forwardingNeedsHelper && webRunning && !status.portForwardingEnabled
         return [
             .init(
                 id: "helper-port-forwarding",
                 title: "Privileged port forwarding",
-                severity: status.portForwardingEnabled ? .info : (forwardingNeedsHelper ? .warning : .info),
-                evidence: status.portForwardingEnabled ? "Loopback forwarding is enabled." : (forwardingNeedsHelper ? "Privileged ports configured but no forwarder is active." : "No privileged ports configured; high ports work without forwarding."),
-                remediation: status.portForwardingEnabled ? nil : (forwardingNeedsHelper ? "Start DevStack to enable its loopback-only forwarders." : nil)
+                severity: missing ? .warning : .info,
+                evidence: status.portForwardingEnabled ? "Forwarding is on."
+                    : !forwardingNeedsHelper ? "No privileged ports configured; high ports work without forwarding."
+                    : webRunning ? "The web server runs, but no forwarder is active."
+                    : "Off while the stack is stopped; it turns on when the stack starts.",
+                remediation: missing ? "Repair the helper, then start the stack again." : nil,
+                fix: missing ? .repairHelper : nil
             ),
             .init(
                 id: "local-dns",
@@ -231,82 +238,92 @@ public struct DevStackDoctor: Sendable {
     }
 
     private func portResults(context: DiagnosticContext) -> [DiagnosticResult] {
-        let selectedDatabaseService: ServiceKind = context.selectedDatabase == .mysql57 ? .mysql57 : .mysql84
-        let webService = context.selectedWebServer.service
         let ports = context.ports
-        // Only the ports of services in the stack; a database left out of it
-        // may run elsewhere on its usual port.
-        var owners: [(UInt16, ServiceKind)] = [
-            (ports.webHTTPListen, webService), (ports.webHTTPSListen, webService),
-            (ports.mailpitSMTPListen, .mailpit), (ports.mailpitInboxListen, .mailpit)
-        ]
-        if context.selectedDatabase != .none { owners.append((ports.mysqlListen, selectedDatabaseService)) }
-        if context.selectedPostgreSQL != .none { owners.append((ports.postgresqlListen, .postgresql18)) }
-        var upstreams: [UInt16: UInt16] = [:]
-        if context.helperInstalled {
-            for entry in ports.forwardings {
-                if entry.publicPort == ports.mysql, context.selectedDatabase == .none { continue }
-                if entry.publicPort == ports.postgresql, context.selectedPostgreSQL == .none { continue }
-                let service: ServiceKind
-                switch entry.publicPort {
-                case ports.webHTTP, ports.webHTTPS: service = webService
-                case ports.mysql: service = selectedDatabaseService
-                case ports.postgresql: service = .postgresql18
-                default: service = .mailpit
-                }
-                owners.append((entry.publicPort, service))
-                upstreams[entry.publicPort] = entry.upstreamPort
-            }
-        }
+        let webService = context.selectedWebServer.service
         var phases: [ServiceKind: ServicePhase] = [:]
         for state in context.serviceStates { phases[state.service] = state.phase }
-        // This copy's helper answers; a listener on a forwarded port is its.
-        let ownForwarder = context.helperStatus?.portForwardingEnabled == true
-        return owners.map { port, service in
+        // The roles of services in the stack; a database left out of it may
+        // run elsewhere on its usual port.
+        var roles: [(PortRole, ServiceKind)] = [(.webHTTP, webService), (.webHTTPS, webService),
+                                                (.proxyHTTP, webService), (.proxyHTTPS, webService),
+                                                (.mailpitSMTP, .mailpit), (.mailpitInbox, .mailpit)]
+        if let mysql = context.selectedDatabase.service { roles.append((.mysql, mysql)) }
+        if let postgreSQL = context.selectedPostgreSQL.service { roles.append((.postgresql, postgreSQL)) }
+        let used = Set(PortRole.allCases.compactMap { ports.listenPort($0) } + PortRole.allCases.compactMap { ports.publicPort($0) })
+
+        var results: [DiagnosticResult] = []
+        for (role, service) in roles {
+            guard let port = ports.listenPort(role) else { continue }
+            let running = phases[service] == .running
             let listening = PortAvailability.isListening(port)
-            let upstream = upstreams[port]
-            let ours = listening && (upstream == nil ? phases[service] == .running : ownForwarder)
-            let expected = phases[service] == .running && (port >= 1024 || context.helperInstalled)
-            // lsof sees this user's processes, such as servers an old copy left.
-            let owner = listening && !ours ? PortOwner.lookup(port: port, runner: runner) : nil
-            let evidence: String
-            if ours {
-                evidence = upstream.map { "The DevStack helper forwards it to port \($0)." } ?? "\(service.displayName) is listening."
+            let isInternal = ports.isInternal(role)
+            let id = "port-\(port)"
+            let title = "Port \(port) (\(service.displayName))"
+            if listening && running {
+                results.append(.init(id: id, title: title, severity: .info, evidence: "\(service.displayName) is listening\(isInternal ? " (internal; the helper forwards to it)" : "")."))
             } else if listening {
-                evidence = owner.map { owner in
+                // Another program holds it, so the service cannot start.
+                let owner = PortOwner.lookup(port: port, runner: runner)
+                var evidence = owner.map { owner in
                     "Used by \(owner.summary)\(owner.executable.map { " from \($0)" } ?? "")."
-                        + (owner.isDevStackRuntime ? " It is a DevStack server this copy did not start, such as one an old copy left running." : "")
-                } ?? "Another program is listening\(upstream != nil ? ", not this copy's helper" : "")."
-            } else {
-                evidence = "Nothing is listening."
-            }
-            let severity: DiagnosticSeverity
-            let remediation: String?
-            var fix: DiagnosticFix?
-            if ours {
-                severity = .info
-                remediation = nil
-            } else if listening {
-                // The stack cannot start while another program holds one of its ports.
-                severity = .error
+                        + (owner.isDevStackRuntime ? " It is a DevStack server this copy did not start, such as one an old copy left running."
+                           : owner.containerApplication != nil ? " A container publishes it." : "")
+                } ?? "Another program is listening."
+                if isInternal, let publicPort = ports.publicPort(role) ?? ports.publicPort(role == .proxyHTTP ? .webHTTP : .webHTTPS) {
+                    evidence += " DevStack uses it internally behind port \(publicPort)."
+                }
+                var fix: DiagnosticFix?
+                var remediation: String
                 if let owner, owner.isDevStackRuntime {
                     remediation = "Stop it, then start the stack again."
                     fix = .stopProcess(pid: owner.pid, command: owner.command)
+                } else if let free = PortAvailability.firstFree(from: isInternal ? role.relocationBase : port &+ 1, excluding: used) {
+                    remediation = isInternal
+                        ? "Use \(free) internally instead; your sites keep their port."
+                        : "\(owner?.containerApplication.map { "Stop that \($0) container, or use" } ?? "Quit that program, or use") port \(free) for \(service.displayName) instead."
+                    fix = .usePort(role: role.rawValue, port: free, internal: isInternal)
                 } else {
                     remediation = "Quit that program, or choose another port in Settings → Ports."
                 }
-            } else if expected {
-                severity = .error
-                remediation = upstream != nil
-                    ? "The helper is not forwarding this port. Repair the helper."
-                    : "\(service.displayName) is not listening. Restart it and check its log."
+                results.append(.init(id: id, title: title, severity: .error, evidence: evidence, remediation: remediation, fix: fix))
+            } else if running {
+                results.append(.init(id: id, title: title, severity: .error, evidence: "Nothing is listening.",
+                                     remediation: "\(service.displayName) is not listening. Restart it and check its log."))
             } else {
-                severity = .info
-                remediation = nil
+                results.append(.init(id: id, title: title, severity: .info, evidence: "Free."))
             }
-            if !listening, expected, upstream != nil { fix = .repairHelper }
-            return .init(id: "port-\(port)", title: "Port \(port)", severity: severity, evidence: evidence, remediation: remediation, fix: fix)
         }
+
+        // Public ports the helper forwards while the stack runs.
+        guard context.helperInstalled else { return results }
+        let ownForwarder = context.helperStatus?.portForwardingEnabled == true
+        for entry in ports.forwardings {
+            let service: ServiceKind
+            switch entry.publicPort {
+            case ports.webHTTP, ports.webHTTPS: service = webService
+            case ports.mysql: if context.selectedDatabase == .none { continue }; service = context.selectedDatabase.service ?? .mysql84
+            case ports.postgresql: if context.selectedPostgreSQL == .none { continue }; service = .postgresql18
+            default: service = .mailpit
+            }
+            let port = entry.publicPort
+            let listening = PortAvailability.isListening(port)
+            let expected = phases[service] == .running
+            let id = "port-\(port)"
+            let title = "Port \(port) (\(service.displayName))"
+            if listening && ownForwarder {
+                results.append(.init(id: id, title: title, severity: .info, evidence: "The DevStack helper forwards it to port \(entry.upstreamPort)."))
+            } else if listening {
+                results.append(.init(id: id, title: title, severity: .error,
+                                     evidence: "Another program is listening, not this copy's helper.",
+                                     remediation: "Quit that program, or choose another port in Settings → Ports."))
+            } else if expected {
+                results.append(.init(id: id, title: title, severity: .error, evidence: "Nothing is listening.",
+                                     remediation: "The helper is not forwarding this port. Repair the helper.", fix: .repairHelper))
+            } else {
+                results.append(.init(id: id, title: title, severity: .info, evidence: "Free; the helper forwards it while the stack runs."))
+            }
+        }
+        return results
     }
 
     private func loginItemResult(_ context: DiagnosticContext) -> DiagnosticResult {

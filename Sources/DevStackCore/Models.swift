@@ -538,6 +538,10 @@ public enum DiagnosticFix: Codable, Hashable, Sendable {
     case restartLocalDNS
     /// Opens Login Items, where macOS waits for approval of Open at Login.
     case approveLoginItem
+    /// Moves a service to a free port because another program holds its own:
+    /// the internal port behind a forwarded one (the public port stays), or
+    /// the public port itself.
+    case usePort(role: String, port: UInt16, internal: Bool)
 
     /// The order Fix All applies fixes in: what blocks the helper first,
     /// then the helper, then what needs it.
@@ -545,12 +549,13 @@ public enum DiagnosticFix: Codable, Hashable, Sendable {
         switch self {
         case .removeOtherHelper: 0
         case .stopProcess: 1
-        case .repairHelper: 2
-        case .installRuntime: 3
-        case .trustCertificate: 4
-        case .applyHostMappings: 5
-        case .restartLocalDNS: 6
-        case .approveLoginItem: 7
+        case .usePort: 2
+        case .repairHelper: 3
+        case .installRuntime: 4
+        case .trustCertificate: 5
+        case .applyHostMappings: 6
+        case .restartLocalDNS: 7
+        case .approveLoginItem: 8
         }
     }
 }
@@ -645,6 +650,43 @@ public struct PortForwardingConfiguration: Codable, Hashable, Sendable {
 /// Ports below 1024 cannot be bound by the unprivileged service processes. When one is
 /// requested, the service keeps listening on its unprivileged fallback port and the
 /// privileged helper forwards the requested public port to it on the loopback interface.
+/// What a port is for. A service may listen on an internal port the helper
+/// forwards its public port to.
+public enum PortRole: String, Codable, CaseIterable, Sendable {
+    case webHTTP, webHTTPS, proxyHTTP, proxyHTTPS, mysql, postgresql, mailpitSMTP, mailpitInbox
+
+    /// The internal port used unless another program holds it.
+    public var fallback: UInt16 {
+        switch self {
+        case .webHTTP: ServicePorts.webHTTPFallback
+        case .webHTTPS: ServicePorts.webHTTPSFallback
+        case .proxyHTTP: ServicePorts.proxyHTTPFallback
+        case .proxyHTTPS: ServicePorts.proxyHTTPSFallback
+        case .mysql: ServicePorts.mysqlFallback
+        case .postgresql: ServicePorts.postgresqlFallback
+        case .mailpitSMTP: ServicePorts.mailpitSMTPFallback
+        case .mailpitInbox: ServicePorts.mailpitInboxFallback
+        }
+    }
+
+    /// Where a search for a free internal port starts: away from the usual
+    /// ports other tools pick (8080 → 18080).
+    public var relocationBase: UInt16 { UInt16(min(Int(fallback) + 10_000, 60_000)) }
+
+    public var title: String {
+        switch self {
+        case .webHTTP: "Web HTTP"
+        case .webHTTPS: "Web HTTPS"
+        case .proxyHTTP: "Web HTTP (PROXY)"
+        case .proxyHTTPS: "Web HTTPS (PROXY)"
+        case .mysql: "MySQL"
+        case .postgresql: "PostgreSQL"
+        case .mailpitSMTP: "Mail SMTP"
+        case .mailpitInbox: "Mail inbox"
+        }
+    }
+}
+
 public struct ServicePorts: Codable, Hashable, Sendable {
     public var webHTTP: UInt16
     public var webHTTPS: UInt16
@@ -652,6 +694,10 @@ public struct ServicePorts: Codable, Hashable, Sendable {
     public var postgresql: UInt16
     public var mailpitSMTP: UInt16
     public var mailpitInbox: UInt16
+    /// Where services listen when the helper forwards their public port, by
+    /// `PortRole` raw value. Unset roles use the usual fallback; DevStack sets
+    /// one when another program (a Docker container, say) holds it.
+    public var internalPorts: [String: UInt16]?
 
     public init(
         webHTTP: UInt16 = ServicePorts.webHTTPFallback,
@@ -681,17 +727,78 @@ public struct ServicePorts: Codable, Hashable, Sendable {
     public static let proxyHTTPSFallback: UInt16 = 8444
 
     /// The port the web server actually listens on.
-    public var webHTTPListen: UInt16 { webHTTP < 1024 ? Self.webHTTPFallback : webHTTP }
-    public var webHTTPSListen: UInt16 { webHTTPS < 1024 ? Self.webHTTPSFallback : webHTTPS }
-    public var mysqlListen: UInt16 { mysql < 1024 ? Self.mysqlFallback : mysql }
-    public var postgresqlListen: UInt16 { postgresql < 1024 ? Self.postgresqlFallback : postgresql }
-    public var mailpitSMTPListen: UInt16 { mailpitSMTP < 1024 ? Self.mailpitSMTPFallback : mailpitSMTP }
-    public var mailpitInboxListen: UInt16 { mailpitInbox < 1024 ? Self.mailpitInboxFallback : mailpitInbox }
+    public var webHTTPListen: UInt16 { listenPort(.webHTTP)! }
+    public var webHTTPSListen: UInt16 { listenPort(.webHTTPS)! }
+    public var mysqlListen: UInt16 { listenPort(.mysql)! }
+    public var postgresqlListen: UInt16 { listenPort(.postgresql)! }
+    public var mailpitSMTPListen: UInt16 { listenPort(.mailpitSMTP)! }
+    public var mailpitInboxListen: UInt16 { listenPort(.mailpitInbox)! }
 
     /// PROXY-protocol listener for forwarded HTTP, when the public port needs
     /// the helper. The helper sends the client address ahead of the request.
-    public var proxyHTTPListen: UInt16? { webHTTP < 1024 ? Self.proxyHTTPFallback : nil }
-    public var proxyHTTPSListen: UInt16? { webHTTPS < 1024 ? Self.proxyHTTPSFallback : nil }
+    public var proxyHTTPListen: UInt16? { listenPort(.proxyHTTP) }
+    public var proxyHTTPSListen: UInt16? { listenPort(.proxyHTTPS) }
+
+    /// A role's public port; nil for the PROXY listeners, which have none.
+    public func publicPort(_ role: PortRole) -> UInt16? {
+        switch role {
+        case .webHTTP: webHTTP
+        case .webHTTPS: webHTTPS
+        case .mysql: mysql
+        case .postgresql: postgresql
+        case .mailpitSMTP: mailpitSMTP
+        case .mailpitInbox: mailpitInbox
+        case .proxyHTTP, .proxyHTTPS: nil
+        }
+    }
+
+    public mutating func setPublicPort(_ port: UInt16, for role: PortRole) {
+        switch role {
+        case .webHTTP: webHTTP = port
+        case .webHTTPS: webHTTPS = port
+        case .mysql: mysql = port
+        case .postgresql: postgresql = port
+        case .mailpitSMTP: mailpitSMTP = port
+        case .mailpitInbox: mailpitInbox = port
+        case .proxyHTTP, .proxyHTTPS: break
+        }
+    }
+
+    /// True when the service listens on an internal port the helper forwards
+    /// to: its public port is privileged, or it is a PROXY listener.
+    public func isInternal(_ role: PortRole) -> Bool {
+        switch role {
+        case .proxyHTTP: webHTTP < 1024
+        case .proxyHTTPS: webHTTPS < 1024
+        default: (publicPort(role) ?? 0) < 1024
+        }
+    }
+
+    public func internalPort(_ role: PortRole) -> UInt16 {
+        internalPorts?[role.rawValue] ?? role.fallback
+    }
+
+    public mutating func setInternalPort(_ port: UInt16, for role: PortRole) {
+        var ports = internalPorts ?? [:]
+        ports[role.rawValue] = port
+        internalPorts = ports
+    }
+
+    /// Where the role's service listens; nil for a PROXY listener that is not
+    /// needed.
+    public func listenPort(_ role: PortRole) -> UInt16? {
+        switch role {
+        case .proxyHTTP, .proxyHTTPS: isInternal(role) ? internalPort(role) : nil
+        default: isInternal(role) ? internalPort(role) : publicPort(role)
+        }
+    }
+
+    /// The same public ports, without internal choices: what Settings edits.
+    public var publicOnly: ServicePorts {
+        var ports = self
+        ports.internalPorts = nil
+        return ports
+    }
 
     /// Public ports the helper must forward to the unprivileged listener. When
     /// the helper supports the PROXY protocol, web traffic is forwarded to the

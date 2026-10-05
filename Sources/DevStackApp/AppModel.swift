@@ -479,6 +479,9 @@ final class AppModel: ObservableObject {
             return
         }
         let previouslyRunning = Set((await supervisor.allStates()).filter { $0.phase == .running }.map(\.service))
+        // Internal ports behind 80/443 and the like move away from programs
+        // holding them; the ports the user chose stay.
+        await relocateInternalPorts(skipping: previouslyRunning)
         // Name busy ports before anything starts, so the helper never begins
         // forwarding for a stack that cannot run.
         let conflicts = portConflicts(skipping: previouslyRunning)
@@ -516,6 +519,32 @@ final class AppModel: ObservableObject {
             errorMessage = error.localizedDescription
         }
         await refreshServiceStates()
+    }
+
+    /// Moves internal ports (the listeners the helper forwards 80, 443 and
+    /// other privileged ports to, and the PROXY listeners) away from ports
+    /// another program holds, such as a Docker container on 8080. Servers a
+    /// DevStack copy left running are not moved around; Doctor stops them.
+    private func relocateInternalPorts(skipping running: Set<ServiceKind>) async {
+        var ports = configuration.ports
+        let webRunning = running.contains(.apache) || running.contains(.nginx)
+        for role in PortRole.allCases where ports.isInternal(role) {
+            switch role {
+            case .webHTTP, .webHTTPS, .proxyHTTP, .proxyHTTPS: if webRunning { continue }
+            case .mysql: if running.contains(.mysql57) || running.contains(.mysql84) { continue }
+            case .postgresql: if running.contains(.postgresql18) { continue }
+            case .mailpitSMTP, .mailpitInbox: if running.contains(.mailpit) { continue }
+            }
+            guard let port = ports.listenPort(role), PortAvailability.isListening(port),
+                  PortOwner.lookup(port: port)?.isDevStackRuntime != true else { continue }
+            let used = Set(PortRole.allCases.compactMap { ports.listenPort($0) } + PortRole.allCases.compactMap { ports.publicPort($0) })
+            if let free = PortAvailability.firstFree(from: role.relocationBase, excluding: used) {
+                ports.setInternalPort(free, for: role)
+            }
+        }
+        guard ports != configuration.ports else { return }
+        configuration.ports = ports
+        try? await store.save(configuration)
     }
 
     /// The ports of the services about to start that another program holds.
@@ -670,6 +699,10 @@ final class AppModel: ObservableObject {
         case .applyHostMappings: "Wrote the site hostnames to /etc/hosts"
         case .restartLocalDNS: "Restarted Local DNS"
         case .approveLoginItem: "Opened Login Items to approve Open at Login"
+        case .usePort(let roleName, let port, let isInternal):
+            isInternal
+                ? "\(PortRole(rawValue: roleName)?.title ?? roleName) listens on port \(port) internally; your sites keep their port"
+                : "\(PortRole(rawValue: roleName)?.title ?? roleName) now uses port \(port)"
         }
     }
 
@@ -689,6 +722,14 @@ final class AppModel: ObservableObject {
         case .applyHostMappings: await reapplyHostMappings()
         case .restartLocalDNS: await setLocalNetworkAccess(true)
         case .approveLoginItem: SMAppService.openSystemSettingsLoginItems()
+        case .usePort(let roleName, let suggested, let isInternal):
+            guard let role = PortRole(rawValue: roleName) else { return }
+            var ports = configuration.ports
+            // An earlier fix in the same run may have taken the suggested port.
+            let used = Set(PortRole.allCases.filter { $0 != role }.compactMap { ports.listenPort($0) } + PortRole.allCases.compactMap { ports.publicPort($0) })
+            let port = used.contains(suggested) ? (PortAvailability.firstFree(from: suggested &+ 1, excluding: used) ?? suggested) : suggested
+            if isInternal { ports.setInternalPort(port, for: role) } else { ports.setPublicPort(port, for: role) }
+            await updatePorts(ports)
         }
     }
 
@@ -960,7 +1001,11 @@ final class AppModel: ObservableObject {
 
     /// Keeps the helper's host mappings, loopback/LAN forwarding and local DNS in
     /// sync with the current configuration.
-    private func applyPrivilegedNetworking(hostnames: [String]) async throws {
+    /// Pushes forwarding and Local DNS to the helper. Forwarding is on only
+    /// while the stack runs, or when Start Stack asks for it: a stopped stack
+    /// leaves nothing listening on 80 and 443.
+    private func applyPrivilegedNetworking(hostnames: [String], forwarding: Bool? = nil) async throws {
+        let forwardingWanted = forwarding ?? hasRunningServices
         // PROXY protocol forwarding needs a helper that advertises the
         // capability; anything older keeps the direct loopback targets.
         var capabilities = helperStatus?.capabilities
@@ -971,11 +1016,10 @@ final class AppModel: ObservableObject {
         let forwardings = configuration.ports.forwardingEntries(proxyProtocol: supportsProxyProtocol)
         let lan = localNetworkLanEntries(supportsProxyProtocol: supportsProxyProtocol)
         // Don't report forwarding as enabled when there is nothing to forward.
-        let forwardingEnabled = !forwardings.isEmpty || !lan.isEmpty
-        try await helper.setPortForwarding(PortForwardingConfiguration(
-            enabled: forwardingEnabled,
-            entries: forwardings,
-            lanEntries: lan))
+        let forwardingEnabled = forwardingWanted && (!forwardings.isEmpty || !lan.isEmpty)
+        try await helper.setPortForwarding(forwardingEnabled
+            ? PortForwardingConfiguration(enabled: true, entries: forwardings, lanEntries: lan)
+            : PortForwardingConfiguration(enabled: false))
         let answerAddress = localNetworkAddress ?? ""
         appliedLocalNetworkAddress = answerAddress.isEmpty ? nil : answerAddress
         try await helper.setDNSConfiguration(DNSConfiguration(
@@ -1491,7 +1535,7 @@ final class AppModel: ObservableObject {
         guard helperInstalled else { return }
         let hostnames = (configuration.sites.map(\.hostname) + managementHosts).filter { $0 != "localhost" }
         try await helper.applyHostMappings(hostnames.map { HostMapping(hostname: $0) })
-        try await applyPrivilegedNetworking(hostnames: hostnames)
+        try await applyPrivilegedNetworking(hostnames: hostnames, forwarding: true)
         helperStatus = try await helper.status()
         helperInstalled = true
     }
@@ -1630,6 +1674,7 @@ final class AppModel: ObservableObject {
             helperNotice = .startBlocked
             return
         }
+        await relocateInternalPorts(skipping: Set(serviceStates.filter { $0.phase == .running }.map(\.service)))
         do {
             guard runtimeIsAvailable(service.runtimeID) else {
                 throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "\(service.displayName) is not installed."])
