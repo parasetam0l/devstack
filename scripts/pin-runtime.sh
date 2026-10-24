@@ -4,7 +4,7 @@
 # Sources/DevStackApp/Resources/runtime-packs.json, the exact packs this
 # version of DevStack installs.
 #
-#   scripts/pin-runtime.sh PACK_NAME...   pin published packs, e.g. php-8.5-8.5.11-r1
+#   scripts/pin-runtime.sh PACK_NAME...   pin published packs, e.g. php-8.5-8.5.12-r1
 #   scripts/pin-runtime.sh --check        re-download every pinned pack and check it
 #
 # A pack is pinned only after its download matches the size and SHA-256 its
@@ -37,7 +37,7 @@ if [[ "${1:-}" == "--check" ]]; then
     /usr/bin/python3 - "$catalog" <<'PY'
 import json, sys
 required = {"openssl-3.5", "imagemagick-7.1", "postgresql-18", "apache-2.4", "nginx-1.30", "mysql-8.4",
-            "php-8.5", "php-8.4", "mailpit-1.31.1", "phpmyadmin-5.2.3", "adminer-6.1.1", "composer-2.10.3"}
+            "php-8.5", "php-8.4", "mailpit-1.32.0", "phpmyadmin-5.2.3", "adminer-6.2.0", "composer-2.10.3"}
 missing = required - {pack["id"] for pack in json.load(open(sys.argv[1]))["packs"]}
 if missing:
     raise SystemExit("Not pinned yet: " + ", ".join(sorted(missing)))

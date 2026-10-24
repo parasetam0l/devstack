@@ -22,6 +22,7 @@ enum DevStackCoreChecks {
         let old = try JSONDecoder().decode(AppConfiguration.self, from: Data(#"{"schemaVersion":1,"selectedDatabase":"mysql-8.4"}"#.utf8))
         try expect(old.selectedPostgreSQL == .none, "Existing installations unexpectedly enable PostgreSQL")
         try expect(old.enabledExtensions["php-8.4"]?.contains("pdo_pgsql") == true, "Existing PHP configuration did not gain its PostgreSQL driver")
+        try expect(old.enabledExtensions["php-8.0"]?.contains("pdo_pgsql") == true, "The added PHP 8.0 runtime did not gain its default extensions")
         for mysql in [DatabaseEngine.none, .mysql84] {
             for postgres in [PostgreSQLEngine.none, .postgresql18] {
                 let configuration = AppConfiguration(selectedDatabase: mysql, selectedPostgreSQL: postgres)
@@ -1080,9 +1081,10 @@ private func migrationChecks() throws {
     try expect(MigrationNaming.databaseName("shop", taken: ["shop", "shop_xampp"]) == "shop_xampp2", "Database names clashed")
     try expect(MigrationNaming.folder(named: "crm", in: htdocs).lastPathComponent == "crm-xampp", "Folder names clashed")
     try expect(DatabaseFolderName.decode("my@002ddb") == "my-db" && DatabaseFolderName.encode("my-db") == "my@002ddb", "Database folder names were misread")
-    let available = ["php-7.4", "php-8.4", "php-8.5"]
-    try expect(PHPVersionMapping.runtimeID(for: "8.2", available: available) == "php-8.4" && PHPVersionMapping.runtimeID(for: "5.6", available: available) == "php-7.4"
-               && PHPVersionMapping.runtimeID(for: "8.5", available: available) == "php-8.5" && PHPVersionMapping.runtimeID(for: "9.1", available: available) == "php-8.5",
+    let available = ["php-7.4", "php-8.0", "php-8.1", "php-8.2", "php-8.3", "php-8.4", "php-8.5"]
+    try expect(PHPVersionMapping.runtimeID(for: "8.2", available: available) == "php-8.2" && PHPVersionMapping.runtimeID(for: "5.6", available: available) == "php-7.4"
+               && PHPVersionMapping.runtimeID(for: "8.5", available: available) == "php-8.5" && PHPVersionMapping.runtimeID(for: "9.1", available: available) == "php-8.5"
+               && PHPVersionMapping.runtimeID(for: "7.4", available: available) == "php-7.4",
                "PHP versions were mapped wrongly")
     let limits = PHPSettingsImport.overrides(fromPHPINI: "memory_limit=1G\nupload_max_filesize=8M\nmax_execution_time=0\npost_max_size=-1\n")
     try expect(limits.memoryLimit == "1G" && limits.uploadMaxFilesize == "64M" && limits.maxExecutionTime == 0 && limits.postMaxSize == "-1", "XAMPP's PHP limits were not carried over: \(limits)")

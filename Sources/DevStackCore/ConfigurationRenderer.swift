@@ -143,7 +143,7 @@ public struct ConfigurationRenderer: Sendable {
     }
 
     public func phpFPMConfiguration(runtimeID: String, sites: [SiteDefinition], includeManagementPool: Bool = false) throws -> String {
-        guard ["php-7.4", "php-8.4", "php-8.5"].contains(runtimeID) else {
+        guard ServiceKind.phpRuntimeIDs.contains(runtimeID) else {
             throw ConfigurationRendererError.unsupportedRuntime(runtimeID)
         }
         var pools = try sites
@@ -180,7 +180,7 @@ public struct ConfigurationRenderer: Sendable {
     }
 
     public func phpINI(runtimeID: String, enabledExtensions: Set<String>, mailpitBinary: URL) throws -> String {
-        guard ["php-7.4", "php-8.4", "php-8.5"].contains(runtimeID) else {
+        guard ServiceKind.phpRuntimeIDs.contains(runtimeID) else {
             throw ConfigurationRendererError.unsupportedRuntime(runtimeID)
         }
         let runtime = runtimeDirectory(runtimeID)
@@ -192,7 +192,7 @@ public struct ConfigurationRenderer: Sendable {
             let directive = name == "xdebug" ? "zend_extension" : "extension"
             return "\(directive)=\(quote(extensionDirectory.appendingPathComponent("\(name).so").path))"
         }
-        // PHP 8.5 builds OPcache in; PHP 7.4 and 8.4 install it as a shared
+        // PHP 8.5 builds OPcache in; the other runtimes install it as a shared
         // Zend extension that must be loaded, ahead of Xdebug.
         if let opcache = sharedOPcache(in: extensionDirectory) {
             settings.insert("zend_extension=\(quote(opcache.path))", at: 0)
@@ -626,7 +626,7 @@ public struct ConfigurationRenderer: Sendable {
         listen.mode = 0600
         pm = ondemand
         pm.max_children = 4
-        chdir = \(runtimeDirectory("adminer-6.1.1").path)
+        chdir = \(runtimeDirectory("adminer-6.2.0").path)
         php_admin_value[display_errors] = Off
         """
     }

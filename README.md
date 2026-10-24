@@ -1,6 +1,6 @@
 # DevStack
 
-A local development stack for macOS: Apache/Nginx, PHP 8.4/8.5 (optionally
+A local development stack for macOS: Apache/Nginx, PHP 8.0–8.5 (optionally
 7.4), MySQL 8.4 (optionally 5.7), PostgreSQL 18, Mailpit,
 phpMyAdmin/Adminer, Composer, ImageMagick, TLS certificates and a privileged
 helper for ports 80/443 and local DNS. The setup wizard downloads the

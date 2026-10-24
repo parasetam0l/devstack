@@ -113,6 +113,7 @@ private struct SiteRow: View {
     var body: some View {
         let url = model.siteURL(site)
         let folder = URL(fileURLWithPath: site.documentRoot)
+        let legacyPHP = model.isEndOfLifePHP(site.phpRuntimeID)
         PanelRow {
             StatusDot(color: served ? .green : Color(nsColor: .tertiaryLabelColor))
                 .help(served ? "Served" : "Not served while the stack is stopped")
@@ -128,8 +129,8 @@ private struct SiteRow: View {
             .frame(width: 220, alignment: .leading)
             SiteLink(url: url)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Tag(text: site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP "), tint: site.phpRuntimeID == "php-7.4" ? .orange : .secondary)
-                .help(site.phpRuntimeID == "php-7.4" ? "PHP 7.4 is end-of-life" : "")
+            Tag(text: site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP "), tint: legacyPHP ? .orange : .secondary)
+                .help(legacyPHP ? "\(site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP ")) is end-of-life" : "")
             HStack(spacing: 6) {
                 Button("Edit", action: edit)
                     .help("Change the hostname, folder, PHP version or HTTPS")
@@ -258,8 +259,8 @@ struct SiteEditor: View {
                             Label("This domain can hide a public website. Prefer .test or .localhost.", systemImage: "exclamationmark.triangle.fill")
                                 .foregroundStyle(.orange)
                         }
-                        if editor.site.phpRuntimeID == "php-7.4" {
-                            Label("PHP 7.4 is end-of-life. Use it only for legacy projects.", systemImage: "exclamationmark.triangle.fill")
+                        if model.isEndOfLifePHP(editor.site.phpRuntimeID) {
+                            Label("\(editor.site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP ")) is end-of-life. Use it only for legacy projects.", systemImage: "exclamationmark.triangle.fill")
                                 .foregroundStyle(.orange)
                         }
                     }
@@ -291,11 +292,14 @@ struct SiteEditor: View {
             .padding(16)
         }
         .frame(width: 540, height: 600)
-        .alert("Use legacy PHP 7.4?", isPresented: $editor.isConfirmingLegacyRuntime) {
-            Button("Use PHP 7.4", role: .destructive) { editor.site.phpRuntimeID = "php-7.4" }
-            Button("Cancel", role: .cancel) {}
+        .alert("Use legacy \(legacyRuntimeName)?", isPresented: $editor.isConfirmingLegacyRuntime) {
+            Button("Use \(legacyRuntimeName)", role: .destructive) {
+                if let runtimeID = editor.pendingLegacyRuntimeID { editor.site.phpRuntimeID = runtimeID }
+                editor.pendingLegacyRuntimeID = nil
+            }
+            Button("Cancel", role: .cancel) { editor.pendingLegacyRuntimeID = nil }
         } message: {
-            Text("PHP 7.4 no longer receives security fixes. Use it only for legacy compatibility on this Mac.")
+            Text("\(legacyRuntimeName) no longer receives security fixes. Use it only for legacy compatibility on this Mac.")
         }
         .interactiveDismissDisabled(editor.isSaving)
     }
@@ -315,10 +319,18 @@ struct SiteEditor: View {
             && !editor.site.documentRoot.isEmpty && model.runtimeIsAvailable(editor.site.phpRuntimeID)
     }
 
+    private var legacyRuntimeName: String {
+        (editor.pendingLegacyRuntimeID ?? editor.site.phpRuntimeID).replacingOccurrences(of: "php-", with: "PHP ")
+    }
+
     private var phpRuntimeBinding: Binding<String> {
-        Binding(get: { editor.site.phpRuntimeID }, set: {
-            if $0 == "php-7.4", editor.site.phpRuntimeID != "php-7.4" { editor.isConfirmingLegacyRuntime = true }
-            else { editor.site.phpRuntimeID = $0 }
+        Binding(get: { editor.site.phpRuntimeID }, set: { runtimeID in
+            if model.isEndOfLifePHP(runtimeID), editor.site.phpRuntimeID != runtimeID {
+                editor.pendingLegacyRuntimeID = runtimeID
+                editor.isConfirmingLegacyRuntime = true
+            } else {
+                editor.site.phpRuntimeID = runtimeID
+            }
         })
     }
 
@@ -350,5 +362,6 @@ struct SiteEditor: View {
     @Published var errorMessage: String?
     @Published var isSaving = false
     @Published var isConfirmingLegacyRuntime = false
+    @Published var pendingLegacyRuntimeID: String?
     init(site: SiteDefinition) { self.site = site }
 }

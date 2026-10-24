@@ -183,7 +183,7 @@ public actor ServiceSupervisor {
     private static func shutdownTier(_ service: ServiceKind) -> Int {
         switch service {
         case .apache, .nginx: 0
-        case .php74, .php84, .php85: 1
+        case .php74, .php80, .php81, .php82, .php83, .php84, .php85: 1
         case .mailpit: 2
         case .mysql57, .mysql84, .postgresql18: 3
         }

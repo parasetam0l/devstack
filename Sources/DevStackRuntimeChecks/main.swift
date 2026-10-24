@@ -111,15 +111,15 @@ struct RuntimeChecks {
         try AtomicFileWriter.write(try renderer.phpMyAdminConfiguration(cookieSecret: "0123456789abcdefghijklmnopqrstuv"),
             to: paths.phpMyAdmin.appendingPathComponent("config.inc.php"), permissions: 0o600)
         // Adminer is served from the generated sign-in wrapper, as in the app.
-        try AtomicFileWriter.write(renderer.adminerWrapperPHP(adminerIndex: root.appendingPathComponent("adminer-6.1.1/index.php")),
+        try AtomicFileWriter.write(renderer.adminerWrapperPHP(adminerIndex: root.appendingPathComponent("adminer-6.2.0/index.php")),
             to: paths.generatedAdminer.appendingPathComponent("index.php"), permissions: 0o644)
-        try await supervisor.start(ServiceSpecification(kind: .mailpit, executable: root.appendingPathComponent("mailpit-1.31.1/mailpit"), arguments: renderer.mailpitArguments(), logFile: paths.logs.appendingPathComponent("mailpit.log"), readinessProbe: .tcpLoopback(port: 8025)))
+        try await supervisor.start(ServiceSpecification(kind: .mailpit, executable: root.appendingPathComponent("mailpit-1.32.0/mailpit"), arguments: renderer.mailpitArguments(), logFile: paths.logs.appendingPathComponent("mailpit.log"), readinessProbe: .tcpLoopback(port: 8025)))
         for site in sites {
             let id = site.phpRuntimeID
             let fpmConfig = paths.generatedPHP.appendingPathComponent("\(id)-fpm.conf")
             let ini = paths.generatedPHP.appendingPathComponent("\(id).ini")
             try AtomicFileWriter.write(try renderer.phpFPMConfiguration(runtimeID: id, sites: sites, includeManagementPool: id == "php-8.5"), to: fpmConfig)
-            try AtomicFileWriter.write(try renderer.phpINI(runtimeID: id, enabledExtensions: ["redis", "imagick", "pgsql", "pdo_pgsql"], mailpitBinary: root.appendingPathComponent("mailpit-1.31.1/mailpit")), to: ini)
+            try AtomicFileWriter.write(try renderer.phpINI(runtimeID: id, enabledExtensions: ["redis", "imagick", "pgsql", "pdo_pgsql"], mailpitBinary: root.appendingPathComponent("mailpit-1.32.0/mailpit")), to: ini)
             let executable = root.appendingPathComponent("\(id)/sbin/php-fpm")
             _ = try runner.runChecked(executable: executable, arguments: ["-t", "-y", fpmConfig.path, "-c", ini.path])
             try await supervisor.start(ServiceSpecification(kind: ServiceKind(rawValue: id)!, executable: executable, arguments: ["--nodaemonize", "-y", fpmConfig.path, "-c", ini.path], logFile: paths.logs.appendingPathComponent("\(id).log"), readinessProbe: .fileExists(paths.phpSocket(runtimeID: id, siteID: site.id))))

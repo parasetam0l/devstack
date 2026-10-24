@@ -406,7 +406,7 @@ public enum WebServer: String, Codable, CaseIterable, Identifiable, Sendable {
 }
 
 public struct AppConfiguration: Codable, Hashable, Sendable {
-    public static let currentSchemaVersion = 5
+    public static let currentSchemaVersion = 6
 
     public var schemaVersion: Int
     public var sites: [SiteDefinition]
@@ -432,6 +432,10 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
         selectedPostgreSQL: PostgreSQLEngine = .none,
         enabledExtensions: [String: Set<String>] = [
             "php-7.4": ["redis", "imagick"],
+            "php-8.0": ["redis", "imagick", "pgsql", "pdo_pgsql"],
+            "php-8.1": ["redis", "imagick", "pgsql", "pdo_pgsql"],
+            "php-8.2": ["redis", "imagick", "pgsql", "pdo_pgsql"],
+            "php-8.3": ["redis", "imagick", "pgsql", "pdo_pgsql"],
             "php-8.5": ["redis", "imagick", "pgsql", "pdo_pgsql"],
             "php-8.4": ["redis", "imagick", "pgsql", "pdo_pgsql"]
         ],
@@ -493,6 +497,15 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
         if schemaVersion < 2 {
             for id in ["php-8.4", "php-8.5"] { enabledExtensions[id, default: []].formUnion(["pgsql", "pdo_pgsql"]) }
         }
+        if schemaVersion < 6 {
+            // PHP 8.0–8.3 joined the catalog; give them the same extensions as
+            // the other modern runtimes so installing one works out of the box.
+            for id in ServiceKind.phpRuntimeIDs where id != "php-7.4" {
+                if enabledExtensions[id] == nil {
+                    enabledExtensions[id] = ["redis", "imagick", "pgsql", "pdo_pgsql"]
+                }
+            }
+        }
         if schemaVersion < Self.currentSchemaVersion { schemaVersion = Self.currentSchemaVersion }
     }
 
@@ -502,6 +515,10 @@ public enum ServiceKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case apache
     case nginx
     case php74 = "php-7.4"
+    case php80 = "php-8.0"
+    case php81 = "php-8.1"
+    case php82 = "php-8.2"
+    case php83 = "php-8.3"
     case php84 = "php-8.4"
     case php85 = "php-8.5"
     case mysql57 = "mysql-5.7"
@@ -515,6 +532,10 @@ public enum ServiceKind: String, Codable, CaseIterable, Identifiable, Sendable {
         case .apache: "Apache"
         case .nginx: "Nginx"
         case .php74: "PHP 7.4"
+        case .php80: "PHP 8.0"
+        case .php81: "PHP 8.1"
+        case .php82: "PHP 8.2"
+        case .php83: "PHP 8.3"
         case .php84: "PHP 8.4"
         case .php85: "PHP 8.5"
         case .mysql57: "MySQL 5.7"
@@ -524,13 +545,20 @@ public enum ServiceKind: String, Codable, CaseIterable, Identifiable, Sendable {
         }
     }
     public var phpRuntimeID: String? {
-        switch self { case .php74, .php84, .php85: rawValue; default: nil }
+        switch self {
+        case .php74, .php80, .php81, .php82, .php83, .php84, .php85: rawValue
+        default: nil
+        }
+    }
+    /// Every PHP runtime DevStack can serve sites with, oldest first.
+    public static var phpRuntimeIDs: [String] {
+        allCases.compactMap(\.phpRuntimeID)
     }
     public var runtimeID: String {
         switch self {
         case .apache: "apache-2.4"
         case .nginx: "nginx-1.30"
-        case .mailpit: "mailpit-1.31.1"
+        case .mailpit: "mailpit-1.32.0"
         default: rawValue
         }
     }

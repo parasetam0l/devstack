@@ -87,7 +87,7 @@ public enum LogFiles {
     public static func primaryLog(for service: ServiceKind) -> String {
         switch service {
         case .apache: "apache-error.log"
-        case .php74, .php84, .php85: "\(service.rawValue)-fpm.log"
+        case .php74, .php80, .php81, .php82, .php83, .php84, .php85: "\(service.rawValue)-fpm.log"
         default: "\(service.rawValue).log"
         }
     }

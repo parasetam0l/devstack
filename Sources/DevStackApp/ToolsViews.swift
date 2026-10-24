@@ -24,8 +24,8 @@ struct PHPView: View {
 
     var body: some View {
         PanelPage {
-            if runtimeID == "php-7.4" {
-                Banner(symbol: "exclamationmark.triangle.fill", title: "PHP 7.4 is end-of-life",
+            if model.isEndOfLifePHP(runtimeID) {
+                Banner(symbol: "exclamationmark.triangle.fill", title: "\(runtimeID.replacingOccurrences(of: "php-", with: "PHP ")) is end-of-life",
                        detail: "It no longer receives security fixes. Use it only for older projects that need it.")
             }
 

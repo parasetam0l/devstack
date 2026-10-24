@@ -473,7 +473,7 @@ public struct DevStackDoctor: Sendable {
             checks.append(("config-nginx", "Nginx configuration", context.paths.runtimeDirectory("nginx-1.30").appendingPathComponent("sbin/nginx"),
                 ["-t", "-p", context.paths.generatedNginx.path + "/", "-c", context.paths.generatedNginx.appendingPathComponent("nginx.conf").path], true))
         }
-        for runtimeID in ["php-7.4", "php-8.4", "php-8.5"] where context.requiredRuntimeIDs.contains(runtimeID) {
+        for runtimeID in ServiceKind.phpRuntimeIDs where context.requiredRuntimeIDs.contains(runtimeID) {
             let config = context.paths.generatedPHP.appendingPathComponent("\(runtimeID)-fpm.conf")
             checks.append((
                 "config-\(runtimeID)", "\(runtimeID) FPM configuration",

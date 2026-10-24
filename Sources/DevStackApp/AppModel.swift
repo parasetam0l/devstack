@@ -1429,7 +1429,7 @@ final class AppModel: ObservableObject {
     private func generateConfiguration() throws {
         try paths.createRequiredDirectories()
         let renderer = configurationRenderer
-        let mailpit = runtimeDirectory("mailpit-1.31.1").appendingPathComponent("mailpit")
+        let mailpit = runtimeDirectory("mailpit-1.32.0").appendingPathComponent("mailpit")
         let cookieSecretURL = paths.phpMyAdmin.appendingPathComponent("cookie-secret")
         let cookieSecret: String
         if FileManager.default.fileExists(atPath: cookieSecretURL.path) {
@@ -1441,12 +1441,12 @@ final class AppModel: ObservableObject {
         try AtomicFileWriter.write(try renderer.phpMyAdminConfiguration(cookieSecret: cookieSecret),
             to: paths.phpMyAdmin.appendingPathComponent("config.inc.php"), permissions: 0o600)
         try AtomicFileWriter.write(
-            renderer.adminerWrapperPHP(adminerIndex: runtimeDirectory("adminer-6.1.1").appendingPathComponent("index.php")),
+            renderer.adminerWrapperPHP(adminerIndex: runtimeDirectory("adminer-6.2.0").appendingPathComponent("index.php")),
             to: paths.generatedAdminer.appendingPathComponent("index.php"),
             permissions: 0o644
         )
         try AtomicFileWriter.write(try renderer.apacheConfiguration(sites: configuration.sites), to: paths.generatedApache.appendingPathComponent("httpd.conf"), permissions: 0o644)
-        for runtimeID in ["php-7.4", "php-8.4", "php-8.5"] {
+        for runtimeID in ServiceKind.phpRuntimeIDs {
             try AtomicFileWriter.write(
                 try renderer.phpFPMConfiguration(runtimeID: runtimeID, sites: configuration.sites, includeManagementPool: runtimeID == "php-8.5"),
                 to: paths.generatedPHP.appendingPathComponent("\(runtimeID)-fpm.conf"),
@@ -1481,7 +1481,7 @@ final class AppModel: ObservableObject {
     }
 
     private func validateRequiredRuntimes() throws {
-        var required = [configuration.selectedWebServer.service.runtimeID, "php-8.5", "mailpit-1.31.1", "phpmyadmin-5.2.3", "adminer-6.1.1", "openssl-3.5"]
+        var required = [configuration.selectedWebServer.service.runtimeID, "php-8.5", "mailpit-1.32.0", "phpmyadmin-5.2.3", "adminer-6.2.0", "openssl-3.5"]
         required.append(contentsOf: configuration.selectedDatabaseServices.map(\.runtimeID))
         required.append(contentsOf: requiredPHPRuntimes)
         let missing = required.filter { !runtimeIsAvailable($0) }
@@ -1619,7 +1619,7 @@ final class AppModel: ObservableObject {
         let renderer = configurationRenderer
         try await supervisor.start(ServiceSpecification(
             kind: .mailpit,
-            executable: runtimeDirectory("mailpit-1.31.1").appendingPathComponent("mailpit"),
+            executable: runtimeDirectory("mailpit-1.32.0").appendingPathComponent("mailpit"),
             arguments: renderer.mailpitArguments(),
             logFile: paths.logs.appendingPathComponent("mailpit.log"),
             readinessProbe: .tcpLoopback(port: configuration.ports.mailpitInboxListen)
@@ -1712,7 +1712,7 @@ final class AppModel: ObservableObject {
                 await supervisor.stop(service == .apache ? .nginx : .apache)
                 if service == .apache { try await validateWebConfigurations(); try await startApache() }
                 else { try await startNginx() }
-            case .php74, .php84, .php85: try await startPHP(runtimeID: service.rawValue)
+            case .php74, .php80, .php81, .php82, .php83, .php84, .php85: try await startPHP(runtimeID: service.rawValue)
             case .mysql57, .mysql84:
                 let engine: DatabaseEngine = service == .mysql57 ? .mysql57 : .mysql84
                 await supervisor.stop(engine == .mysql57 ? .mysql84 : .mysql57)

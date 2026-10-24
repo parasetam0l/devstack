@@ -163,7 +163,7 @@ Each DevStack version pins the exact packs it installs in
 published pack (it is downloaded and checked against its `pack.json` first):
 
 ```sh
-scripts/pin-runtime.sh php-8.5-8.5.11-r1
+scripts/pin-runtime.sh php-8.5-8.5.12-r1
 ```
 
 Before a release, check that every runtime is pinned and every pinned pack is

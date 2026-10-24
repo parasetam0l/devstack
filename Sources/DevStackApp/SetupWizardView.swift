@@ -165,7 +165,7 @@ struct SetupWizardView: View {
 
     /// Optional runtimes offered on top of the ones the stack always uses.
     private var optionalRuntimeIDs: [String] {
-        ["nginx-1.30", "php-8.4", "postgresql-18", "php-7.4", "mysql-5.7"]
+        ["nginx-1.30", "php-8.4", "php-8.3", "php-8.2", "php-8.1", "php-8.0", "postgresql-18", "php-7.4", "mysql-5.7"]
             .filter { model.runtimePackCatalog.pin(for: $0) != nil && !model.runtimePacksInUse.contains($0) }
     }
 

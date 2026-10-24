@@ -160,13 +160,14 @@ private struct DashboardSiteRow: View {
 
     var body: some View {
         let url = model.siteURL(site)
+        let legacyPHP = model.isEndOfLifePHP(site.phpRuntimeID)
         PanelRow {
             StatusDot(color: served ? .green : Color(nsColor: .tertiaryLabelColor))
                 .help(served ? "Served" : "Not served while the stack is stopped")
             Text(site.name).fontWeight(.medium).lineLimit(1).frame(width: ServiceRowLayout.title, alignment: .leading)
             SiteLink(url: url)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Tag(text: site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP "), tint: site.phpRuntimeID == "php-7.4" ? .orange : .secondary)
+            Tag(text: site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP "), tint: legacyPHP ? .orange : .secondary)
                 .frame(width: ServiceRowLayout.state, alignment: .leading)
             SiteActionsMenu(title: "More actions for \(site.name)") { menuItems(url: url) }
                 .controlSize(.small)
