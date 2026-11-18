@@ -206,6 +206,9 @@ public struct ConfigurationRenderer: Sendable {
         }
 
         return """
+        ; DevStack writes this file each time PHP starts, so edits here are lost.
+        ; Set memory and upload limits per site on the Sites page; phpMyAdmin and
+        ; Adminer accept uploads up to \(Self.databaseToolUploadLimit).
         [PHP]
         engine=On
         short_open_tag=Off
@@ -553,7 +556,7 @@ public struct ConfigurationRenderer: Sendable {
         env[DEVSTACK_PHPMYADMIN_CONFIG] = \(quote(paths.phpMyAdmin.appendingPathComponent("config.inc.php").path))
         env[DEVSTACK_PHPMYADMIN_TEMP] = \(quote(paths.phpMyAdmin.appendingPathComponent("tmp").path + "/"))
         php_admin_value[display_errors] = Off
-        php_admin_value[memory_limit] = 256M
+        \(databaseToolLimits)
         """
     }
 
@@ -573,6 +576,8 @@ public struct ConfigurationRenderer: Sendable {
         $cfg['Servers'][1]['password'] = '\(toolPassword)';
         $cfg['Servers'][1]['AllowNoPassword'] = \(toolPassword.isEmpty ? "true" : "false");
         $cfg['VersionCheck'] = false;
+        // Large imports run to the end instead of stopping after five minutes.
+        $cfg['ExecTimeLimit'] = 0;
         """
     }
 
@@ -628,6 +633,21 @@ public struct ConfigurationRenderer: Sendable {
         pm.max_children = 4
         chdir = \(runtimeDirectory("adminer-6.2.0").path)
         php_admin_value[display_errors] = Off
+        \(databaseToolLimits)
+        """
+    }
+
+    /// Largest upload phpMyAdmin and Adminer accept; it matches Apache's
+    /// default request body limit, and nginx allows the same for them.
+    public static let databaseToolUploadLimit = "1G"
+
+    /// Database dumps outgrow site limits, and Adminer holds a whole upload in
+    /// memory while it imports it.
+    private var databaseToolLimits: String {
+        """
+        php_admin_value[memory_limit] = 2G
+        php_admin_value[upload_max_filesize] = \(Self.databaseToolUploadLimit)
+        php_admin_value[post_max_size] = \(Self.databaseToolUploadLimit)
         """
     }
 

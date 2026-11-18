@@ -33,6 +33,7 @@ extension ConfigurationRenderer {
             let locations = """
                 root \(webRoot);
                 index index.php index.html;
+                client_max_body_size \(try bodyLimit(defaultSite));
                 access_log \(try nginxQuote(defaultSite.logs.access));
                 error_log \(try nginxQuote(defaultSite.logs.error));
                 location / { try_files $uri $uri/ /index.php?$query_string; }
@@ -69,6 +70,7 @@ extension ConfigurationRenderer {
             let locations = """
                 root \(webRoot);
                 index index.php index.html;
+                client_max_body_size \(try bodyLimit(site));
                 access_log \(try nginxQuote(site.logs.access));
                 error_log \(try nginxQuote(site.logs.error));
                 location / { try_files $uri $uri/ /index.php?$query_string; }
@@ -122,6 +124,7 @@ extension ConfigurationRenderer {
                 ssl_certificate_key \(try nginxQuote(paths.privateKey(for: host).path));
                 root \(try nginxQuote(host == "adminer.localhost" ? paths.generatedAdminer.path : runtimeDirectory(runtimeID).path));
                 index index.php;
+                client_max_body_size \(Self.databaseToolUploadLimit);
                 location / { try_files $uri $uri/ =404; }
                 location ~ /\\. { deny all; }
                 location ~ \\.php$ {
@@ -168,6 +171,15 @@ extension ConfigurationRenderer {
             \(servers.joined(separator: "\n\n"))
         }
         """
+    }
+
+    /// A site accepts request bodies up to its PHP POST limit.
+    private func bodyLimit(_ site: SiteDefinition) throws -> String {
+        let limit = site.phpOverrides.postMaxSize
+        guard limit.range(of: "^[1-9][0-9]*[KMG]?$", options: .regularExpression) != nil else {
+            throw ConfigurationRendererError.unsafeValue(limit)
+        }
+        return limit
     }
 
     private func nginxQuote(_ value: String) throws -> String {

@@ -175,6 +175,23 @@ enum DevStackCoreChecks {
         try expect(php.contains("php_value[display_errors]"), "Site display_errors is not overridable")
         try expect(php.contains("php_value[error_log]"), "Site error_log is not overridable")
         try expect(!php.contains("php_admin_value[display_errors] = On"), "Site display_errors is still forced on")
+        for pool in ["[management]", "[adminer]"] {
+            let section = php.components(separatedBy: pool).last?.components(separatedBy: "\n[").first ?? ""
+            try expect(section.contains("php_admin_value[upload_max_filesize] = 1G") && section.contains("php_admin_value[post_max_size] = 1G"),
+                       "\(pool) does not accept large database uploads")
+        }
+        var bigUploads = site
+        bigUploads.phpOverrides.postMaxSize = "512M"
+        let uploadNginx = try renderer.nginxConfiguration(sites: [bigUploads, defaultSite])
+        let exampleServer = uploadNginx.components(separatedBy: "server_name example.test;").last ?? ""
+        try expect(exampleServer.contains("client_max_body_size 512M;"), "nginx does not let a site receive its POST limit")
+        let toolServer = uploadNginx.components(separatedBy: "server_name phpmyadmin.localhost;").last ?? ""
+        try expect(toolServer.prefix(while: { $0 != "}" }).contains("client_max_body_size 1G;"), "nginx caps phpMyAdmin uploads below its PHP limit")
+        bigUploads.phpOverrides.postMaxSize = "1G; include /etc/passwd"
+        do {
+            _ = try renderer.nginxConfiguration(sites: [bigUploads])
+            throw CheckFailure(description: "nginx accepted an unsafe POST limit")
+        } catch ConfigurationRendererError.unsafeValue { }
         let phpMyAdminConfig = try renderer.phpMyAdminConfiguration(cookieSecret: String(repeating: "a", count: 32))
         try expect(phpMyAdminConfig.contains("['auth_type'] = 'config'") && phpMyAdminConfig.contains("['user'] = 'root'"), "phpMyAdmin does not sign in automatically")
         let adminerWrapper = renderer.adminerWrapperPHP(adminerIndex: URL(fileURLWithPath: "/tmp/adminer/index.php"))
