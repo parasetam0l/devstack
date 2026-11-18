@@ -124,8 +124,13 @@ final class AppModel: ObservableObject {
     @Published var isRepairing = false
     @Published var repairProgress: String?
     @Published var repairSummary: RepairSummary?
-    /// The exact runtime packs this version installs (Resources/runtime-packs.json).
-    let runtimePackCatalog = AppModel.loadRuntimePackCatalog()
+    /// The exact runtime packs this version ships with (Resources/runtime-packs.json).
+    let bundledRuntimePackCatalog = AppModel.loadRuntimePackCatalog()
+    /// The packs this version installs: the bundled pins, with newer ones
+    /// from the last accepted signed runtime catalog (RuntimeCatalogUpdates.swift).
+    @Published var runtimePackCatalog = AppModel.loadRuntimePackCatalog()
+    @Published var isCheckingRuntimeCatalog = false
+    @Published var runtimeCatalogCheck: RuntimeCatalogCheck?
     @Published var appearance = AppAppearance(rawValue: UserDefaults.standard.string(forKey: "DevStackAppearance") ?? "") ?? .system {
         didSet { if !isReviewMode { UserDefaults.standard.set(appearance.rawValue, forKey: "DevStackAppearance") } }
     }
@@ -146,7 +151,7 @@ final class AppModel: ObservableObject {
     let paths: DevStackPaths
     let isReviewMode: Bool
     private let store: AppConfigurationStore
-    private let supervisor: ServiceSupervisor
+    let supervisor: ServiceSupervisor
     private let runner = ProcessRunner()
     private let helper = PrivilegedHelperClient()
     private var runtimeEnvironment: [String: String] {
@@ -298,6 +303,8 @@ final class AppModel: ObservableObject {
                 try? generateConfiguration()
             }
             runtimeManifests = try loadRuntimeLock()
+            applySavedRuntimeCatalog()
+            checkForRuntimeUpdatesIfDue()
             // Waiting for approval in Login Items still counts as on, so Doctor
             // can lead the user to approve it.
             let loginItemEnabled = [.enabled, .requiresApproval].contains(SMAppService.mainApp.status)

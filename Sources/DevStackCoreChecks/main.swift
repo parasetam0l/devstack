@@ -896,6 +896,7 @@ enum DevStackCoreChecks {
         try expect(logEntries.map(\.title) == ["Apache — errors", "PHP 8.5 — FPM", "localhost — errors", "site-gone-access.log"], "Log files were not named and grouped")
         try expect(logEntries.first?.service == .apache && LogFiles.primaryLog(for: .php85) == "php-8.5-fpm.log", "Log services were not resolved")
         try migrationChecks()
+        try runtimeCatalogChecks()
         print("DevStackCoreChecks: all checks passed")
     }
 }
@@ -1304,4 +1305,148 @@ private func migrationChecks() throws {
     try expect(try ProjectSettingsUpdater.update(project: wordpress, renamedDatabases: [:], mysqlPort: 3307, newURL: "https://wp.localhost", oldURLs: []).isEmpty, "An up-to-date project was changed")
     let pairs = WordPressAddressUpdate.pairs(oldURLs: ["http://localhost/wp/", "http://localhost/wp"], newURL: "https://wp.localhost")
     try expect(pairs.count == 2 && pairs[0] == ["http:\\/\\/localhost\\/wp", "https:\\/\\/wp.localhost"], "WordPress address pairs are wrong: \(pairs)")
+}
+
+// MARK: - Signed runtime catalog
+
+private func runtimeCatalogChecks() throws {
+    func pin(_ id: String, _ version: String, revision: Int = 1, requires: [String] = [], minimumMacOS: String = "15.0", contents: [String] = []) -> RuntimePackPin {
+        RuntimePackPin(id: id, version: version, packRevision: revision, name: "\(id)-r\(revision)",
+                       url: URL(string: "https://example.invalid/\(id)-r\(revision).devstack-runtime")!,
+                       sha256: String(repeating: "a", count: 64), size: 100, requires: requires, minimumMacOS: minimumMacOS, contents: contents)
+    }
+    func payload(schema: Int = 1, sequence: Int64, packs: [RuntimeCatalogPack]) throws -> Data {
+        var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(RuntimeCatalog(sequence: sequence, issued: "2026-11-18T13:00:00Z", packs: packs))) as! [String: Any]
+        object["schemaVersion"] = schema
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+    func rejects(_ expected: RuntimeCatalogError, _ message: String, _ body: () throws -> Void) throws {
+        do { try body(); throw CheckFailure(description: "\(message) was accepted") }
+        catch let error as RuntimeCatalogError { try expect(error == expected, "\(message): expected \(expected), got \(error)") }
+    }
+    func malformed(_ message: String, _ body: () throws -> Void) throws {
+        do { try body(); throw CheckFailure(description: "\(message) was accepted") }
+        catch RuntimeCatalogError.malformedCatalog { /* Expected. */ }
+    }
+
+    let key = Curve25519.Signing.PrivateKey()
+    let keys = ["test-1": key.publicKey.rawRepresentation]
+    let packs = [RuntimeCatalogPack(pin: pin("php-8.5", "8.5.13", requires: ["openssl-3.5"], contents: ["redis-php"]))]
+    let catalogData = try payload(sequence: 200, packs: packs)
+    let envelope = try RuntimeCatalog.sign(payload: catalogData, privateKey: key, keyID: "test-1")
+    let accepted = try RuntimeCatalog.verify(envelope: envelope, trustedKeys: keys, acceptedSequence: 100)
+    try expect(accepted.sequence == 200 && accepted.packs == packs, "A signed catalog did not verify as signed")
+    _ = try RuntimeCatalog.verify(envelope: envelope, trustedKeys: keys, acceptedSequence: 200)
+    let decodedEnvelope = try JSONDecoder().decode(RuntimeCatalogEnvelope.self, from: envelope)
+    try expect(Data(base64Encoded: decodedEnvelope.payload) == catalogData, "The envelope does not carry the catalog bytes as they were")
+
+    // Rejections.
+    var tampered = decodedEnvelope
+    tampered.payload = try payload(sequence: 201, packs: packs).base64EncodedString()
+    try rejects(.invalidSignature, "A tampered payload") { _ = try RuntimeCatalog.verify(envelope: JSONEncoder().encode(tampered), trustedKeys: keys) }
+    try rejects(.unknownSigningKey("test-1"), "An unknown key") {
+        _ = try RuntimeCatalog.verify(envelope: envelope, trustedKeys: ["other": Curve25519.Signing.PrivateKey().publicKey.rawRepresentation])
+    }
+    let otherKey = Curve25519.Signing.PrivateKey()
+    try rejects(.invalidSignature, "A catalog signed by another key under a trusted key ID") {
+        _ = try RuntimeCatalog.verify(envelope: RuntimeCatalog.sign(payload: catalogData, privateKey: otherKey, keyID: "test-1"), trustedKeys: keys)
+    }
+    try rejects(.olderSequence(received: 200, accepted: 201), "A lower sequence") {
+        _ = try RuntimeCatalog.verify(envelope: envelope, trustedKeys: keys, acceptedSequence: 201)
+    }
+    let schemaTwo = try payload(schema: 2, sequence: 300, packs: packs)
+    try rejects(.unsupportedSchema(2), "Signing schema 2") { _ = try RuntimeCatalog.sign(payload: schemaTwo, privateKey: key, keyID: "test-1") }
+    var wrongSchema = decodedEnvelope
+    wrongSchema.payload = schemaTwo.base64EncodedString()
+    wrongSchema.signature.value = try key.signature(for: schemaTwo).base64EncodedString()
+    try rejects(.unsupportedSchema(2), "A signed schema 2 catalog") { _ = try RuntimeCatalog.verify(envelope: JSONEncoder().encode(wrongSchema), trustedKeys: keys) }
+    try rejects(.malformedEnvelope, "A bare catalog without an envelope") { _ = try RuntimeCatalog.verify(envelope: catalogData, trustedKeys: keys) }
+    var insecure = pin("php-8.5", "8.5.13")
+    insecure.url = URL(string: "http://example.invalid/php.devstack-runtime")!
+    try malformed("A pack with an http URL") { _ = try RuntimeCatalog.decode(payload: payload(sequence: 1, packs: [RuntimeCatalogPack(pin: insecure)])) }
+    var badHash = pin("php-8.5", "8.5.13")
+    badHash.sha256 = "xyz"
+    try malformed("A pack with a malformed sha256") { _ = try RuntimeCatalog.decode(payload: payload(sequence: 1, packs: [RuntimeCatalogPack(pin: badHash)])) }
+    try malformed("A pack listed twice") { _ = try RuntimeCatalog.decode(payload: payload(sequence: 1, packs: packs + packs)) }
+    try malformed("A pack without a sha256") { _ = try RuntimeCatalog.decode(payload: Data(#"{"schemaVersion":1,"sequence":1,"issued":"2026-11-18T13:00:00Z","packs":[{"id":"php-8.5"}]}"#.utf8)) }
+
+    // Merging with the bundled catalog.
+    let bundled = RuntimePackCatalog(packs: [
+        pin("openssl-3.5", "3.5.9"),
+        pin("imagemagick-7.1", "7.1.2-34"),
+        pin("php-8.5", "8.5.12", requires: ["openssl-3.5"], contents: ["redis-php"]),
+        pin("mysql-8.4", "8.4.13", revision: 2, requires: ["openssl-3.5"])
+    ])
+    let candidates = RuntimeCatalog(sequence: 5, issued: "2026-11-18T13:00:00Z", packs: [
+        RuntimeCatalogPack(pin: pin("php-8.5", "8.5.13", requires: ["openssl-3.5"], contents: ["redis-php"])),   // newer version
+        RuntimeCatalogPack(pin: pin("imagemagick-7.1", "7.1.2-34", revision: 2)),                                 // newer revision
+        RuntimeCatalogPack(pin: pin("mysql-8.4", "8.4.13", revision: 1, requires: ["openssl-3.5"])),             // older revision
+        RuntimeCatalogPack(pin: pin("redis-9", "9.0.0")),                                                        // unknown id
+        RuntimeCatalogPack(pin: pin("openssl-3.5", "3.5.10", minimumMacOS: "27.0"))                              // too-new macOS
+    ])
+    let merged = candidates.merged(into: bundled, macOSVersion: "26.1.0", appVersion: "0.9.0")
+    try expect(merged.pin(for: "php-8.5")?.version == "8.5.13", "A newer catalog version did not replace the bundled pin")
+    try expect(merged.pin(for: "imagemagick-7.1")?.packRevision == 2, "A newer pack revision did not replace the bundled pin")
+    try expect(merged.pin(for: "mysql-8.4")?.packRevision == 2, "An older pack revision replaced the bundled pin")
+    try expect(merged.pin(for: "redis-9") == nil && merged.packs.count == 4, "A pack the app doesn't know was added")
+    try expect(merged.pin(for: "openssl-3.5")?.version == "3.5.9", "A pack for a newer macOS was offered")
+    try expect(candidates.merged(into: bundled, macOSVersion: "27.0.0", appVersion: "0.9.0").pin(for: "openssl-3.5")?.version == "3.5.10",
+               "A pack for this macOS was not offered")
+    let appGated = RuntimeCatalog(sequence: 6, issued: "2026-11-18T13:00:00Z", packs: [
+        RuntimeCatalogPack(pin: pin("php-8.5", "8.5.13", requires: ["openssl-3.5"]), minimumAppVersion: "0.10.0")
+    ])
+    try expect(appGated.merged(into: bundled, macOSVersion: "26.1.0", appVersion: "0.9.0").pin(for: "php-8.5")?.version == "8.5.12",
+               "A pack for a newer DevStack was offered")
+    try expect(appGated.merged(into: bundled, macOSVersion: "26.1.0", appVersion: "0.10.0").pin(for: "php-8.5")?.version == "8.5.13",
+               "A pack for this DevStack version was not offered")
+    let unknownRequirement = RuntimeCatalog(sequence: 7, issued: "2026-11-18T13:00:00Z", packs: [
+        RuntimeCatalogPack(pin: pin("php-8.5", "8.5.13", requires: ["openssl-4.0"])),
+        RuntimeCatalogPack(pin: pin("mysql-8.4", "8.4.14", contents: ["mystery-plugin"]))
+    ])
+    let unknownMerged = unknownRequirement.merged(into: bundled, macOSVersion: "26.1.0", appVersion: "0.9.0")
+    try expect(unknownMerged.pin(for: "php-8.5")?.version == "8.5.12" && unknownMerged.pin(for: "mysql-8.4")?.version == "8.4.13",
+               "A pack requiring or containing an unknown runtime was offered")
+
+    // The packager signs and verifies the same envelopes.
+    let packager = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().appendingPathComponent("DevStackRuntimePackager")
+    guard FileManager.default.isExecutableFile(atPath: packager.path) else {
+        print("DevStackCoreChecks: skipped the packager catalog round trip (DevStackRuntimePackager is not built)")
+        return
+    }
+    let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("devstack-catalog-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+    func run(_ arguments: [String]) throws -> (status: Int32, output: String) {
+        let process = Process()
+        process.executableURL = packager
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(decoding: output, as: UTF8.self))
+    }
+    let paths = (key: scratch.appendingPathComponent("key"), keys: scratch.appendingPathComponent("keys.json"),
+                 catalog: scratch.appendingPathComponent("catalog.json"), envelope: scratch.appendingPathComponent("envelope.json"))
+    try expect(try run(["generate-key", "ci-1", paths.key.path, paths.keys.path]).status == 0, "The packager did not generate a key")
+    try catalogData.write(to: paths.catalog)
+    try expect(try run(["sign-catalog", paths.catalog.path, paths.key.path, "ci-1", paths.envelope.path]).status == 0, "The packager did not sign the catalog")
+    let verified = try run(["verify-catalog", paths.envelope.path, paths.keys.path])
+    try expect(verified.status == 0 && verified.output.trimmingCharacters(in: .whitespacesAndNewlines) == "200", "The packager did not verify its catalog: \(verified.output)")
+    let packagerKeys = try JSONDecoder().decode([String: [String: String]].self, from: Data(contentsOf: paths.keys))
+    guard let packagerPublicKey = packagerKeys["keys"]?["ci-1"].flatMap({ Data(base64Encoded: $0) }) else {
+        throw CheckFailure(description: "The packager wrote no public key")
+    }
+    _ = try RuntimeCatalog.verify(envelope: Data(contentsOf: paths.envelope), trustedKeys: ["ci-1": packagerPublicKey])
+    try Data(#"{"schemaVersion":2,"sequence":1,"issued":"2026-11-18T13:00:00Z","packs":[]}"#.utf8).write(to: paths.catalog)
+    try expect(try run(["sign-catalog", paths.catalog.path, paths.key.path, "ci-1", scratch.appendingPathComponent("bad.json").path]).status != 0,
+               "The packager signed a schema 2 catalog")
+    try expect(try run(["verify-catalog", paths.envelope.path, repositoryKeys().path]).status != 0, "The packager accepted an unknown key")
+}
+
+private func repositoryKeys() -> URL {
+    URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("DevStackApp/Resources/trusted-runtime-keys.json")
 }

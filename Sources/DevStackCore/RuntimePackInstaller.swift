@@ -116,8 +116,11 @@ public struct RuntimePackInstaller: Sendable {
     }
 
     /// Downloads, checks and installs one pack. `progress` receives the bytes
-    /// downloaded so far.
-    public func install(_ pin: RuntimePackPin, progress: (@Sendable (Int64) -> Void)? = nil) async throws {
+    /// downloaded so far; `beforeSwap` runs once the new pack has passed every
+    /// check, right before it replaces the installed one (for example to stop
+    /// the services that run from it).
+    public func install(_ pin: RuntimePackPin, progress: (@Sendable (Int64) -> Void)? = nil,
+                        beforeSwap: (@Sendable () async -> Void)? = nil) async throws {
         guard pin.url.scheme == "https" || (allowsFileURLs && pin.url.isFileURL) else {
             throw RuntimePackInstallError.insecureURL(pin.url.absoluteString)
         }
@@ -141,6 +144,7 @@ public struct RuntimePackInstaller: Sendable {
         try JSONEncoder().encode(pin).write(to: installed.appendingPathComponent(Self.markerName))
 
         // Swap only after everything passed; the previous version is removed last.
+        await beforeSwap?()
         let destination = runtimes.appendingPathComponent(pin.id, isDirectory: true)
         let previous = work.appendingPathComponent("previous", isDirectory: true)
         if fileManager.fileExists(atPath: destination.path) {

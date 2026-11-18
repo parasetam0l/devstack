@@ -149,24 +149,46 @@ extension AppModel {
         do { order = try runtimePackCatalog.installationOrder(for: ids).filter { runtimePackStatus($0) != .installed } }
         catch { return error.localizedDescription }
         guard !order.isEmpty else { return nil }
-        // Replacing a runtime under running services would mix versions.
-        if hasRunningServices, order.contains(where: { runtimePackStatus($0) == .updateAvailable }) {
-            return "Stop the stack before updating runtimes."
-        }
+        // Replacing a runtime under running services would mix versions: the
+        // services that use it stop first and start again afterwards, on the
+        // new pack or, when the install failed, on the old one, which the
+        // installer leaves in place until the new one is verified.
+        let replacing = Set(order.filter { runtimePackStatus($0) == .updateAvailable }.map(\.id))
+        let affected = runningServices(using: replacing)
         isBusy = true
-        defer { isBusy = false; runtimePackProgress = nil }
+        let failure = await performRuntimePackInstall(order, installer: installer, stoppingBeforeSwap: affected, for: replacing)
+        isBusy = false
+        runtimePackProgress = nil
+        guard !affected.isEmpty else { return failure }
+        await refreshServiceStates()
+        // Web servers last: starting one also starts the PHP versions it needs.
+        let isWebServer: (ServiceKind) -> Bool = { $0 == .apache || $0 == .nginx }
+        for service in affected.sorted(by: { !isWebServer($0) && isWebServer($1) }) where !serviceIsRunning(service) {
+            await startService(service)
+        }
+        return failure
+    }
+
+    /// Installs `order`; the services in `services` stop only once a pack in
+    /// `replacing` has downloaded and verified, so they keep running meanwhile.
+    private func performRuntimePackInstall(_ order: [RuntimePackPin], installer: RuntimePackInstaller,
+                                           stoppingBeforeSwap services: [ServiceKind], for replacing: Set<String>) async -> String? {
         let total = order.reduce(0) { $0 + $1.size }
         var completed: Int64 = 0
         for (index, pin) in order.enumerated() {
             runtimePackProgress = RuntimePackProgress(packName: pin.displayName, index: index + 1, count: order.count, completedBytes: completed, totalBytes: total)
             let base = completed
             do {
-                try await installer.install(pin) { [weak self] bytes in
+                let supervisor = self.supervisor
+                let stopping = replacing.contains(pin.id) ? services : []
+                try await installer.install(pin, progress: { [weak self] bytes in
                     Task { @MainActor in
                         guard let self, self.runtimePackProgress?.packName == pin.displayName else { return }
                         self.runtimePackProgress?.completedBytes = base + bytes
                     }
-                }
+                }, beforeSwap: {
+                    for service in stopping { await supervisor.stop(service) }
+                })
             } catch {
                 await refreshRuntimeInventory()
                 return "\(pin.displayName): \(error.localizedDescription)"
@@ -223,6 +245,13 @@ struct RuntimesView: View {
                 Banner(symbol: "shippingbox", title: "This build bundles its runtimes",
                        detail: "Runtimes come with this copy of DevStack. Later versions download them here instead.", tint: .secondary)
             } else {
+                Panel {
+                    SettingRow(label: "Runtime updates", detail: updateStatus) {
+                        if model.isCheckingRuntimeCatalog { ProgressView().controlSize(.small) }
+                        Button("Check for Runtime Updates") { Task { await model.checkForRuntimeUpdates() } }
+                            .disabled(model.isCheckingRuntimeCatalog)
+                    }
+                }
                 ForEach(Array(RuntimePackGroup.allCases.enumerated()), id: \.element) { index, group in
                     let packs = model.runtimePackCatalog.packs(in: group)
                     if !packs.isEmpty {
@@ -251,6 +280,18 @@ struct RuntimesView: View {
         } message: { _ in
             Text("Its databases and settings stay. You can install it again at any time.")
         }
+    }
+
+    /// The last check's result and when it ran.
+    private var updateStatus: String {
+        if let check = model.runtimeCatalogCheck {
+            let when = check.date.formatted(.relative(presentation: .named))
+            return check.failed ? "Couldn't check \(when): \(check.message)" : "\(check.message) Checked \(when)."
+        }
+        if let lastChecked = model.runtimeCatalogState.lastChecked {
+            return "Last checked \(lastChecked.formatted(.relative(presentation: .named)))."
+        }
+        return "Newer runtime builds are offered here; nothing installs until you choose Update."
     }
 
     private func chooseRuntimePack() {

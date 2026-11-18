@@ -17,6 +17,8 @@ private enum PackagerError: LocalizedError {
                    DevStackRuntimePackager verify PACK.devstack-runtime TRUSTED_KEYS.json [TEAM_ID]
                    DevStackRuntimePackager install PACK.devstack-runtime TRUSTED_KEYS.json RUNTIMES_DIRECTORY [TEAM_ID]
                    DevStackRuntimePackager generate-key KEY_ID PRIVATE_KEY_OUTPUT PUBLIC_KEYS_OUTPUT.json
+                   DevStackRuntimePackager sign-catalog CATALOG.json RAW_ED25519_KEY KEY_ID OUTPUT_ENVELOPE.json
+                   DevStackRuntimePackager verify-catalog ENVELOPE.json TRUSTED_KEYS.json
             """
         case .invalidTrustedKeys:
             "The trusted keys file must map key IDs to 32-byte base64 Ed25519 public keys under \"keys\"."
@@ -31,6 +33,14 @@ private enum PackagerError: LocalizedError {
 @main
 enum DevStackRuntimePackager {
     static func main() throws {
+        if ["sign-catalog", "verify-catalog"].contains(CommandLine.arguments.dropFirst().first) {
+            // The workflow reads these messages, so they print plainly.
+            do { try catalogCommand() } catch {
+                FileHandle.standardError.write(Data("error: \(error.localizedDescription)\n".utf8))
+                exit(1)
+            }
+            return
+        }
         if (4...5).contains(CommandLine.arguments.count), CommandLine.arguments[1] == "verify" {
             try verify(
                 pack: URL(fileURLWithPath: CommandLine.arguments[2]),
@@ -131,6 +141,37 @@ enum DevStackRuntimePackager {
         print(output.path)
     }
 
+    private static func catalogCommand() throws {
+        if CommandLine.arguments.count == 6, CommandLine.arguments[1] == "sign-catalog" {
+            // Signs the catalog bytes as they are; refuses an invalid catalog.
+            let keyData = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[3]))
+            guard keyData.count == 32 else { throw PackagerError.invalidPrivateKey }
+            let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: keyData)
+            let catalog = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2]))
+            let envelope = try RuntimeCatalog.sign(payload: catalog, privateKey: privateKey, keyID: CommandLine.arguments[4])
+            let output = URL(fileURLWithPath: CommandLine.arguments[5])
+            try AtomicFileWriter.write(envelope, to: output, permissions: 0o644)
+            print(output.path)
+            return
+        }
+        if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "verify-catalog" {
+            let keys = try trustedKeys(URL(fileURLWithPath: CommandLine.arguments[3]))
+            let catalog = try RuntimeCatalog.verify(envelope: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2])), trustedKeys: keys)
+            print(catalog.sequence)
+            return
+        }
+        throw PackagerError.usage
+    }
+
+    private static func trustedKeys(_ url: URL) throws -> [String: Data] {
+        struct TrustedKeys: Decodable { var keys: [String: String] }
+        let document = try JSONDecoder().decode(TrustedKeys.self, from: Data(contentsOf: url))
+        return try document.keys.mapValues { encoded -> Data in
+            guard let data = Data(base64Encoded: encoded), data.count == 32 else { throw PackagerError.invalidTrustedKeys }
+            return data
+        }
+    }
+
     private static func generateKey(keyID: String, privateKeyURL: URL, publicKeyURL: URL) throws {
         let key = Curve25519.Signing.PrivateKey()
         try AtomicFileWriter.write(key.rawRepresentation, to: privateKeyURL, permissions: 0o600)
@@ -165,12 +206,7 @@ enum DevStackRuntimePackager {
     }
 
     private static func verify(pack: URL, trustedKeys: URL, teamID: String?, into installation: URL? = nil) throws {
-        struct TrustedKeys: Decodable { var keys: [String: String] }
-        let document = try JSONDecoder().decode(TrustedKeys.self, from: Data(contentsOf: trustedKeys))
-        let keys = try document.keys.mapValues { encoded -> Data in
-            guard let data = Data(base64Encoded: encoded), data.count == 32 else { throw PackagerError.invalidTrustedKeys }
-            return data
-        }
+        let keys = try Self.trustedKeys(trustedKeys)
         let destination = installation ?? FileManager.default.temporaryDirectory.appendingPathComponent("devstack-verify-\(UUID().uuidString)", isDirectory: true)
         defer { if installation == nil { try? FileManager.default.removeItem(at: destination) } }
         let verifier = RuntimePackVerifier(trustedPublicKeys: keys, requiredTeamID: teamID)

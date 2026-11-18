@@ -34,6 +34,10 @@ public struct DevStackPaths: Sendable {
     public var generatedPHP: URL { generated.appendingPathComponent("PHP", isDirectory: true) }
     public var phpMyAdmin: URL { applicationSupport.appendingPathComponent("phpMyAdmin", isDirectory: true) }
     public var importedRuntimes: URL { applicationSupport.appendingPathComponent("Runtimes", isDirectory: true) }
+    /// The last accepted signed runtime catalog, re-verified at launch.
+    public var runtimeCatalog: URL { applicationSupport.appendingPathComponent("runtime-catalog.json") }
+    /// Highest accepted catalog sequence and when the catalog was last checked.
+    public var runtimeCatalogState: URL { applicationSupport.appendingPathComponent("runtime-catalog-state.json") }
 
     /// An installed runtime pack, or the copy bundled with the app.
     public func runtimeDirectory(_ id: String) -> URL {
