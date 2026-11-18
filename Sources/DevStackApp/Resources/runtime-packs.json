@@ -2,17 +2,17 @@
   "packs": [
     {
       "contents": [],
-      "id": "adminer-6.2.0",
+      "id": "adminer-6.3.0",
       "minimumMacOS": "15.0",
-      "name": "adminer-6.2.0-r1",
+      "name": "adminer-6.3.0-r1",
       "packRevision": 1,
       "requires": [
         "php-8.5"
       ],
-      "sha256": "d7f1aef431456e619a8dc575efb6d2fa57c4a5a1577ce365ab757e7e5225de37",
-      "size": 181761,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/adminer-6.2.0-r1/adminer-6.2.0-r1.devstack-runtime",
-      "version": "6.2.0"
+      "sha256": "b1bc770a468e20fc56681102a8c1978ba221e757f4e867f205531d3af0f849c6",
+      "size": 185192,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/adminer-6.3.0-r1/adminer-6.3.0-r1.devstack-runtime",
+      "version": "6.3.0"
     },
     {
       "contents": [
@@ -20,53 +20,53 @@
       ],
       "id": "apache-2.4",
       "minimumMacOS": "15.0",
-      "name": "apache-2.4-2.4.69-r1",
+      "name": "apache-2.4-2.4.71-r1",
       "packRevision": 1,
       "requires": [
         "openssl-3.5"
       ],
-      "sha256": "4711be301377a6ee72a644cc464d15637373f2a95064d4ccae47204051a1dd22",
-      "size": 14009050,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/apache-2.4-2.4.69-r1/apache-2.4-2.4.69-r1.devstack-runtime",
-      "version": "2.4.69"
+      "sha256": "52946ba92d7e8584d3eb6011f4f7322b310546027a11320c1482166f6a0cb4ab",
+      "size": 13987636,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/apache-2.4-2.4.71-r1/apache-2.4-2.4.71-r1.devstack-runtime",
+      "version": "2.4.71"
     },
     {
       "contents": [],
-      "id": "composer-2.10.3",
+      "id": "composer-2.11.2",
       "minimumMacOS": "15.0",
-      "name": "composer-2.10.3-r1",
+      "name": "composer-2.11.2-r1",
       "packRevision": 1,
       "requires": [
         "php-8.5"
       ],
-      "sha256": "9417e475c3b4a2c261efe2b74a68419cbf43f9bb18b8763b5fb48ef2240efe14",
-      "size": 832555,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/composer-2.10.3-r1/composer-2.10.3-r1.devstack-runtime",
-      "version": "2.10.3"
+      "sha256": "b836136db585eef11ec0fd1bebe80d093802790f85597d12f831bb1e6988956e",
+      "size": 878711,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/composer-2.11.2-r1/composer-2.11.2-r1.devstack-runtime",
+      "version": "2.11.2"
     },
     {
       "contents": [],
       "id": "imagemagick-7.1",
       "minimumMacOS": "15.0",
-      "name": "imagemagick-7.1-7.1.2-34-r1",
+      "name": "imagemagick-7.1-7.1.2-36-r1",
       "packRevision": 1,
       "requires": [],
-      "sha256": "f7c740d9aab946a58e592fc54528ab1ab5f9eb96583d459d2266055b40cbf644",
-      "size": 3784874,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/imagemagick-7.1-7.1.2-34-r1/imagemagick-7.1-7.1.2-34-r1.devstack-runtime",
-      "version": "7.1.2-34"
+      "sha256": "2f9b90e0ad2bcce7367a79b90c7df0e3165a2418bf832c8ce98e14eca1a55e46",
+      "size": 3799055,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/imagemagick-7.1-7.1.2-36-r1/imagemagick-7.1-7.1.2-36-r1.devstack-runtime",
+      "version": "7.1.2-36"
     },
     {
       "contents": [],
-      "id": "mailpit-1.32.0",
+      "id": "mailpit-1.34.0",
       "minimumMacOS": "15.0",
-      "name": "mailpit-1.32.0-r1",
+      "name": "mailpit-1.34.0-r1",
       "packRevision": 1,
       "requires": [],
-      "sha256": "a772c7f7b43308516b5b816a12e32399a02b2810be2d298105d751d497336dce",
-      "size": 9805715,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/mailpit-1.32.0-r1/mailpit-1.32.0-r1.devstack-runtime",
-      "version": "1.32.0"
+      "sha256": "7097890c3f29f485b758d11d1f383f3df0047a603b12fdafcfe0d4fff6aaed99",
+      "size": 10314713,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/mailpit-1.34.0-r1/mailpit-1.34.0-r1.devstack-runtime",
+      "version": "1.34.0"
     },
     {
       "contents": [
@@ -138,15 +138,15 @@
       ],
       "id": "php-7.4",
       "minimumMacOS": "15.0",
-      "name": "php-7.4-7.4.33-r2",
-      "packRevision": 2,
+      "name": "php-7.4-7.4.33-r3",
+      "packRevision": 3,
       "requires": [
         "imagemagick-7.1",
         "openssl-3.5"
       ],
-      "sha256": "806bef71446d86d3e09efe93fefce3f6e7ee7f414a8b751b27aec384ea0570de",
-      "size": 35418280,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-7.4-7.4.33-r2/php-7.4-7.4.33-r2.devstack-runtime",
+      "sha256": "3c2ec4dee95947c89c947b203ec949bdffbf7d6c6937e5e068f0df5488e6ed0c",
+      "size": 35432194,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-7.4-7.4.33-r3/php-7.4-7.4.33-r3.devstack-runtime",
       "version": "7.4.33"
     },
     {
@@ -160,15 +160,15 @@
       ],
       "id": "php-8.0",
       "minimumMacOS": "15.0",
-      "name": "php-8.0-8.0.30-r1",
-      "packRevision": 1,
+      "name": "php-8.0-8.0.30-r2",
+      "packRevision": 2,
       "requires": [
         "imagemagick-7.1",
         "openssl-3.5"
       ],
-      "sha256": "e29efd6e30e4232a808016e2e8e94830126414660cfd633fa701f26d627bd3c0",
-      "size": 35776948,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.0-8.0.30-r1/php-8.0-8.0.30-r1.devstack-runtime",
+      "sha256": "eb9e5a1eef081cd5aaffb4ea539b112e2237797aae6037922b3180dd73614022",
+      "size": 35791418,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.0-8.0.30-r2/php-8.0-8.0.30-r2.devstack-runtime",
       "version": "8.0.30"
     },
     {
@@ -182,15 +182,15 @@
       ],
       "id": "php-8.1",
       "minimumMacOS": "15.0",
-      "name": "php-8.1-8.1.34-r1",
-      "packRevision": 1,
+      "name": "php-8.1-8.1.34-r2",
+      "packRevision": 2,
       "requires": [
         "imagemagick-7.1",
         "openssl-3.5"
       ],
-      "sha256": "0573f2e2cade7ad6df1be6f1e4bc3edce244a0725eea135387d5afb97426016b",
-      "size": 36711742,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.1-8.1.34-r1/php-8.1-8.1.34-r1.devstack-runtime",
+      "sha256": "f2944848a04b7fa10d2eb9af50d00f5705682243e30b300be718d28475501967",
+      "size": 36726332,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.1-8.1.34-r2/php-8.1-8.1.34-r2.devstack-runtime",
       "version": "8.1.34"
     },
     {
@@ -204,15 +204,15 @@
       ],
       "id": "php-8.2",
       "minimumMacOS": "15.0",
-      "name": "php-8.2-8.2.35-r1",
-      "packRevision": 1,
+      "name": "php-8.2-8.2.35-r2",
+      "packRevision": 2,
       "requires": [
         "imagemagick-7.1",
         "openssl-3.5"
       ],
-      "sha256": "058b2d8be11f9baf99c027a69380e780bb54f7e28246132e54e18cf74ba00364",
-      "size": 37249357,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.2-8.2.35-r1/php-8.2-8.2.35-r1.devstack-runtime",
+      "sha256": "1da84d83f3b9f2bc0c9a3bd4dfe19a798ecce1ad83f05d69b1db8fb433360469",
+      "size": 37263876,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.2-8.2.35-r2/php-8.2-8.2.35-r2.devstack-runtime",
       "version": "8.2.35"
     },
     {
@@ -226,15 +226,15 @@
       ],
       "id": "php-8.3",
       "minimumMacOS": "15.0",
-      "name": "php-8.3-8.3.36-r1",
-      "packRevision": 1,
+      "name": "php-8.3-8.3.36-r2",
+      "packRevision": 2,
       "requires": [
         "imagemagick-7.1",
         "openssl-3.5"
       ],
-      "sha256": "f5462538db025ec34f18b21553aaf417e3dfc18f04a70f08fcedb51abdba7793",
-      "size": 37616931,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.3-8.3.36-r1/php-8.3-8.3.36-r1.devstack-runtime",
+      "sha256": "8cc52ad9bbc16dd0eb9ca0b21bd830bcc54db4f5dc74409daaeb61770c63ef40",
+      "size": 37631377,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.3-8.3.36-r2/php-8.3-8.3.36-r2.devstack-runtime",
       "version": "8.3.36"
     },
     {
@@ -248,15 +248,15 @@
       ],
       "id": "php-8.4",
       "minimumMacOS": "15.0",
-      "name": "php-8.4-8.4.27-r1",
-      "packRevision": 1,
+      "name": "php-8.4-8.4.27-r2",
+      "packRevision": 2,
       "requires": [
         "imagemagick-7.1",
         "openssl-3.5"
       ],
-      "sha256": "bf2858aecd3acd68f3b47d4473a81a41a2317a5c7172b36defaf52cda1cf272f",
-      "size": 40773979,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.4-8.4.27-r1/php-8.4-8.4.27-r1.devstack-runtime",
+      "sha256": "803fe76c1d744673e9d73711fda3f355ebd34041660ba9720878e195ba607438",
+      "size": 40789171,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.4-8.4.27-r2/php-8.4-8.4.27-r2.devstack-runtime",
       "version": "8.4.27"
     },
     {
@@ -270,15 +270,15 @@
       ],
       "id": "php-8.5",
       "minimumMacOS": "15.0",
-      "name": "php-8.5-8.5.12-r1",
-      "packRevision": 1,
+      "name": "php-8.5-8.5.12-r2",
+      "packRevision": 2,
       "requires": [
         "imagemagick-7.1",
         "openssl-3.5"
       ],
-      "sha256": "bd72529ca04d290dc7db4fe6e8119151f73f98b17dc0ae4ece347aeeb2fcd55e",
-      "size": 43512202,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.5-8.5.12-r1/php-8.5-8.5.12-r1.devstack-runtime",
+      "sha256": "1cf3f198b6ad02dc2d8cae9cc13d33c2a929484ae6dfc0f581a4cb7e36bd9a60",
+      "size": 43527154,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/php-8.5-8.5.12-r2/php-8.5-8.5.12-r2.devstack-runtime",
       "version": "8.5.12"
     },
     {
@@ -301,15 +301,15 @@
       ],
       "id": "postgresql-18",
       "minimumMacOS": "15.0",
-      "name": "postgresql-18-18.6-r3",
-      "packRevision": 3,
+      "name": "postgresql-18-18.7-r1",
+      "packRevision": 1,
       "requires": [
         "openssl-3.5"
       ],
-      "sha256": "5faa933b6474082a60cfccc76622c114fca1f13090141fa073436fde8c20c545",
-      "size": 29850140,
-      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/postgresql-18-18.6-r3/postgresql-18-18.6-r3.devstack-runtime",
-      "version": "18.6"
+      "sha256": "e4d7062b45b2b81680db02e09d20c670dd5aa28494ce02c6832d6653cdd33a2c",
+      "size": 29880162,
+      "url": "https://github.com/parasetam0l/devstack-runtimes/releases/download/postgresql-18-18.7-r1/postgresql-18-18.7-r1.devstack-runtime",
+      "version": "18.7"
     }
   ],
   "schemaVersion": 1

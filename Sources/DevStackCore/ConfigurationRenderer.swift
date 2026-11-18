@@ -352,7 +352,7 @@ public struct ConfigurationRenderer: Sendable {
     public func composerWrapperScript(runtimeID: String = "php-8.5") -> String {
         let php = runtimeDirectory(runtimeID).appendingPathComponent("bin/php").path
         let ini = paths.generatedPHP.appendingPathComponent("\(runtimeID).ini").path
-        let phar = runtimeDirectory("composer-2.10.3").appendingPathComponent("composer.phar").path
+        let phar = runtimeDirectory("composer-2.11.2").appendingPathComponent("composer.phar").path
         let environment = RuntimeEnvironment.services(openssl: runtimeDirectory("openssl-3.5"),
             imageMagick: runtimeDirectory("imagemagick-7.1"), phpConfiguration: paths.generatedPHP)
             .map { "export \($0.key)=\(shellQuote($0.value))" }.sorted().joined(separator: "\n")
@@ -675,7 +675,7 @@ public struct ConfigurationRenderer: Sendable {
         listen.mode = 0600
         pm = ondemand
         pm.max_children = 4
-        chdir = \(runtimeDirectory("adminer-6.2.0").path)
+        chdir = \(runtimeDirectory("adminer-6.3.0").path)
         php_admin_value[display_errors] = Off
         \(databaseToolLimits)
         """

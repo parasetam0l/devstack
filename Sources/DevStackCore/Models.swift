@@ -732,7 +732,7 @@ public enum ServiceKind: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .apache: "apache-2.4"
         case .nginx: "nginx-1.30"
-        case .mailpit: "mailpit-1.32.0"
+        case .mailpit: "mailpit-1.34.0"
         default: rawValue
         }
     }

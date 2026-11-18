@@ -37,7 +37,7 @@ if [[ "${1:-}" == "--check" ]]; then
     /usr/bin/python3 - "$catalog" <<'PY'
 import json, sys
 required = {"openssl-3.5", "imagemagick-7.1", "postgresql-18", "apache-2.4", "nginx-1.30", "mysql-8.4",
-            "php-8.5", "php-8.4", "mailpit-1.32.0", "phpmyadmin-5.2.3", "adminer-6.2.0", "composer-2.10.3"}
+            "php-8.5", "php-8.4", "mailpit-1.34.0", "phpmyadmin-5.2.3", "adminer-6.3.0", "composer-2.11.2"}
 missing = required - {pack["id"] for pack in json.load(open(sys.argv[1]))["packs"]}
 if missing:
     raise SystemExit("Not pinned yet: " + ", ".join(sorted(missing)))

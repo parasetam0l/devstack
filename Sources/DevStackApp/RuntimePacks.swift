@@ -25,8 +25,8 @@ extension RuntimePackPin {
         "openssl-3.5": "OpenSSL", "apache-2.4": "Apache", "nginx-1.30": "Nginx", "php-7.4": "PHP 7.4",
         "php-8.0": "PHP 8.0", "php-8.1": "PHP 8.1", "php-8.2": "PHP 8.2", "php-8.3": "PHP 8.3",
         "php-8.4": "PHP 8.4", "php-8.5": "PHP 8.5", "mysql-5.7": "MySQL 5.7", "mysql-8.4": "MySQL 8.4",
-        "postgresql-18": "PostgreSQL 18", "mailpit-1.32.0": "Mailpit", "phpmyadmin-5.2.3": "phpMyAdmin",
-        "adminer-6.2.0": "Adminer", "composer-2.10.3": "Composer", "imagemagick-7.1": "ImageMagick"
+        "postgresql-18": "PostgreSQL 18", "mailpit-1.34.0": "Mailpit", "phpmyadmin-5.2.3": "phpMyAdmin",
+        "adminer-6.3.0": "Adminer", "composer-2.11.2": "Composer", "imagemagick-7.1": "ImageMagick"
     ]
     var displayName: String { Self.names[id] ?? id }
     var isLegacy: Bool { id == "php-7.4" || id == "php-8.0" || id == "php-8.1" || id == "mysql-5.7" }
@@ -112,8 +112,8 @@ extension AppModel {
     /// The packs the current configuration runs: the tools every stack uses,
     /// the selected web server and databases, and every PHP version in use.
     var runtimePacksInUse: [String] {
-        var ids: Set<String> = ["openssl-3.5", "imagemagick-7.1", "php-8.5", "phpmyadmin-5.2.3", "adminer-6.2.0",
-                                "mailpit-1.32.0", "composer-2.10.3", configuration.selectedWebServer.service.runtimeID,
+        var ids: Set<String> = ["openssl-3.5", "imagemagick-7.1", "php-8.5", "phpmyadmin-5.2.3", "adminer-6.3.0",
+                                "mailpit-1.34.0", "composer-2.11.2", configuration.selectedWebServer.service.runtimeID,
                                 configuration.defaultPHPRuntimeID]
         ids.formUnion(configuration.selectedDatabaseServices.map(\.runtimeID))
         ids.formUnion(configuration.sites.map(\.phpRuntimeID))

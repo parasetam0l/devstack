@@ -115,7 +115,7 @@ extension ConfigurationRenderer {
             return 302 https://$host\(ports.webHTTPS == 443 ? "" : ":\(ports.webHTTPS)")$request_uri;
         }
         """)
-        for (host, runtimeID, pool) in [("phpmyadmin.localhost", "phpmyadmin-5.2.3", "management"), ("adminer.localhost", "adminer-6.2.0", "adminer")] {
+        for (host, runtimeID, pool) in [("phpmyadmin.localhost", "phpmyadmin-5.2.3", "management"), ("adminer.localhost", "adminer-6.3.0", "adminer")] {
             servers.append("""
             server {
                 \(httpsListen)
