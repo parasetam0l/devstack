@@ -12,6 +12,14 @@ private struct RuntimeLockCheck: Decodable {
     var runtimes: [RuntimeManifest]
 }
 
+private extension SiteDefinition {
+    func withOverrides(_ overrides: PHPSiteOverrides) -> SiteDefinition {
+        var site = self
+        site.phpOverrides = overrides
+        return site
+    }
+}
+
 private func expect(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
     guard try condition() else { throw CheckFailure(description: message) }
 }
@@ -172,7 +180,8 @@ enum DevStackCoreChecks {
         try expect(php.contains("[management]"), "PHP management pool was not rendered")
         try expect(php.contains(site.id.uuidString.replacingOccurrences(of: "-", with: "_").lowercased()), "Site PHP pool was not rendered")
         // Sites must be able to override their error handling with ini_set().
-        try expect(php.contains("php_value[display_errors]"), "Site display_errors is not overridable")
+        let ownErrors = try renderer.phpFPMConfiguration(runtimeID: "php-8.5", sites: [site.withOverrides(PHPSiteOverrides(displayErrors: false))])
+        try expect(ownErrors.contains("php_value[display_errors] = Off") && !ownErrors.contains("php_admin_value[display_errors]"), "Site display_errors is not overridable")
         try expect(php.contains("php_value[error_log]"), "Site error_log is not overridable")
         try expect(!php.contains("php_admin_value[display_errors] = On"), "Site display_errors is still forced on")
         for pool in ["[management]", "[adminer]"] {
@@ -192,6 +201,54 @@ enum DevStackCoreChecks {
             _ = try renderer.nginxConfiguration(sites: [bigUploads])
             throw CheckFailure(description: "nginx accepted an unsafe POST limit")
         } catch ConfigurationRendererError.unsafeValue { }
+        // Sites saved before PHP versions had settings follow them where they
+        // still had the old defaults, and keep what they changed.
+        var legacySite = try JSONSerialization.jsonObject(with: JSONEncoder().encode(site)) as! [String: Any]
+        legacySite["phpOverrides"] = ["displayErrors": true, "memoryLimit": "512M", "maxExecutionTime": 120,
+                                      "uploadMaxFilesize": "64M", "postMaxSize": "64M", "maxInputVars": 2000]
+        let legacy = try JSONDecoder().decode(AppConfiguration.self, from: JSONSerialization.data(withJSONObject: ["schemaVersion": 6, "sites": [legacySite]]))
+        try expect(legacy.sites.first?.phpOverrides == PHPSiteOverrides(memoryLimit: "512M"), "Old sites did not start following their PHP version")
+        let current = try JSONDecoder().decode(AppConfiguration.self, from: JSONEncoder().encode(AppConfiguration(sites: [bigUploads.withOverrides(PHPSiteOverrides(postMaxSize: "64M"))])))
+        try expect(current.sites.first?.phpOverrides.postMaxSize == "64M", "A site's own value equal to the old default was dropped")
+
+        let versioned = ConfigurationRenderer(paths: paths, runtimeRoot: paths.builtInRuntimes,
+            phpSettings: ["php-8.5": PHPSettings(uploadMaxFilesize: "300M", postMaxSize: "310M", errorReporting: .noDeprecated, shortOpenTag: true)],
+            phpMyAdminSettings: PHPMyAdminSettings(uploadLimit: "3G", maxRows: 100))
+        let following = site.withOverrides(PHPSiteOverrides())
+        let ownMemory = defaultSite.withOverrides(PHPSiteOverrides(memoryLimit: "1G"))
+        let versionedINI = try versioned.phpINI(runtimeID: "php-8.5", enabledExtensions: [], mailpitBinary: URL(fileURLWithPath: "/tmp/mailpit"))
+        try expect(versionedINI.contains("upload_max_filesize=300M") && versionedINI.contains("post_max_size=310M")
+                   && versionedINI.contains("error_reporting=E_ALL & ~E_DEPRECATED") && versionedINI.contains("short_open_tag=On"),
+                   "PHP version settings did not reach php.ini")
+        let versionedFPM = try versioned.phpFPMConfiguration(runtimeID: "php-8.5", sites: [following, ownMemory], includeManagementPool: true)
+        let followingPool = versionedFPM.components(separatedBy: following.id.uuidString.replacingOccurrences(of: "-", with: "_").lowercased()).last?.components(separatedBy: "\n[").first ?? ""
+        let ownPool = versionedFPM.components(separatedBy: ownMemory.id.uuidString.replacingOccurrences(of: "-", with: "_").lowercased()).last?.components(separatedBy: "\n[").first ?? ""
+        try expect(!followingPool.contains("php_admin_value") && !followingPool.contains("display_errors"), "A site following its PHP version still forces limits")
+        try expect(ownPool.contains("php_admin_value[memory_limit] = 1G") && !ownPool.contains("upload_max_filesize"), "A site's own limit was not forced alone")
+        try expect(versionedFPM.contains("php_admin_value[upload_max_filesize] = 3G"), "phpMyAdmin's upload limit did not reach its pool")
+        let versionedNginx = try versioned.nginxConfiguration(sites: [following, defaultSite])
+        try expect((versionedNginx.components(separatedBy: "server_name example.test;").last ?? "").contains("client_max_body_size 310M;"),
+                   "nginx does not follow a site's PHP version POST limit")
+        try expect(versioned.apacheConfiguration(sites: [following]).contains("LimitRequestBody 0"), "Apache caps uploads below PHP's limit")
+        let versionedPMA = try versioned.phpMyAdminConfiguration(cookieSecret: String(repeating: "a", count: 32))
+        try expect(versionedPMA.contains("$cfg['MaxRows'] = 100;") && versionedPMA.contains("include '\(paths.userPHPMyAdminConfiguration.path)'"),
+                   "phpMyAdmin settings or the user's config were not rendered")
+
+        // The user's own files load after DevStack's settings so they win.
+        try FileManager.default.createDirectory(at: paths.userConfiguration, withIntermediateDirectories: true)
+        try "max_input_time = 300\nupload_max_filesize = 2G\n".write(to: paths.userPHPINI("php-8.5"), atomically: true, encoding: .utf8)
+        try "innodb_log_buffer_size=64M\n".write(to: paths.userMySQLConfiguration(.mysql84), atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: paths.userConfiguration) }
+        let userINI = try versioned.phpINI(runtimeID: "php-8.5", enabledExtensions: [], mailpitBinary: URL(fileURLWithPath: "/tmp/mailpit"))
+        let ownLine = userINI.range(of: "upload_max_filesize = 2G"), devstackLine = userINI.range(of: "upload_max_filesize=300M")
+        try expect(ownLine != nil && devstackLine != nil && devstackLine!.lowerBound < ownLine!.lowerBound, "The user's php.ini lines do not come after DevStack's")
+        try expect(!(try versioned.phpINI(runtimeID: "php-8.4", enabledExtensions: [], mailpitBinary: URL(fileURLWithPath: "/tmp/mailpit"))).contains("max_input_time"),
+                   "One PHP version's own lines reached another")
+        let userCNF = versioned.mysqlConfiguration(engine: .mysql84, baseDirectory: URL(fileURLWithPath: "/tmp/mysql"))
+        try expect(userCNF.hasSuffix("[mysqld]\ninnodb_log_buffer_size=64M\n") || userCNF.contains("[mysqld]\ninnodb_log_buffer_size=64M"),
+                   "The user's my.cnf lines were not loaded last under [mysqld]")
+        try expect(versioned.mysqlConfiguration(engine: .mysql84, baseDirectory: URL(fileURLWithPath: "/tmp/mysql")).contains("max_allowed_packet=64M"), "MySQL settings lost their defaults")
+
         let phpMyAdminConfig = try renderer.phpMyAdminConfiguration(cookieSecret: String(repeating: "a", count: 32))
         try expect(phpMyAdminConfig.contains("['auth_type'] = 'config'") && phpMyAdminConfig.contains("['user'] = 'root'"), "phpMyAdmin does not sign in automatically")
         let adminerWrapper = renderer.adminerWrapperPHP(adminerIndex: URL(fileURLWithPath: "/tmp/adminer/index.php"))
@@ -1145,7 +1202,7 @@ private func migrationChecks() throws {
                && PHPVersionMapping.runtimeID(for: "7.4", available: available) == "php-7.4",
                "PHP versions were mapped wrongly")
     let limits = PHPSettingsImport.overrides(fromPHPINI: "memory_limit=1G\nupload_max_filesize=8M\nmax_execution_time=0\npost_max_size=-1\n")
-    try expect(limits.memoryLimit == "1G" && limits.uploadMaxFilesize == "64M" && limits.maxExecutionTime == 0 && limits.postMaxSize == "-1", "XAMPP's PHP limits were not carried over: \(limits)")
+    try expect(limits.memoryLimit == "1G" && limits.uploadMaxFilesize == nil && limits.maxExecutionTime == 0 && limits.postMaxSize == "-1", "XAMPP's PHP limits were not carried over: \(limits)")
     try expect(MachO.architectures(of: URL(fileURLWithPath: "/usr/bin/true")).contains("arm64"), "Executable architectures were misread")
 
     try expect(MariaDBVersion.majorMinor("10.1.8-MariaDB") == "10.1" && MariaDBVersion.majorMinor("10.4.28-MariaDB-log\n") == "10.4"

@@ -46,6 +46,8 @@ struct PHPView: View {
                 }
             }
 
+            PHPSettingsPanel(runtimeID: runtimeID)
+
             Panel("Configuration", note: "Turning an extension on or off restarts that PHP version.") {
                 ValueRow(label: "php.ini", value: model.paths.generatedPHP.appendingPathComponent("\(runtimeID).ini").path, revealsFile: true)
                 ValueRow(label: "Binary", value: model.runtimeDirectory(runtimeID).appendingPathComponent("bin/php").path)
@@ -149,6 +151,11 @@ struct DatabaseView: View {
                 }
                 .controlSize(.small)
                 .disabled(!webRunning || !running)
+            }
+
+            if !state.postgreSQL, service != nil {
+                MySQLSettingsPanel()
+                PHPMyAdminSettingsPanel()
             }
 
             Panel("Backup and Restore", note: running ? "Importing backs up \(engineName) first." : "Start \(engineName) to export or import SQL.") {

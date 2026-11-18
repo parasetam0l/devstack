@@ -265,13 +265,26 @@ struct SiteEditor: View {
                         }
                     }
                 } }
-                Section("PHP settings") {
-                    TextField("Memory limit", text: $editor.site.phpOverrides.memoryLimit)
-                    TextField("Upload limit", text: $editor.site.phpOverrides.uploadMaxFilesize)
-                    TextField("POST limit", text: $editor.site.phpOverrides.postMaxSize)
-                    Stepper("Execution time: \(editor.site.phpOverrides.maxExecutionTime) s",
-                            value: $editor.site.phpOverrides.maxExecutionTime, in: 1...3600)
-                    Toggle("Display errors", isOn: $editor.site.phpOverrides.displayErrors)
+                let version = model.configuration.php(editor.site.phpRuntimeID)
+                let versionName = editor.site.phpRuntimeID.replacingOccurrences(of: "php-", with: "PHP ")
+                Section {
+                    TextField("Memory limit", text: ownValue($editor.site.phpOverrides.memoryLimit), prompt: Text(version.memoryLimit))
+                    TextField("Upload limit", text: ownValue($editor.site.phpOverrides.uploadMaxFilesize), prompt: Text(version.uploadMaxFilesize))
+                    TextField("POST limit", text: ownValue($editor.site.phpOverrides.postMaxSize), prompt: Text(version.postMaxSize))
+                    TextField("Execution time (s)", text: ownNumber($editor.site.phpOverrides.maxExecutionTime), prompt: Text(String(version.maxExecutionTime)))
+                    Picker("Display errors", selection: $editor.site.phpOverrides.displayErrors) {
+                        Text("Same as \(versionName) (\(version.displayErrors ? "On" : "Off"))").tag(Bool?.none)
+                        Text("On").tag(Bool?.some(true))
+                        Text("Off").tag(Bool?.some(false))
+                    }
+                } header: {
+                    Text("PHP settings")
+                } footer: {
+                    if editor.site.phpOverrides.isValid {
+                        Text("Empty fields use \(versionName)'s settings from the PHP page.")
+                    } else {
+                        Label("Use sizes such as 256M or 1G, and whole seconds.", systemImage: "exclamationmark.circle.fill").foregroundStyle(.red)
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -314,8 +327,23 @@ struct SiteEditor: View {
         } catch { return error.localizedDescription }
     }
 
+    /// A site's own value, where an empty field follows its PHP version.
+    private func ownValue(_ value: Binding<String?>) -> Binding<String> {
+        Binding(get: { value.wrappedValue ?? "" }, set: { text in
+            let trimmed = text.trimmingCharacters(in: .whitespaces).uppercased()
+            value.wrappedValue = trimmed.isEmpty ? nil : trimmed
+        })
+    }
+
+    private func ownNumber(_ value: Binding<Int?>) -> Binding<String> {
+        Binding(get: { value.wrappedValue.map(String.init) ?? "" }, set: { text in
+            let trimmed = text.trimmingCharacters(in: .whitespaces)
+            value.wrappedValue = trimmed.isEmpty ? nil : (Int(trimmed) ?? -1)
+        })
+    }
+
     private var canSave: Bool {
-        !editor.site.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !editor.site.hostname.isEmpty && validationError == nil
+        editor.site.phpOverrides.isValid && !editor.site.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !editor.site.hostname.isEmpty && validationError == nil
             && !editor.site.documentRoot.isEmpty && model.runtimeIsAvailable(editor.site.phpRuntimeID)
     }
 

@@ -124,7 +124,7 @@ extension ConfigurationRenderer {
                 ssl_certificate_key \(try nginxQuote(paths.privateKey(for: host).path));
                 root \(try nginxQuote(host == "adminer.localhost" ? paths.generatedAdminer.path : runtimeDirectory(runtimeID).path));
                 index index.php;
-                client_max_body_size \(Self.databaseToolUploadLimit);
+                client_max_body_size \(phpMyAdminSettings.isValid ? phpMyAdminSettings.uploadLimit : PHPMyAdminSettings().uploadLimit);
                 location / { try_files $uri $uri/ =404; }
                 location ~ /\\. { deny all; }
                 location ~ \\.php$ {
@@ -175,8 +175,8 @@ extension ConfigurationRenderer {
 
     /// A site accepts request bodies up to its PHP POST limit.
     private func bodyLimit(_ site: SiteDefinition) throws -> String {
-        let limit = site.phpOverrides.postMaxSize
-        guard limit.range(of: "^[1-9][0-9]*[KMG]?$", options: .regularExpression) != nil else {
+        let limit = effectivePHP(site).postMaxSize
+        guard PHPSettings.isValidSize(limit) else {
             throw ConfigurationRendererError.unsafeValue(limit)
         }
         return limit

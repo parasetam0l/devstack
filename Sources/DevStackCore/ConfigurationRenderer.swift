@@ -29,6 +29,9 @@ public struct ConfigurationRenderer: Sendable {
     public let mysqlSettings: [String: MySQLSettings]
     /// The MySQL version the web tools sign in to.
     public let selectedDatabase: DatabaseEngine
+    /// php.ini settings per PHP version, keyed by runtime ID.
+    public let phpSettings: [String: PHPSettings]
+    public let phpMyAdminSettings: PHPMyAdminSettings
 
     public init(
         paths: DevStackPaths,
@@ -40,7 +43,9 @@ public struct ConfigurationRenderer: Sendable {
         groupName: String = "staff",
         timeZone: String = TimeZone.current.identifier,
         mysqlSettings: [String: MySQLSettings] = [:],
-        selectedDatabase: DatabaseEngine = .mysql84
+        selectedDatabase: DatabaseEngine = .mysql84,
+        phpSettings: [String: PHPSettings] = [:],
+        phpMyAdminSettings: PHPMyAdminSettings = PHPMyAdminSettings()
     ) {
         self.paths = paths
         self.runtimeRoot = runtimeRoot
@@ -52,6 +57,18 @@ public struct ConfigurationRenderer: Sendable {
         self.timeZone = timeZone
         self.mysqlSettings = mysqlSettings
         self.selectedDatabase = selectedDatabase
+        self.phpSettings = phpSettings
+        self.phpMyAdminSettings = phpMyAdminSettings
+    }
+
+    public func php(_ runtimeID: String) -> PHPSettings { phpSettings[runtimeID] ?? PHPSettings() }
+
+    /// A site's PHP settings: its own values over its version's.
+    public func effectivePHP(_ site: SiteDefinition) -> PHPSettings { site.phpOverrides.applied(to: php(site.phpRuntimeID)) }
+
+    /// The text of a settings file the user owns, or nothing.
+    private func userText(_ file: URL) -> String {
+        (try? String(contentsOf: file, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     private func mysql(_ engine: DatabaseEngine) -> MySQLSettings { mysqlSettings[engine.rawValue] ?? MySQLSettings() }
@@ -129,6 +146,9 @@ public struct ConfigurationRenderer: Sendable {
         EnableSendfile Off
         TraceEnable Off
         ServerTokens Prod
+        # PHP enforces each site's POST limit; Apache's own 1 GB cap would
+        # otherwise stop larger uploads first.
+        LimitRequestBody 0
         ServerSignature Off
 
         <Directory />
@@ -188,6 +208,8 @@ public struct ConfigurationRenderer: Sendable {
         guard enabledExtensions.isSubset(of: ["xdebug", "redis", "imagick", "pgsql", "pdo_pgsql"]) else {
             throw ConfigurationRendererError.unsafeValue("Unknown PHP extension")
         }
+        let php = php(runtimeID)
+        guard php.isValid else { throw ConfigurationRendererError.unsafeValue("PHP \(runtimeID) settings") }
         var settings = enabledExtensions.sorted().map { name in
             let directive = name == "xdebug" ? "zend_extension" : "extension"
             return "\(directive)=\(quote(extensionDirectory.appendingPathComponent("\(name).so").path))"
@@ -207,28 +229,30 @@ public struct ConfigurationRenderer: Sendable {
 
         return """
         ; DevStack writes this file each time PHP starts, so edits here are lost.
-        ; Set memory and upload limits per site on the Sites page; phpMyAdmin and
-        ; Adminer accept uploads up to \(Self.databaseToolUploadLimit).
+        ; Change settings on DevStack's PHP page; your own lines go in
+        ; \(paths.userPHPINI(runtimeID).path)
         [PHP]
         engine=On
-        short_open_tag=Off
+        short_open_tag=\(php.shortOpenTag ? "On" : "Off")
         expose_php=Off
-        display_errors=On
+        display_errors=\(php.displayErrors ? "On" : "Off")
+        error_reporting=\(php.errorReporting.rawValue)
         log_errors=On
         error_log=\(quote(paths.logs.appendingPathComponent("\(runtimeID)-php.log").path))
         date.timezone=\(phpTimeZone)
         openssl.cafile=\(quote(paths.certificates.appendingPathComponent("trusted-roots.pem").path))
         curl.cainfo=\(quote(paths.certificates.appendingPathComponent("trusted-roots.pem").path))
-        memory_limit=256M
-        max_execution_time=120
-        post_max_size=64M
-        upload_max_filesize=64M
+        memory_limit=\(php.memoryLimit)
+        max_execution_time=\(php.maxExecutionTime)
+        post_max_size=\(php.postMaxSize)
+        upload_max_filesize=\(php.uploadMaxFilesize)
+        max_input_vars=\(php.maxInputVars)
         extension_dir=\(quote(extensionDirectory.path))
         sendmail_path=\(quote("\(mailpitBinary.path) sendmail -S 127.0.0.1:\(ports.mailpitSMTPListen)"))
         mysqli.default_port=\(ports.mysqlListen)
         mysqli.default_socket=\(quote(paths.sockets.appendingPathComponent("mysql.sock").path))
         pdo_mysql.default_socket=\(quote(paths.sockets.appendingPathComponent("mysql.sock").path))
-        opcache.enable=1
+        opcache.enable=\(php.opcache ? 1 : 0)
         opcache.enable_cli=0
         opcache.jit=disable
         opcache.jit_buffer_size=0
@@ -237,7 +261,14 @@ public struct ConfigurationRenderer: Sendable {
         pcre.jit=0
 
         \(settings.joined(separator: "\n"))
+        \(userPHPSection(runtimeID))
         """
+    }
+
+    /// The user's own php.ini lines, after DevStack's so they win.
+    private func userPHPSection(_ runtimeID: String) -> String {
+        let text = userText(paths.userPHPINI(runtimeID))
+        return text.isEmpty ? "" : "\n; Your settings from \(paths.userPHPINI(runtimeID).lastPathComponent)\n[PHP]\n\(text)\n"
     }
 
     /// The configured zone when it is a plain IANA identifier, otherwise UTC.
@@ -266,7 +297,10 @@ public struct ConfigurationRenderer: Sendable {
         local-infile=0
         symbolic-links=0
         secure-file-priv=NULL
-        max_allowed_packet=64M
+        max_allowed_packet=\(mysql(engine).maxAllowedPacket)
+        max_connections=\(mysql(engine).maxConnections)
+        innodb_buffer_pool_size=\(mysql(engine).innodbBufferPoolSize)
+        wait_timeout=\(mysql(engine).waitTimeout)
         # Imported dumps and framework migrations create stored functions;
         # with binary logging on, MySQL refuses most of them otherwise.
         log_bin_trust_function_creators=1
@@ -282,6 +316,11 @@ public struct ConfigurationRenderer: Sendable {
             lines.append("sql-mode=\"\(MySQLSettings.sqlMode(mode, for: engine))\"")
         }
         if engine == .mysql84, settings.nativePassword { lines.append("mysql-native-password=ON") }
+        if settings.slowQueryLog {
+            lines += ["slow_query_log=1", "long_query_time=2", "slow_query_log_file=\(paths.logs.appendingPathComponent("\(engine.rawValue)-slow.log").path)"]
+        }
+        let text = userText(paths.userMySQLConfiguration(engine))
+        if !text.isEmpty { lines += ["", "# Your settings from \(paths.userMySQLConfiguration(engine).lastPathComponent)", "[mysqld]", text] }
         return lines.joined(separator: "\n")
     }
 
@@ -506,14 +545,16 @@ public struct ConfigurationRenderer: Sendable {
 
     private func phpPool(_ site: SiteDefinition) throws -> String {
         try requireSafe(site.documentRoot)
-        for value in [site.phpOverrides.memoryLimit, site.phpOverrides.uploadMaxFilesize, site.phpOverrides.postMaxSize] {
-            guard value.range(of: "^[1-9][0-9]*[KMG]?$", options: .regularExpression) != nil else {
-                throw ConfigurationRendererError.unsafeValue(value)
-            }
-        }
-        guard site.phpOverrides.maxExecutionTime >= 0, site.phpOverrides.maxInputVars > 0 else {
-            throw ConfigurationRendererError.unsafeValue("PHP request limits")
-        }
+        let own = site.phpOverrides
+        guard own.isValid else { throw ConfigurationRendererError.unsafeValue("PHP settings of \(site.hostname)") }
+        // Only the site's own values are forced; the rest come from php.ini.
+        var limits: [String] = []
+        if let value = own.displayErrors { limits.append("php_value[display_errors] = \(value ? "On" : "Off")") }
+        if let value = own.memoryLimit { limits.append("php_admin_value[memory_limit] = \(value)") }
+        if let value = own.maxExecutionTime { limits.append("php_admin_value[max_execution_time] = \(value)") }
+        if let value = own.uploadMaxFilesize { limits.append("php_admin_value[upload_max_filesize] = \(value)") }
+        if let value = own.postMaxSize { limits.append("php_admin_value[post_max_size] = \(value)") }
+        if let value = own.maxInputVars { limits.append("php_admin_value[max_input_vars] = \(value)") }
         let poolName = "site_\(site.id.uuidString.replacingOccurrences(of: "-", with: "_").lowercased())"
         return """
         [\(poolName)]
@@ -529,12 +570,7 @@ public struct ConfigurationRenderer: Sendable {
         pm.process_idle_timeout = 10s
         catch_workers_output = yes
         chdir = \(site.documentRoot)
-        php_value[display_errors] = \(site.phpOverrides.displayErrors ? "On" : "Off")
-        php_admin_value[memory_limit] = \(site.phpOverrides.memoryLimit)
-        php_admin_value[max_execution_time] = \(site.phpOverrides.maxExecutionTime)
-        php_admin_value[upload_max_filesize] = \(site.phpOverrides.uploadMaxFilesize)
-        php_admin_value[post_max_size] = \(site.phpOverrides.postMaxSize)
-        php_admin_value[max_input_vars] = \(site.phpOverrides.maxInputVars)
+        \(limits.joined(separator: "\n"))
         php_value[error_log] = \(site.logs.error)
         """
     }
@@ -560,6 +596,10 @@ public struct ConfigurationRenderer: Sendable {
         """
     }
 
+    private func phpSingleQuoted(_ value: String) -> String {
+        value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+    }
+
     public func phpMyAdminConfiguration(cookieSecret: String) throws -> String {
         guard cookieSecret.count == 32, cookieSecret.allSatisfy({ $0.isLetter || $0.isNumber || "+/".contains($0) }) else {
             throw ConfigurationRendererError.unsafeValue("Invalid phpMyAdmin cookie secret")
@@ -576,8 +616,12 @@ public struct ConfigurationRenderer: Sendable {
         $cfg['Servers'][1]['password'] = '\(toolPassword)';
         $cfg['Servers'][1]['AllowNoPassword'] = \(toolPassword.isEmpty ? "true" : "false");
         $cfg['VersionCheck'] = false;
-        // Large imports run to the end instead of stopping after five minutes.
-        $cfg['ExecTimeLimit'] = 0;
+        $cfg['ExecTimeLimit'] = \(max(phpMyAdminSettings.execTimeLimit, 0));
+        $cfg['MaxRows'] = \(min(max(phpMyAdminSettings.maxRows, 1), 10_000));
+        // Your settings, after DevStack's so they win.
+        if (is_readable('\(phpSingleQuoted(paths.userPHPMyAdminConfiguration.path))')) {
+            include '\(phpSingleQuoted(paths.userPHPMyAdminConfiguration.path))';
+        }
         """
     }
 
@@ -637,17 +681,14 @@ public struct ConfigurationRenderer: Sendable {
         """
     }
 
-    /// Largest upload phpMyAdmin and Adminer accept; it matches Apache's
-    /// default request body limit, and nginx allows the same for them.
-    public static let databaseToolUploadLimit = "1G"
-
     /// Database dumps outgrow site limits, and Adminer holds a whole upload in
     /// memory while it imports it.
     private var databaseToolLimits: String {
-        """
-        php_admin_value[memory_limit] = 2G
-        php_admin_value[upload_max_filesize] = \(Self.databaseToolUploadLimit)
-        php_admin_value[post_max_size] = \(Self.databaseToolUploadLimit)
+        let tools = phpMyAdminSettings.isValid ? phpMyAdminSettings : PHPMyAdminSettings()
+        return """
+        php_admin_value[memory_limit] = \(tools.memoryLimit)
+        php_admin_value[upload_max_filesize] = \(tools.uploadLimit)
+        php_admin_value[post_max_size] = \(tools.uploadLimit)
         """
     }
 

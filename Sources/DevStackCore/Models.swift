@@ -221,28 +221,157 @@ public struct RuntimePackManifest: Codable, Hashable, Sendable {
     }
 }
 
-public struct PHPSiteOverrides: Codable, Hashable, Sendable {
-    public var displayErrors: Bool
+/// php.ini settings of one PHP version. Sites use them unless they set
+/// their own value.
+public struct PHPSettings: Codable, Hashable, Sendable {
+    public enum ErrorReporting: String, Codable, CaseIterable, Sendable {
+        case all = "E_ALL"
+        case noDeprecated = "E_ALL & ~E_DEPRECATED"
+        case noNotices = "E_ALL & ~E_DEPRECATED & ~E_NOTICE"
+
+        public var title: String {
+            switch self {
+            case .all: "All"
+            case .noDeprecated: "All but deprecations"
+            case .noNotices: "All but notices and deprecations"
+            }
+        }
+    }
+
     public var memoryLimit: String
-    public var maxExecutionTime: Int
     public var uploadMaxFilesize: String
     public var postMaxSize: String
+    /// Seconds; 0 for no limit.
+    public var maxExecutionTime: Int
     public var maxInputVars: Int
+    public var displayErrors: Bool
+    public var errorReporting: ErrorReporting
+    public var shortOpenTag: Bool
+    public var opcache: Bool
 
-    public init(
-        displayErrors: Bool = true,
-        memoryLimit: String = "256M",
-        maxExecutionTime: Int = 120,
-        uploadMaxFilesize: String = "64M",
-        postMaxSize: String = "64M",
-        maxInputVars: Int = 2_000
-    ) {
+    public init(memoryLimit: String = "256M", uploadMaxFilesize: String = "64M", postMaxSize: String = "64M",
+                maxExecutionTime: Int = 120, maxInputVars: Int = 2_000, displayErrors: Bool = true,
+                errorReporting: ErrorReporting = .all, shortOpenTag: Bool = false, opcache: Bool = true) {
+        self.memoryLimit = memoryLimit
+        self.uploadMaxFilesize = uploadMaxFilesize
+        self.postMaxSize = postMaxSize
+        self.maxExecutionTime = maxExecutionTime
+        self.maxInputVars = maxInputVars
+        self.displayErrors = displayErrors
+        self.errorReporting = errorReporting
+        self.shortOpenTag = shortOpenTag
+        self.opcache = opcache
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case memoryLimit, uploadMaxFilesize, postMaxSize, maxExecutionTime, maxInputVars, displayErrors, errorReporting, shortOpenTag, opcache
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = PHPSettings()
+        self.init(
+            memoryLimit: try values.decodeIfPresent(String.self, forKey: .memoryLimit) ?? defaults.memoryLimit,
+            uploadMaxFilesize: try values.decodeIfPresent(String.self, forKey: .uploadMaxFilesize) ?? defaults.uploadMaxFilesize,
+            postMaxSize: try values.decodeIfPresent(String.self, forKey: .postMaxSize) ?? defaults.postMaxSize,
+            maxExecutionTime: try values.decodeIfPresent(Int.self, forKey: .maxExecutionTime) ?? defaults.maxExecutionTime,
+            maxInputVars: try values.decodeIfPresent(Int.self, forKey: .maxInputVars) ?? defaults.maxInputVars,
+            displayErrors: try values.decodeIfPresent(Bool.self, forKey: .displayErrors) ?? defaults.displayErrors,
+            errorReporting: (try? values.decodeIfPresent(ErrorReporting.self, forKey: .errorReporting)) ?? defaults.errorReporting,
+            shortOpenTag: try values.decodeIfPresent(Bool.self, forKey: .shortOpenTag) ?? defaults.shortOpenTag,
+            opcache: try values.decodeIfPresent(Bool.self, forKey: .opcache) ?? defaults.opcache
+        )
+    }
+
+    /// A php.ini size such as 64M or 1G; -1 (no limit) where `unlimited`.
+    public static func isValidSize(_ value: String, unlimited: Bool = false) -> Bool {
+        (unlimited && value == "-1") || value.range(of: "^[1-9][0-9]*[KMG]?$", options: .regularExpression) != nil
+    }
+
+    public var isValid: Bool {
+        Self.isValidSize(memoryLimit, unlimited: true) && Self.isValidSize(uploadMaxFilesize) && Self.isValidSize(postMaxSize)
+            && maxExecutionTime >= 0 && maxInputVars > 0
+    }
+}
+
+/// A site's own PHP limits; nil follows its PHP version's settings.
+public struct PHPSiteOverrides: Codable, Hashable, Sendable {
+    public var displayErrors: Bool?
+    public var memoryLimit: String?
+    public var maxExecutionTime: Int?
+    public var uploadMaxFilesize: String?
+    public var postMaxSize: String?
+    public var maxInputVars: Int?
+
+    public init(displayErrors: Bool? = nil, memoryLimit: String? = nil, maxExecutionTime: Int? = nil,
+                uploadMaxFilesize: String? = nil, postMaxSize: String? = nil, maxInputVars: Int? = nil) {
         self.displayErrors = displayErrors
         self.memoryLimit = memoryLimit
         self.maxExecutionTime = maxExecutionTime
         self.uploadMaxFilesize = uploadMaxFilesize
         self.postMaxSize = postMaxSize
         self.maxInputVars = maxInputVars
+    }
+
+    /// The version's settings with this site's values in place.
+    public func applied(to version: PHPSettings) -> PHPSettings {
+        var result = version
+        if let displayErrors { result.displayErrors = displayErrors }
+        if let memoryLimit { result.memoryLimit = memoryLimit }
+        if let maxExecutionTime { result.maxExecutionTime = maxExecutionTime }
+        if let uploadMaxFilesize { result.uploadMaxFilesize = uploadMaxFilesize }
+        if let postMaxSize { result.postMaxSize = postMaxSize }
+        if let maxInputVars { result.maxInputVars = maxInputVars }
+        return result
+    }
+
+    public var isValid: Bool {
+        applied(to: PHPSettings()).isValid
+    }
+
+    /// Sites saved before versions had settings stored every limit; the ones
+    /// still on the old defaults now follow their version instead.
+    mutating func followVersionWhereDefault() {
+        let old = PHPSettings()
+        if displayErrors == old.displayErrors { displayErrors = nil }
+        if memoryLimit == old.memoryLimit { memoryLimit = nil }
+        if maxExecutionTime == old.maxExecutionTime { maxExecutionTime = nil }
+        if uploadMaxFilesize == old.uploadMaxFilesize { uploadMaxFilesize = nil }
+        if postMaxSize == old.postMaxSize { postMaxSize = nil }
+        if maxInputVars == old.maxInputVars { maxInputVars = nil }
+    }
+}
+
+/// phpMyAdmin's settings; Adminer shares its upload and memory limits.
+public struct PHPMyAdminSettings: Codable, Hashable, Sendable {
+    public var uploadLimit: String
+    public var memoryLimit: String
+    /// Seconds an import may run; 0 for no limit.
+    public var execTimeLimit: Int
+    public var maxRows: Int
+
+    public init(uploadLimit: String = "1G", memoryLimit: String = "2G", execTimeLimit: Int = 0, maxRows: Int = 25) {
+        self.uploadLimit = uploadLimit
+        self.memoryLimit = memoryLimit
+        self.execTimeLimit = execTimeLimit
+        self.maxRows = maxRows
+    }
+
+    private enum CodingKeys: String, CodingKey { case uploadLimit, memoryLimit, execTimeLimit, maxRows }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = PHPMyAdminSettings()
+        self.init(
+            uploadLimit: try values.decodeIfPresent(String.self, forKey: .uploadLimit) ?? defaults.uploadLimit,
+            memoryLimit: try values.decodeIfPresent(String.self, forKey: .memoryLimit) ?? defaults.memoryLimit,
+            execTimeLimit: try values.decodeIfPresent(Int.self, forKey: .execTimeLimit) ?? defaults.execTimeLimit,
+            maxRows: try values.decodeIfPresent(Int.self, forKey: .maxRows) ?? defaults.maxRows
+        )
+    }
+
+    public var isValid: Bool {
+        PHPSettings.isValidSize(uploadLimit) && PHPSettings.isValidSize(memoryLimit, unlimited: true) && execTimeLimit >= 0 && (1...10_000).contains(maxRows)
     }
 }
 
@@ -343,22 +472,51 @@ public struct MySQLSettings: Codable, Hashable, Sendable {
     /// Loads mysql_native_password on MySQL 8.4, for accounts carried over
     /// from MariaDB with their password hash.
     public var nativePassword: Bool
+    public var maxAllowedPacket: String
+    public var maxConnections: Int
+    public var innodbBufferPoolSize: String
+    /// Seconds an idle connection stays open.
+    public var waitTimeout: Int
+    /// Logs statements slower than two seconds to the version's slow log.
+    public var slowQueryLog: Bool
 
-    public init(rootPassword: String = "root", sqlMode: String? = nil, nativePassword: Bool = false) {
+    public init(rootPassword: String = "root", sqlMode: String? = nil, nativePassword: Bool = false,
+                maxAllowedPacket: String = "64M", maxConnections: Int = 151, innodbBufferPoolSize: String = "128M",
+                waitTimeout: Int = 28_800, slowQueryLog: Bool = false) {
         self.rootPassword = rootPassword
         self.sqlMode = sqlMode
         self.nativePassword = nativePassword
+        self.maxAllowedPacket = maxAllowedPacket
+        self.maxConnections = maxConnections
+        self.innodbBufferPoolSize = innodbBufferPoolSize
+        self.waitTimeout = waitTimeout
+        self.slowQueryLog = slowQueryLog
     }
 
-    private enum CodingKeys: String, CodingKey { case rootPassword, sqlMode, nativePassword }
+    private enum CodingKeys: String, CodingKey {
+        case rootPassword, sqlMode, nativePassword, maxAllowedPacket, maxConnections, innodbBufferPoolSize, waitTimeout, slowQueryLog
+    }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = MySQLSettings()
         self.init(
             rootPassword: try values.decodeIfPresent(String.self, forKey: .rootPassword) ?? "root",
             sqlMode: try values.decodeIfPresent(String.self, forKey: .sqlMode),
-            nativePassword: try values.decodeIfPresent(Bool.self, forKey: .nativePassword) ?? false
+            nativePassword: try values.decodeIfPresent(Bool.self, forKey: .nativePassword) ?? false,
+            maxAllowedPacket: try values.decodeIfPresent(String.self, forKey: .maxAllowedPacket) ?? defaults.maxAllowedPacket,
+            maxConnections: try values.decodeIfPresent(Int.self, forKey: .maxConnections) ?? defaults.maxConnections,
+            innodbBufferPoolSize: try values.decodeIfPresent(String.self, forKey: .innodbBufferPoolSize) ?? defaults.innodbBufferPoolSize,
+            waitTimeout: try values.decodeIfPresent(Int.self, forKey: .waitTimeout) ?? defaults.waitTimeout,
+            slowQueryLog: try values.decodeIfPresent(Bool.self, forKey: .slowQueryLog) ?? defaults.slowQueryLog
         )
+    }
+
+    /// The server settings form's values are ones MySQL accepts.
+    public var isValid: Bool {
+        PHPSettings.isValidSize(maxAllowedPacket) && PHPSettings.isValidSize(innodbBufferPoolSize)
+            && (1...100_000).contains(maxConnections) && (1...31_536_000).contains(waitTimeout)
+            && (sqlMode ?? "").allSatisfy { $0.isLetter || $0 == "_" || $0 == "," }
     }
 
     /// Passwords DevStack writes into PHP, shell and server configuration
@@ -406,7 +564,7 @@ public enum WebServer: String, Codable, CaseIterable, Identifiable, Sendable {
 }
 
 public struct AppConfiguration: Codable, Hashable, Sendable {
-    public static let currentSchemaVersion = 6
+    public static let currentSchemaVersion = 7
 
     public var schemaVersion: Int
     public var sites: [SiteDefinition]
@@ -424,6 +582,9 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
     public var setupWizardCompleted: Bool
     /// Settings per MySQL version, keyed by the engine's raw value.
     public var mysqlSettings: [String: MySQLSettings]
+    /// php.ini settings per PHP version, keyed by runtime ID.
+    public var phpSettings: [String: PHPSettings]
+    public var phpMyAdminSettings: PHPMyAdminSettings
 
     public init(
         schemaVersion: Int = currentSchemaVersion,
@@ -447,7 +608,9 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
         helperNoticeDismissed: Bool = false,
         localNetworkAccess: Bool = false,
         setupWizardCompleted: Bool = false,
-        mysqlSettings: [String: MySQLSettings] = [:]
+        mysqlSettings: [String: MySQLSettings] = [:],
+        phpSettings: [String: PHPSettings] = [:],
+        phpMyAdminSettings: PHPMyAdminSettings = PHPMyAdminSettings()
     ) {
         self.schemaVersion = schemaVersion
         self.sites = sites
@@ -463,6 +626,12 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
         self.localNetworkAccess = localNetworkAccess
         self.setupWizardCompleted = setupWizardCompleted
         self.mysqlSettings = mysqlSettings
+        self.phpSettings = phpSettings
+        self.phpMyAdminSettings = phpMyAdminSettings
+    }
+
+    public func php(_ runtimeID: String) -> PHPSettings {
+        phpSettings[runtimeID] ?? PHPSettings()
     }
 
     public func mysql(_ engine: DatabaseEngine) -> MySQLSettings {
@@ -474,7 +643,7 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, sites, selectedDatabase, selectedPostgreSQL, enabledExtensions, startAtLogin, importedRuntimeIDs, selectedWebServer, defaultPHPRuntimeID, ports, helperNoticeDismissed, localNetworkAccess, setupWizardCompleted, mysqlSettings
+        case schemaVersion, sites, selectedDatabase, selectedPostgreSQL, enabledExtensions, startAtLogin, importedRuntimeIDs, selectedWebServer, defaultPHPRuntimeID, ports, helperNoticeDismissed, localNetworkAccess, setupWizardCompleted, mysqlSettings, phpSettings, phpMyAdminSettings
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -492,7 +661,9 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
             helperNoticeDismissed: try values.decodeIfPresent(Bool.self, forKey: .helperNoticeDismissed) ?? false,
             localNetworkAccess: try values.decodeIfPresent(Bool.self, forKey: .localNetworkAccess) ?? false,
             setupWizardCompleted: try values.decodeIfPresent(Bool.self, forKey: .setupWizardCompleted) ?? false,
-            mysqlSettings: try values.decodeIfPresent([String: MySQLSettings].self, forKey: .mysqlSettings) ?? [:]
+            mysqlSettings: try values.decodeIfPresent([String: MySQLSettings].self, forKey: .mysqlSettings) ?? [:],
+            phpSettings: try values.decodeIfPresent([String: PHPSettings].self, forKey: .phpSettings) ?? [:],
+            phpMyAdminSettings: try values.decodeIfPresent(PHPMyAdminSettings.self, forKey: .phpMyAdminSettings) ?? PHPMyAdminSettings()
         )
         if schemaVersion < 2 {
             for id in ["php-8.4", "php-8.5"] { enabledExtensions[id, default: []].formUnion(["pgsql", "pdo_pgsql"]) }
@@ -505,6 +676,9 @@ public struct AppConfiguration: Codable, Hashable, Sendable {
                     enabledExtensions[id] = ["redis", "imagick", "pgsql", "pdo_pgsql"]
                 }
             }
+        }
+        if schemaVersion < 7 {
+            for index in sites.indices { sites[index].phpOverrides.followVersionWhereDefault() }
         }
         if schemaVersion < Self.currentSchemaVersion { schemaVersion = Self.currentSchemaVersion }
     }

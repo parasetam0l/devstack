@@ -725,7 +725,7 @@ final class MigrationController: ObservableObject {
 
             // Sites.
             update("sites", .running)
-            let overrides = PHPSettingsImport.overrides(fromPHPINI: inventory.phpINI)
+            let overrides = PHPSettingsImport.overrides(fromPHPINI: inventory.phpINI, version: model.configuration.php(phpRuntimeID))
             var sites: [SiteDefinition] = []
             for placement in placed where placement.choice.address == .ownSite {
                 let choice = placement.choice
@@ -743,7 +743,7 @@ final class MigrationController: ObservableObject {
             let localhostSite = model.configuration.sites.first { $0.hostname == "localhost" }
             do {
                 try await model.addImportedSites(sites, localhostPHP: usesLocalhost ? phpRuntimeID : nil,
-                                                 localhostOverrides: usesLocalhost ? PHPSettingsImport.overrides(fromPHPINI: inventory.phpINI, base: localhostSite?.phpOverrides ?? PHPSiteOverrides()) : nil)
+                                                 localhostOverrides: usesLocalhost ? PHPSettingsImport.overrides(fromPHPINI: inventory.phpINI, base: localhostSite?.phpOverrides ?? PHPSiteOverrides(), version: model.configuration.php(phpRuntimeID)) : nil)
                 update("sites", .done, detail: [sites.isEmpty ? nil : "\(sites.count) site\(sites.count == 1 ? "" : "s")",
                                                 usesLocalhost ? "localhost serves the rest" : nil].compactMap { $0 }.joined(separator: "; "))
             } catch {

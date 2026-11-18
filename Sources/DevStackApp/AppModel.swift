@@ -7,6 +7,13 @@ import Network
 import ServiceManagement
 import SwiftUI
 
+enum UserSettingsError: LocalizedError {
+    case invalid(String)
+    var errorDescription: String? {
+        switch self { case .invalid(let output): "The settings were not saved:\n\(output)" }
+    }
+}
+
 enum AppAppearance: String, CaseIterable, Identifiable {
     case system = "System"
     case light = "Light"
@@ -406,31 +413,153 @@ final class AppModel: ObservableObject {
     }
 
     private func applySites(_ sites: [SiteDefinition]) async throws {
+        try await applyConfiguration { $0.sites = sites }
+    }
+
+    /// Changes the configuration, rewrites every generated file and restarts
+    /// what reads them: PHP and the web server, and MySQL when `restartMySQL`.
+    /// `writeFiles` saves the user's own settings files first; a failure puts
+    /// them and the configuration back.
+    private func applyConfiguration(restartMySQL: Bool = false, writeFiles: [URL: String] = [:],
+                                    _ change: (inout AppConfiguration) -> Void) async throws {
         guard !isBusy else { throw CocoaError(.userCancelled) }
         isBusy = true
         defer { isBusy = false }
         let previous = configuration
-        let webRunning = (await supervisor.allStates()).contains { ($0.service == .apache || $0.service == .nginx) && $0.phase == .running }
-        configuration.sites = sites
+        let previousFiles = writeFiles.keys.reduce(into: [URL: String?]()) { $0[$1] = try? String(contentsOf: $1, encoding: .utf8) }
+        let states = await supervisor.allStates()
+        let webRunning = states.contains { ($0.service == .apache || $0.service == .nginx) && $0.phase == .running }
+        let engine = configuration.selectedDatabase
+        let mysqlRunning = restartMySQL && engine != .none && states.contains { $0.service == engine.service && $0.phase == .running }
+        change(&configuration)
+        func restoreFiles() {
+            for (file, text) in previousFiles {
+                if let text { try? AtomicFileWriter.write(text, to: file, permissions: 0o600) } else { try? FileManager.default.removeItem(at: file) }
+            }
+        }
         do {
+            for (file, text) in writeFiles {
+                try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try AtomicFileWriter.write(text, to: file, permissions: 0o600)
+            }
             try generateConfiguration()
+            if restartMySQL, engine != .none { try await validateMySQLConfiguration(engine) }
             if webRunning {
                 try await prepareCertificatesAndPrivilegedState()
                 try await validateWebConfigurations()
                 try await refreshWebServices()
             }
+            if mysqlRunning {
+                await supervisor.stop(engine == .mysql57 ? .mysql57 : .mysql84)
+                try await startDatabase(engine)
+            }
             try await store.save(configuration)
         } catch {
             configuration = previous
+            restoreFiles()
             try? generateConfiguration()
             if webRunning {
                 try? await prepareCertificatesAndPrivilegedState()
                 try? await refreshWebServices()
             }
+            if mysqlRunning, !serviceIsRunning(engine == .mysql57 ? .mysql57 : .mysql84) { try? await startDatabase(engine) }
             await refreshServiceStates()
             throw error
         }
         await refreshServiceStates()
+    }
+
+    /// Saves a PHP version's settings and the user's own php.ini lines.
+    func applyPHPSettings(_ settings: PHPSettings, userINI: String? = nil, runtimeID: String) async throws {
+        guard settings.isValid else { throw ConfigurationRendererError.unsafeValue("PHP settings") }
+        if let userINI { try await validateUserPHPINI(userINI, runtimeID: runtimeID) }
+        try await applyConfiguration(writeFiles: userINI.map { [paths.userPHPINI(runtimeID): $0] } ?? [:]) { $0.phpSettings[runtimeID] = settings }
+    }
+
+    /// Saves the selected MySQL version's settings and the user's my.cnf lines.
+    func applyMySQLSettings(_ settings: MySQLSettings, userConfiguration: String? = nil) async throws {
+        let engine = configuration.selectedDatabase
+        guard engine != .none else { throw DatabaseManagerError.engineNotSelected }
+        guard settings.isValid else { throw ConfigurationRendererError.unsafeValue("MySQL settings") }
+        try await applyConfiguration(restartMySQL: true, writeFiles: userConfiguration.map { [paths.userMySQLConfiguration(engine): $0] } ?? [:]) {
+            $0.mysqlSettings[engine.rawValue] = settings
+        }
+    }
+
+    /// Saves phpMyAdmin's settings and the user's own config lines.
+    func applyPHPMyAdminSettings(_ settings: PHPMyAdminSettings, userConfiguration: String? = nil) async throws {
+        guard settings.isValid else { throw ConfigurationRendererError.unsafeValue("phpMyAdmin settings") }
+        if let userConfiguration { try await validateUserPHPMyAdmin(userConfiguration) }
+        try await applyConfiguration(writeFiles: userConfiguration.map { [paths.userPHPMyAdminConfiguration: $0] } ?? [:]) { $0.phpMyAdminSettings = settings }
+    }
+
+    /// The user's own settings file, or a commented starting point.
+    func userSettingsText(_ file: URL, template: String) -> String {
+        (try? String(contentsOf: file, encoding: .utf8)) ?? template
+    }
+
+    /// Opens a settings file in the Mac's text editor, creating it first.
+    func openInTextEditor(_ file: URL, template: String) {
+        do {
+            if !FileManager.default.fileExists(atPath: file.path) {
+                try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try AtomicFileWriter.write(template, to: file, permissions: 0o600)
+            }
+            let textEdit = URL(fileURLWithPath: "/System/Applications/TextEdit.app")
+            let editor = NSWorkspace.shared.urlForApplication(toOpen: file) ?? textEdit
+            NSWorkspace.shared.open([file], withApplicationAt: editor, configuration: NSWorkspace.OpenConfiguration())
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// PHP parses `text` alone so a typo is caught before PHP restarts.
+    private func validateUserPHPINI(_ text: String, runtimeID: String) async throws {
+        let php = runtimeDirectory(runtimeID).appendingPathComponent("bin/php")
+        try await checkUserFile(text, suffix: "ini") { file in
+            (php, ["-c", file.path, "-r", "exit(0);"])
+        } failed: { result in
+            let output = result.standardError + result.standardOutput
+            return output.contains("syntax error") || output.contains("PHP Warning") ? output : nil
+        }
+    }
+
+    private func validateUserPHPMyAdmin(_ text: String) async throws {
+        let php = runtimeDirectory("php-8.5").appendingPathComponent("bin/php")
+        try await checkUserFile(text, suffix: "php") { file in (php, ["-n", "-l", file.path]) } failed: { result in
+            result.exitCode == 0 ? nil : (result.standardOutput + result.standardError)
+        }
+    }
+
+    /// MySQL 8.4 checks its options before restarting; 5.7 cannot.
+    private func validateMySQLConfiguration(_ engine: DatabaseEngine) async throws {
+        guard engine == .mysql84 else { return }
+        let mysqld = runtimeDirectory(engine.rawValue).appendingPathComponent("bin/mysqld")
+        let arguments = ["--defaults-file=\(paths.generated.appendingPathComponent("\(engine.rawValue).cnf").path)", "--validate-config"]
+        let environment = runtimeEnvironment
+        let runner = runner
+        let result = try await Task.detached { try runner.run(executable: mysqld, arguments: arguments, environment: environment) }.value
+        guard result.exitCode == 0 else { throw UserSettingsError.invalid(Self.settingsErrorLines(result.standardError + result.standardOutput)) }
+    }
+
+    private func checkUserFile(_ text: String, suffix: String, command: (URL) -> (URL, [String]),
+                               failed: @escaping @Sendable (CommandResult) -> String?) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("devstack-settings-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("settings.\(suffix)")
+        try AtomicFileWriter.write(text, to: file, permissions: 0o600)
+        let (executable, arguments) = command(file)
+        let environment = runtimeEnvironment
+        let runner = runner
+        let result = try await Task.detached { try runner.run(executable: executable, arguments: arguments, environment: environment) }.value
+        if let message = failed(result) {
+            throw UserSettingsError.invalid(Self.settingsErrorLines(message.replacingOccurrences(of: file.path, with: "your settings")))
+        }
+    }
+
+    private nonisolated static func settingsErrorLines(_ output: String) -> String {
+        output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.prefix(4).joined(separator: "\n")
     }
 
     private func refreshWebServices() async throws {
@@ -1636,7 +1765,9 @@ final class AppModel: ObservableObject {
             ports: configuration.ports,
             localNetworkAccess: configuration.localNetworkAccess,
             mysqlSettings: configuration.mysqlSettings,
-            selectedDatabase: configuration.selectedDatabase)
+            selectedDatabase: configuration.selectedDatabase,
+            phpSettings: configuration.phpSettings,
+            phpMyAdminSettings: configuration.phpMyAdminSettings)
     }
 
     func siteURL(_ site: SiteDefinition) -> String {

@@ -55,6 +55,11 @@ public struct DevStackPaths: Sendable {
     public var mailpit: URL { applicationSupport.appendingPathComponent("Mailpit", isDirectory: true) }
     public var mailpitDatabase: URL { mailpit.appendingPathComponent("mailpit.db") }
     public var backups: URL { applicationSupport.appendingPathComponent("Backups", isDirectory: true) }
+    /// Settings files the user owns; DevStack loads each after its own.
+    public var userConfiguration: URL { applicationSupport.appendingPathComponent("Config", isDirectory: true) }
+    public func userPHPINI(_ runtimeID: String) -> URL { userConfiguration.appendingPathComponent("\(runtimeID).ini") }
+    public func userMySQLConfiguration(_ engine: DatabaseEngine) -> URL { userConfiguration.appendingPathComponent("\(engine.rawValue).cnf") }
+    public var userPHPMyAdminConfiguration: URL { userConfiguration.appendingPathComponent("phpmyadmin.inc.php") }
 
     public func phpSocket(runtimeID: String, siteID: UUID) -> URL {
         sockets.appendingPathComponent("\(runtimeID.replacingOccurrences(of: "php-", with: "p").replacingOccurrences(of: ".", with: ""))-\(siteID.uuidString.replacingOccurrences(of: "-", with: "").lowercased()).sock")

@@ -523,17 +523,26 @@ public enum PHPVersionMapping {
 public enum PHPSettingsImport {
     /// DevStack's per-site limits raised to XAMPP's where XAMPP allowed more,
     /// so nothing that ran there hits a lower limit.
-    public static func overrides(fromPHPINI text: String?, base: PHPSiteOverrides = PHPSiteOverrides()) -> PHPSiteOverrides {
+    public static func overrides(fromPHPINI text: String?, base: PHPSiteOverrides = PHPSiteOverrides(),
+                                 version: PHPSettings = PHPSettings()) -> PHPSiteOverrides {
         guard let text else { return base }
         let values = INIFile.settings(text).reduce(into: [String: String]()) { $0[$1.key.lowercased()] = $1.value }
+        let current = base.applied(to: version)
         var result = base
-        if let value = values["memory_limit"] { result.memoryLimit = larger(size: value, than: base.memoryLimit) }
-        if let value = values["upload_max_filesize"] { result.uploadMaxFilesize = larger(size: value, than: base.uploadMaxFilesize) }
-        if let value = values["post_max_size"] { result.postMaxSize = larger(size: value, than: base.postMaxSize) }
-        if let value = values["max_execution_time"].flatMap(Int.init) {
-            result.maxExecutionTime = value == 0 || base.maxExecutionTime == 0 ? 0 : max(value, base.maxExecutionTime)
+        // A value is set only where XAMPP allowed more than the site gets now.
+        func raised(_ value: String?, _ now: String) -> String? {
+            guard let value else { return nil }
+            let larger = larger(size: value, than: now)
+            return larger == now ? nil : larger
         }
-        if let value = values["max_input_vars"].flatMap(Int.init) { result.maxInputVars = max(value, base.maxInputVars) }
+        if let value = raised(values["memory_limit"], current.memoryLimit) { result.memoryLimit = value }
+        if let value = raised(values["upload_max_filesize"], current.uploadMaxFilesize) { result.uploadMaxFilesize = value }
+        if let value = raised(values["post_max_size"], current.postMaxSize) { result.postMaxSize = value }
+        if let value = values["max_execution_time"].flatMap(Int.init) {
+            let wanted = value == 0 || current.maxExecutionTime == 0 ? 0 : max(value, current.maxExecutionTime)
+            if wanted != current.maxExecutionTime { result.maxExecutionTime = wanted }
+        }
+        if let value = values["max_input_vars"].flatMap(Int.init), value > current.maxInputVars { result.maxInputVars = value }
         return result
     }
 
