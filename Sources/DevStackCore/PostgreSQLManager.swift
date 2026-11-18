@@ -123,7 +123,9 @@ public struct PostgreSQLManager: Sendable {
 
     public func importSQL(source: URL) throws {
         guard FileManager.default.fileExists(atPath: source.path) else { throw DatabaseManagerError.sourceFileMissing(source.path) }
-        _ = try runner.runChecked(executable: runtime.appendingPathComponent("bin/psql"),
-            arguments: ["-X", "-w", "-d", "template1", "-v", "ON_ERROR_STOP=1"], standardInputFile: source, environment: environment, timeout: 3600)
+        try SQLDumpFile.withPlainSQL(source, runner: runner) { sql in
+            _ = try runner.runChecked(executable: runtime.appendingPathComponent("bin/psql"),
+                arguments: ["-X", "-w", "-d", "template1", "-v", "ON_ERROR_STOP=1"], standardInputFile: sql, environment: environment, timeout: 3600)
+        }
     }
 }

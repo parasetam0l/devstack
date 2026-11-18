@@ -410,6 +410,47 @@ enum DevStackCoreChecks {
         } catch CommandExecutionError.timedOut { }
         try expect(Date().timeIntervalSince(timeoutStart) < 3.5, "Command cleanup exceeded its bounded deadline")
 
+        let dumps = temporary.appendingPathComponent("dumps", isDirectory: true)
+        try FileManager.default.createDirectory(at: dumps, withIntermediateDirectories: true)
+        let dumpText = Data("CREATE TABLE t (id INT);\nINSERT INTO t VALUES (1);\n".utf8)
+        let plainDump = dumps.appendingPathComponent("shop [1].sql")
+        try dumpText.write(to: plainDump)
+        func unpacked(_ file: URL) throws -> (Data, URL) {
+            try SQLDumpFile.withPlainSQL(file) { (try Data(contentsOf: $0), $0) }
+        }
+        func shell(_ arguments: [String]) throws {
+            _ = try ProcessRunner().runChecked(executable: URL(fileURLWithPath: "/usr/bin/env"), arguments: arguments, currentDirectory: dumps)
+        }
+        let plain = try unpacked(plainDump)
+        try expect(plain.0 == dumpText && plain.1 == plainDump, "A plain SQL dump was not imported as it is")
+        try shell(["zip", "-q", "zipped.sql", "shop [1].sql"])
+        try shell(["mkdir", "-p", "__MACOSX"])
+        try Data([0, 1, 2]).write(to: dumps.appendingPathComponent("__MACOSX/._shop [1].sql"))
+        try shell(["zip", "-q", "finder.zip", "shop [1].sql", "__MACOSX/._shop [1].sql"])
+        try shell(["gzip", "-k", "shop [1].sql"])
+        for archive in ["zipped.sql", "finder.zip", "shop [1].sql.gz"] {
+            let (data, staged) = try unpacked(dumps.appendingPathComponent(archive))
+            try expect(data == dumpText, "\(archive) did not unpack to its SQL dump")
+            try expect(!FileManager.default.fileExists(atPath: staged.path), "\(archive) left its unpacked dump behind")
+        }
+        try dumpText.write(to: dumps.appendingPathComponent("other.sql"))
+        try shell(["zip", "-q", "several.zip", "shop [1].sql", "other.sql"])
+        try shell(["zip", "-q", "pictures.zip", "__MACOSX/._shop [1].sql"])
+        try Data([0x89, 0x50, 0x4E, 0x47, 0, 0, 0, 0]).write(to: dumps.appendingPathComponent("image.sql"))
+        let refusals: [(String, SQLDumpFileError)] = [
+            ("several.zip", .severalDumpsInArchive("several.zip", ["other.sql", "shop [1].sql"])),
+            ("pictures.zip", .noDumpInArchive("pictures.zip")),
+            ("image.sql", .notSQL("image.sql")),
+        ]
+        for (file, expected) in refusals {
+            do {
+                _ = try unpacked(dumps.appendingPathComponent(file))
+                throw CheckFailure(description: "\(file) was imported as SQL")
+            } catch let error as SQLDumpFileError {
+                try expect(error == expected, "\(file) was refused for the wrong reason: \(error)")
+            }
+        }
+
         let databaseManager = DatabaseManager(paths: paths, runtimeRoot: paths.builtInRuntimes)
         do {
             _ = try databaseManager.initializeIfNeeded(.none)

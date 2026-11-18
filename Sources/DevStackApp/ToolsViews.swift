@@ -201,7 +201,7 @@ struct DatabaseView: View {
 
     private func chooseImportFile() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: "sql") ?? .plainText]
+        panel.allowedContentTypes = [UTType(filenameExtension: "sql") ?? .plainText, .zip, .gzip]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         if panel.runModal() == .OK, let url = panel.url { state.pendingImport = url; state.confirmingImport = true }

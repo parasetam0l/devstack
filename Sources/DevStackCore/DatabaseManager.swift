@@ -113,13 +113,15 @@ public struct DatabaseManager: Sendable {
         if let database { try validateDatabaseName(database) }
         var arguments = connectionArguments(engine, passwordConfigured: true)
         if let database { arguments.append(database) }
-        _ = try runner.runChecked(
-            executable: client(engine, name: "mysql"),
-            arguments: arguments,
-            standardInputFile: source,
-            environment: passwordEnvironment,
-            timeout: 3_600
-        )
+        try SQLDumpFile.withPlainSQL(source, runner: runner) { sql in
+            _ = try runner.runChecked(
+                executable: client(engine, name: "mysql"),
+                arguments: arguments,
+                standardInputFile: sql,
+                environment: passwordEnvironment,
+                timeout: 3_600
+            )
+        }
     }
 
     public func backupFilename(engine: DatabaseEngine, database: String?, date: Date = Date()) -> String {
