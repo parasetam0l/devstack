@@ -100,7 +100,7 @@ struct RootView: View {
     /// The toolbar's subtitle: what the stack is doing right now.
     private var statusSummary: String {
         if let progress = model.runtimePackProgress {
-            return "Installing \(progress.packName) (\(progress.index) of \(progress.count))"
+            return progress.title
         }
         if model.serviceStates.contains(where: { $0.phase == .failed }) { return "A service needs attention" }
         let running = model.serviceStates.filter { $0.phase == .running }.count
@@ -114,7 +114,7 @@ struct RootView: View {
     private var needsRuntimes: Bool { !model.stackIsRunning && !model.missingRuntimePacks.isEmpty }
 
     private var stackActionTitle: String {
-        if model.runtimePackProgress != nil { return "Installing…" }
+        if let progress = model.runtimePackProgress { return "\(progress.verb)…" }
         if model.isBusy { return "Working…" }
         if needsRuntimes { return "Install Runtimes" }
         return model.stackIsRunning ? "Stop Stack" : "Start Stack"
@@ -128,7 +128,13 @@ struct RootView: View {
 
     private func stackAction() {
         if model.stackIsRunning { Task { await model.stopAll() } }
-        else if needsRuntimes { model.selectedSection = .runtimes }
+        else if needsRuntimes {
+            // Installs right away, like the banner's Install All; the Runtimes
+            // page shows the progress.
+            model.selectedSection = .runtimes
+            let missing = model.missingRuntimePacks.map(\.id)
+            Task { if let message = await model.installRuntimePacks(missing) { model.errorMessage = message } }
+        }
         else { Task { await model.startAll() } }
     }
 

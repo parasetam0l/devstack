@@ -94,7 +94,7 @@ struct RuntimeInstallBanner: View {
 
     var body: some View {
         if let progress = model.runtimePackProgress {
-            Banner(symbol: "arrow.down.circle", title: "Installing \(progress.packName) (\(progress.index) of \(progress.count))",
+            Banner(symbol: "arrow.down.circle", title: progress.title,
                    detail: "\(ByteCountFormatter.string(fromByteCount: progress.completedBytes, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: progress.totalBytes, countStyle: .file))",
                    tint: .accentColor) {
                 ProgressView(value: progress.fraction).frame(width: 140)

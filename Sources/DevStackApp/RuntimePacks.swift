@@ -10,8 +10,13 @@ struct RuntimePackProgress: Equatable {
     var count: Int
     var completedBytes: Int64
     var totalBytes: Int64
+    /// False once the current pack has downloaded and is being checked and installed.
+    var isDownloading = true
 
     var fraction: Double { totalBytes > 0 ? min(1, Double(completedBytes) / Double(totalBytes)) : 0 }
+    /// "Downloading" while the current pack downloads, then "Installing".
+    var verb: String { isDownloading ? "Downloading" : "Installing" }
+    var title: String { "\(verb) \(packName) (\(index) of \(count))" }
 }
 
 enum RuntimePackStatus: Equatable {
@@ -185,6 +190,7 @@ extension AppModel {
                     Task { @MainActor in
                         guard let self, self.runtimePackProgress?.packName == pin.displayName else { return }
                         self.runtimePackProgress?.completedBytes = base + bytes
+                        if bytes >= pin.size { self.runtimePackProgress?.isDownloading = false }
                     }
                 }, beforeSwap: {
                     for service in stopping { await supervisor.stop(service) }
@@ -369,7 +375,7 @@ struct RuntimePackProgressPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Installing \(progress.packName) (\(progress.index) of \(progress.count))")
+            Text(progress.title)
             ProgressView(value: progress.fraction)
             Text("\(ByteCountFormatter.string(fromByteCount: progress.completedBytes, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: progress.totalBytes, countStyle: .file)) · each runtime is verified before it is installed")
                 .font(.caption).foregroundStyle(.secondary)

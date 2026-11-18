@@ -149,7 +149,12 @@ extension AppModel {
             try AtomicFileWriter.write(data, to: paths.runtimeCatalog, permissions: 0o644)
             state.highestSequence = max(state.highestSequence ?? 0, catalog.sequence)
             merge(catalog)
-            found = runtimePackCatalog.packs.filter { runtimePackStatus($0) == .updateAvailable }
+            // A runtime whose ID carries its version (Mailpit, Composer,
+            // Adminer) gets a new ID with each version, so its update shows up
+            // as a pack the stack needs but hasn't installed.
+            let updates = runtimePackCatalog.packs.filter { runtimePackStatus($0) == .updateAvailable }
+            let missing = missingRuntimePacks.filter { pin in !updates.contains { $0.id == pin.id } }
+            found = updates + missing
             let message = switch found?.count ?? 0 {
             case 0: "Your runtimes are up to date."
             case 1: "1 runtime update is available."
