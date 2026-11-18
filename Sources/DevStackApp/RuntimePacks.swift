@@ -248,6 +248,11 @@ struct RuntimesView: View {
                 Panel {
                     SettingRow(label: "Runtime updates", detail: updateStatus) {
                         if model.isCheckingRuntimeCatalog { ProgressView().controlSize(.small) }
+                        let updates = model.runtimePackCatalog.packs.filter { model.runtimePackStatus($0) == .updateAvailable }
+                        if updates.count > 1 {
+                            Button("Update All") { Task { message = await model.installRuntimePacks(updates.map(\.id)) } }
+                                .disabled(model.isBusy)
+                        }
                         Button("Check for Runtime Updates") { Task { await model.checkForRuntimeUpdates() } }
                             .disabled(model.isCheckingRuntimeCatalog)
                     }

@@ -1,3 +1,4 @@
+import AppKit
 import DevStackCore
 import Foundation
 
@@ -65,17 +66,82 @@ extension AppModel {
     func checkForRuntimeUpdatesIfDue() {
         guard !isReviewMode, !bundledRuntimePackCatalog.packs.isEmpty else { return }
         if let lastChecked = runtimeCatalogState.lastChecked, Date().timeIntervalSince(lastChecked) < Self.runtimeCatalogCheckInterval { return }
-        Task { await checkForRuntimeUpdates() }
+        Task {
+            // Like the app updater: a background check speaks up only when it finds something.
+            if let updates = await checkForRuntimeUpdates(), !updates.isEmpty { presentRuntimeUpdates(updates) }
+        }
+    }
+
+    /// Menu command: checks now and always answers, the way Check for Updates… does.
+    func checkForRuntimeUpdatesInteractively() {
+        Task {
+            guard let updates = await checkForRuntimeUpdates() else {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Couldn't check for runtime updates"
+                alert.informativeText = runtimeCatalogCheck?.message ?? "Try again later."
+                alert.addButton(withTitle: "OK")
+                NSApp.activate()
+                alert.runModal()
+                return
+            }
+            presentRuntimeUpdates(updates)
+        }
+    }
+
+    /// Shows what a check found and installs the updates when asked.
+    private func presentRuntimeUpdates(_ updates: [RuntimePackPin]) {
+        let alert = NSAlert()
+        alert.icon = DevStackDesign.icon
+        if updates.isEmpty {
+            alert.messageText = "Your runtimes are up to date!"
+            alert.informativeText = "Every installed runtime is the newest build available."
+            alert.addButton(withTitle: "OK")
+            NSApp.activate()
+            alert.runModal()
+            return
+        }
+        alert.messageText = updates.count == 1 ? "A runtime update is available" : "\(updates.count) runtime updates are available"
+        let lines = updates.map { pin in
+            let installed = runtimePackInstaller?.installedPin(pin.id)?.version
+            return "• \(pin.displayName) \(pin.version)" + (installed.map { $0 == pin.version ? " (new build)" : " (installed \($0))" } ?? "")
+        }
+        let restart = runningServices(using: Set(updates.map(\.id))).isEmpty ? "" : "\n\nServices that use these runtimes restart on the new builds."
+        alert.informativeText = lines.joined(separator: "\n") + restart
+        alert.addButton(withTitle: updates.count == 1 ? "Update" : "Update All")
+        alert.addButton(withTitle: "Show Runtimes")
+        alert.addButton(withTitle: "Later")
+        NSApp.activate()
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            Task {
+                if let failure = await installRuntimePacks(updates.map(\.id)) {
+                    let error = NSAlert()
+                    error.alertStyle = .warning
+                    error.messageText = "Couldn't update the runtimes"
+                    error.informativeText = failure
+                    error.runModal()
+                }
+            }
+        case .alertSecondButtonReturn:
+            showMainWindow()
+            selectedSection = .runtimes
+        default:
+            break
+        }
     }
 
     /// Fetches the signed runtime catalog, keeps it when it verifies, and
     /// shows which packs have updates. Nothing is installed here.
-    func checkForRuntimeUpdates() async {
-        guard !isCheckingRuntimeCatalog else { return }
+    /// Returns the packs with updates, or nil when the check failed.
+    @discardableResult
+    func checkForRuntimeUpdates() async -> [RuntimePackPin]? {
+        guard !isCheckingRuntimeCatalog else { return nil }
         isCheckingRuntimeCatalog = true
         defer { isCheckingRuntimeCatalog = false }
         var state = runtimeCatalogState
         let now = Date()
+        var found: [RuntimePackPin]?
         do {
             let keys = try loadTrustedRuntimeKeys()
             let data = try await Self.fetchRuntimeCatalog(RuntimeCatalog.defaultURL)
@@ -83,11 +149,11 @@ extension AppModel {
             try AtomicFileWriter.write(data, to: paths.runtimeCatalog, permissions: 0o644)
             state.highestSequence = max(state.highestSequence ?? 0, catalog.sequence)
             merge(catalog)
-            let updates = runtimePackCatalog.packs.filter { runtimePackStatus($0) == .updateAvailable }.count
-            let message = switch updates {
+            found = runtimePackCatalog.packs.filter { runtimePackStatus($0) == .updateAvailable }
+            let message = switch found?.count ?? 0 {
             case 0: "Your runtimes are up to date."
             case 1: "1 runtime update is available."
-            default: "\(updates) runtime updates are available."
+            default: "\(found?.count ?? 0) runtime updates are available."
             }
             runtimeCatalogCheck = RuntimeCatalogCheck(date: now, message: message, failed: false)
         } catch {
@@ -95,6 +161,7 @@ extension AppModel {
         }
         state.lastChecked = now
         saveRuntimeCatalogState(state)
+        return found
     }
 
     /// Downloads the envelope over HTTPS, refusing anything above the size cap.

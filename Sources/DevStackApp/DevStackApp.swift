@@ -24,6 +24,8 @@ struct DevStackApp: App {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { AppUpdater.shared.checkForUpdates() }
                     .disabled(!AppUpdater.shared.isAvailable)
+                Button("Check for Runtime Updates…") { model.checkForRuntimeUpdatesInteractively() }
+                    .disabled(model.bundledRuntimePackCatalog.packs.isEmpty || model.isCheckingRuntimeCatalog)
             }
             CommandGroup(replacing: .newItem) {
                 Button("New Site…") { model.requestNewSite() }.keyboardShortcut("n")
@@ -210,6 +212,9 @@ private struct MenuBarView: View {
         Button("Stop Stack") { Task { await model.stopAll() } }
             .disabled(model.isBusy || !model.hasRunningServices)
         Divider()
+        Button("Check for Updates…") { AppUpdater.shared.checkForUpdates() }.disabled(!AppUpdater.shared.isAvailable)
+        Button("Check for Runtime Updates…") { model.checkForRuntimeUpdatesInteractively() }
+            .disabled(model.bundledRuntimePackCatalog.packs.isEmpty || model.isCheckingRuntimeCatalog)
         Button("Settings…") { model.showMainWindow(); model.selectedSection = .settings }
         Button("Quit DevStack") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
